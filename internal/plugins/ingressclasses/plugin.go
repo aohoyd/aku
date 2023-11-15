@@ -1,0 +1,107 @@
+package ingressclasses
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/aohoyd/aku/internal/k8s"
+	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/render"
+	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
+
+var gvr = schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "ingressclasses"}
+
+// Plugin implements plugin.ResourcePlugin for Kubernetes IngressClasses.
+type Plugin struct{}
+
+// New creates a new IngressClass plugin.
+func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+	return &Plugin{}
+}
+
+func (p *Plugin) Name() string                     { return "ingressclasses" }
+func (p *Plugin) ShortName() string                { return "ingressclass" }
+func (p *Plugin) GVR() schema.GroupVersionResource { return gvr }
+func (p *Plugin) IsClusterScoped() bool            { return true }
+
+func (p *Plugin) Columns() []plugin.Column {
+	return []plugin.Column{
+		{Title: "NAME", Flex: true},
+		{Title: "CONTROLLER", Flex: true},
+		{Title: "AGE", Width: 8},
+	}
+}
+
+func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
+	name := obj.GetName()
+
+	controller, _, _ := unstructured.NestedString(obj.Object, "spec", "controller")
+
+	age := render.FormatAge(obj)
+
+	return []string{name, controller, age}
+}
+
+func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
+	return plugin.MarshalYAML(obj)
+}
+
+func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
+	ic, err := toIngressClass(obj)
+	if err != nil {
+		return render.Content{}, fmt.Errorf("converting to IngressClass: %w", err)
+	}
+
+	b := render.NewBuilder()
+
+	// Basic metadata
+	b.KV(render.LEVEL_0, "Name", ic.Name)
+
+	// Labels
+	b.KVMulti(render.LEVEL_0, "Labels", ic.Labels)
+
+	// Annotations
+	b.KVMulti(render.LEVEL_0, "Annotations", ic.Annotations)
+
+	// Controller
+	b.KV(render.LEVEL_0, "Controller", ic.Spec.Controller)
+
+	// Parameters
+	if ic.Spec.Parameters != nil {
+		params := ic.Spec.Parameters
+		b.Section(render.LEVEL_0, "Parameters")
+
+		apiGroup := "<none>"
+		if params.APIGroup != nil {
+			apiGroup = *params.APIGroup
+		}
+		b.KV(render.LEVEL_1, "APIGroup", apiGroup)
+		b.KV(render.LEVEL_1, "Kind", params.Kind)
+		b.KV(render.LEVEL_1, "Name", params.Name)
+
+		if params.Namespace != nil {
+			b.KV(render.LEVEL_1, "Namespace", *params.Namespace)
+		}
+
+		scope := "<none>"
+		if params.Scope != nil {
+			scope = *params.Scope
+		}
+		b.KV(render.LEVEL_1, "Scope", scope)
+	}
+
+	return b.Build(), nil
+}
+
+// toIngressClass converts an unstructured object to a typed networkingv1.IngressClass.
+func toIngressClass(obj *unstructured.Unstructured) (*networkingv1.IngressClass, error) {
+	var ic networkingv1.IngressClass
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.Object, &ic); err != nil {
+		return nil, err
+	}
+	return &ic, nil
+}
