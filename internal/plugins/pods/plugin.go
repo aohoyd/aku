@@ -50,11 +50,13 @@ func (p *Plugin) Columns() []plugin.Column {
 
 func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	name := obj.GetName()
-	status := renderStatus(extractPodPhase(obj))
-	ready := renderReady(obj)
+	phase := extractPodPhase(obj)
+	ready, total := readyCount(obj)
+	status := renderStatus(phase, phase == "Running" && ready < total)
+	readyStr := fmt.Sprintf("%d/%d", ready, total)
 	restarts := extractRestarts(obj)
 	age := render.FormatAge(obj)
-	return []string{name, ready, status, restarts, age}
+	return []string{name, readyStr, status, restarts, age}
 }
 
 func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {

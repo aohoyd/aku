@@ -2503,3 +2503,85 @@ func TestHandleViewLogsNonLoggablePlugin(t *testing.T) {
 		t.Fatal("log mode should not be activated for non-loggable plugin")
 	}
 }
+
+func TestSubstituteVarsParent(t *testing.T) {
+	t.Run("containers plugin resolves PARENT to pod name", func(t *testing.T) {
+		app := newTestApp()
+
+		containersPlugin := &mockPlugin{
+			name: "containers",
+			gvr:  schema.GroupVersionResource{Group: "_ktui", Version: "v1", Resource: "containers"},
+		}
+		plugin.Register(containersPlugin)
+		app.layout.AddSplit(containersPlugin, "default")
+
+		// Build a container object with a synthetic _pod field
+		obj := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "Container",
+				"metadata": map[string]any{
+					"name":      "my-container",
+					"namespace": "default",
+				},
+				"_pod": map[string]any{
+					"metadata": map[string]any{
+						"name":      "my-parent-pod",
+						"namespace": "default",
+					},
+				},
+			},
+		}
+		focused := app.layout.FocusedSplit()
+		focused.SetObjects([]*unstructured.Unstructured{obj})
+
+		got := app.substituteVars("$PARENT")
+		if got != "my-parent-pod" {
+			t.Fatalf("expected $PARENT to resolve to %q, got %q", "my-parent-pod", got)
+		}
+	})
+
+	t.Run("pods plugin resolves PARENT to empty string", func(t *testing.T) {
+		app := newTestApp()
+
+		podsPlugin := &mockPlugin{
+			name: "pods",
+			gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+		}
+		plugin.Register(podsPlugin)
+		app.layout.AddSplit(podsPlugin, "default")
+
+		obj := &unstructured.Unstructured{}
+		obj.SetName("my-pod")
+		obj.SetNamespace("default")
+		focused := app.layout.FocusedSplit()
+		focused.SetObjects([]*unstructured.Unstructured{obj})
+
+		got := app.substituteVars("$PARENT")
+		if got != "" {
+			t.Fatalf("expected $PARENT to resolve to %q for pods, got %q", "", got)
+		}
+	})
+
+	t.Run("deployments plugin resolves PARENT to empty string", func(t *testing.T) {
+		app := newTestApp()
+
+		deploymentsPlugin := &mockPlugin{
+			name: "deployments",
+			gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+		}
+		plugin.Register(deploymentsPlugin)
+		app.layout.AddSplit(deploymentsPlugin, "default")
+
+		obj := &unstructured.Unstructured{}
+		obj.SetName("my-deploy")
+		obj.SetNamespace("default")
+		focused := app.layout.FocusedSplit()
+		focused.SetObjects([]*unstructured.Unstructured{obj})
+
+		got := app.substituteVars("$PARENT")
+		if got != "" {
+			t.Fatalf("expected $PARENT to resolve to %q for deployments, got %q", "", got)
+		}
+	})
+}

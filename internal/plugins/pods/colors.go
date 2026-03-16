@@ -1,25 +1,28 @@
 package pods
 
 import (
-	"fmt"
-
 	"github.com/aohoyd/aku/internal/plugin"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// renderStatus delegates to the shared status color renderer.
-func renderStatus(phase string) string {
+// renderStatus returns the phase string colored for display.
+// When the phase is "Running" and notFullyReady is true, it uses
+// the failed (red) color instead of the running (green) color.
+func renderStatus(phase string, notFullyReady bool) string {
+	if phase == "Running" && notFullyReady {
+		return plugin.StyledFg(phase, plugin.FgFailed)
+	}
 	return plugin.RenderStatus(phase)
 }
 
-// renderReady returns a classic "ready/total" string (e.g. "1/1", "0/3").
-func renderReady(obj *unstructured.Unstructured) string {
+// readyCount returns (ready, total) container counts from the pod object.
+func readyCount(obj *unstructured.Unstructured) (int, int) {
 	containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "containers")
 	total := len(containers)
 
 	containerStatuses, found, _ := unstructured.NestedSlice(obj.Object, "status", "containerStatuses")
 	if !found {
-		return fmt.Sprintf("0/%d", total)
+		return 0, total
 	}
 
 	ready := 0
@@ -33,5 +36,6 @@ func renderReady(obj *unstructured.Unstructured) string {
 			ready++
 		}
 	}
-	return fmt.Sprintf("%d/%d", ready, total)
+	return ready, total
 }
+

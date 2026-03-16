@@ -1420,6 +1420,11 @@ func (a App) substituteVars(cmd string) string {
 				return gvr.Version
 			}
 			return gvr.Group + "/" + gvr.Version
+		case "PARENT":
+			if focused.Plugin().Name() == "containers" {
+				return resolvePodName(focused, selected)
+			}
+			return ""
 		default:
 			return "$" + key
 		}

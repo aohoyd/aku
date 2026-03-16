@@ -25,6 +25,9 @@ func DefaultBindings() []Binding {
 		{Key: "down", Help: "down", Command: "cursor-down"},
 		{Key: "n", Help: "next match", Command: "search-next"},
 		{Key: "N", Help: "prev match", Command: "search-prev"},
+		{Key: "/", Help: "search", Command: "search-open", Visible: true},
+		{Key: "ctrl+/", Help: "filter", Command: "filter-open"},
+		{Key: "|", Help: "filter", Command: "filter-open", Visible: true},
 		{Key: "?", Help: "help", Command: "help"},
 
 		// ── Resource-list scope ──
@@ -38,8 +41,6 @@ func DefaultBindings() []Binding {
 		{Key: "ctrl+d", Help: "delete", Command: "delete", Scope: "resource-list", Visible: true},
 		{Key: "space", Help: "select", Command: "toggle-select", Scope: "resource-list"},
 		{Key: "ctrl+a", Help: "select all", Command: "select-all", Scope: "resource-list"},
-		{Key: "/", Help: "search", Command: "search-open", Scope: "resource-list"},
-		{Key: "ctrl+/", Help: "filter", Command: "filter-open", Scope: "resource-list"},
 		{Key: "shift+left", Help: "scroll left", Command: "list-scroll-left", Scope: "resource-list"},
 		{Key: "shift+right", Help: "scroll right", Command: "list-scroll-right", Scope: "resource-list"},
 		{Key: "pgdown", Help: "page down", Command: "page-down", Scope: "resource-list"},
@@ -93,8 +94,6 @@ func DefaultBindings() []Binding {
 		{Key: "G", Help: "bottom", Command: "cursor-bottom", Scope: "detail-panel"},
 		{Key: "w", Help: "wrap", Command: "toggle-wrap", Scope: "detail-panel", Visible: true},
 		{Key: "r", Help: "refresh", Command: "refresh-detail", Scope: "detail-panel"},
-		{Key: "/", Help: "search", Command: "search-open", Scope: "detail-panel"},
-		{Key: "ctrl+/", Help: "filter", Command: "filter-open", Scope: "detail-panel"},
 		{Key: "left", Help: "back", Command: "exit-detail", Scope: "detail-panel"},
 		{Key: "h", Help: "back", Command: "exit-detail", Scope: "detail-panel"},
 		{Key: "esc", Help: "close/clear", Command: "clear-overlay", Scope: "detail-panel"},
