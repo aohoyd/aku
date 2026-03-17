@@ -65,6 +65,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/go-logr/logr"
 	"k8s.io/klog/v2"
+
+	_ "k8s.io/client-go/plugin/pkg/client/auth"
 )
 
 func main() {
