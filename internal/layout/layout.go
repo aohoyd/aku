@@ -137,6 +137,16 @@ func (l *Layout) FocusPrev() {
 	}
 }
 
+// FocusSplitAt moves focus to the split at the given index.
+func (l *Layout) FocusSplitAt(idx int) {
+	if idx < 0 || idx >= len(l.splits) {
+		return
+	}
+	l.splits[l.focusIdx].Blur()
+	l.focusIdx = idx
+	l.splits[l.focusIdx].Focus()
+}
+
 // FocusedSplit returns a pointer to the focused split's ResourceList.
 func (l *Layout) FocusedSplit() *ui.ResourceList {
 	if len(l.splits) == 0 {

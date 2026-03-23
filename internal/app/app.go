@@ -92,8 +92,14 @@ type App struct {
 	logStreamGen    uint64
 }
 
+// ResourceSpec describes a resource pane to open at startup.
+type ResourceSpec struct {
+	Plugin    plugin.ResourcePlugin
+	Namespace string
+}
+
 // New creates a new App with all dependencies.
-func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *config.Config, pfRegistry *portforward.Registry, helmClient helm.Client) App {
+func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *config.Config, pfRegistry *portforward.Registry, helmClient helm.Client, specs []ResourceSpec, initialDetail *msgs.DetailMode) App {
 	bs := keymap.BindingSet()
 	defaultTimeRange := cfg.LogDefaultTimeRange()
 	defaultSinceSeconds, ok := ui.LookupTimePreset(defaultTimeRange)
@@ -132,18 +138,48 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 	}
 	a.resourcePicker.SetPlugins(entries)
 
-	// Add initial pods split
-	initialNs := "default"
+	// Determine the default namespace
+	defaultNs := "default"
 	if client != nil {
-		initialNs = client.Namespace
+		defaultNs = client.Namespace
 	}
 
-	if p, ok := plugin.ByName("pods"); ok {
-		a.layout.AddSplit(p, initialNs)
-		if client != nil && store != nil {
-			store.Subscribe(p.GVR(), initialNs)
+	// If no specs provided, default to a single pods pane
+	if len(specs) == 0 {
+		if p, ok := plugin.ByName("pods"); ok {
+			specs = []ResourceSpec{{Plugin: p, Namespace: defaultNs}}
 		}
-		a.keyTrie = bs.TrieFor("resources", p.Name())
+	}
+
+	// Add initial splits from specs
+	for i, spec := range specs {
+		ns := spec.Namespace
+		if ns == "" {
+			ns = defaultNs
+		}
+		a.layout.AddSplit(spec.Plugin, ns)
+		if client != nil && store != nil {
+			store.Subscribe(spec.Plugin.GVR(), ns)
+		}
+		if i == 0 {
+			a.keyTrie = bs.TrieFor("resources", spec.Plugin.Name())
+		}
+	}
+
+	// Re-focus first split (AddSplit focuses each newly added split)
+	if len(specs) > 1 {
+		a.layout.FocusSplitAt(0)
+	}
+
+	// Open detail panel if requested via --details flag
+	if initialDetail != nil {
+		if *initialDetail == msgs.DetailLogs {
+			a.layout.SetLogMode(true)
+			a.layout.ShowRightPanel()
+		} else {
+			a.layout.ShowRightPanel()
+			a.layout.RightPanel().SetMode(*initialDetail)
+		}
 	}
 
 	// Set initial status bar hints

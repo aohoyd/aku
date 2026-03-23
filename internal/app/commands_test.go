@@ -45,7 +45,7 @@ func newTestApp() App {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	return New(nil, nil, km, cfg, nil, nil)
+	return New(nil, nil, km, cfg, nil, nil, nil, nil)
 }
 
 func TestSearchOpenCommand(t *testing.T) {
@@ -606,7 +606,7 @@ func TestScopedKeyPodsExecBinding(t *testing.T) {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	app := New(nil, nil, km, cfg, nil, nil)
+	app := New(nil, nil, km, cfg, nil, nil, nil, nil)
 
 	podsPlugin := &mockPlugin{
 		name: "pods",
@@ -629,7 +629,7 @@ func TestScopedKeyDeploymentNoExec(t *testing.T) {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	app := New(nil, nil, km, cfg, nil, nil)
+	app := New(nil, nil, km, cfg, nil, nil, nil, nil)
 
 	deploymentsPlugin := &mockPlugin{
 		name: "deployments",
@@ -1786,7 +1786,7 @@ func TestHandleGotoSelfPopulating(t *testing.T) {
 
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
-	a := New(nil, nil, km, cfg, nil, nil)
+	a := New(nil, nil, km, cfg, nil, nil, nil, nil)
 
 	// Add initial split with pods so goto has a focused split
 	a.layout.AddSplit(podsPlugin, "default")
@@ -1827,7 +1827,7 @@ func TestEnterDetailApiResourcesGoto(t *testing.T) {
 
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
-	a := New(nil, nil, km, cfg, nil, nil)
+	a := New(nil, nil, km, cfg, nil, nil, nil, nil)
 
 	a.layout.AddSplit(gotoPlugin, "default")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{

@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/go-logr/logr v1.4.3
 	github.com/muesli/cancelreader v0.2.2
+	github.com/spf13/cobra v1.10.2
 	github.com/valyala/fastjson v1.6.10
 	golang.org/x/term v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -113,7 +114,6 @@ require (
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xlab/treeprint v1.2.0 // indirect

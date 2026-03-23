@@ -8,10 +8,11 @@ import (
 )
 
 var (
-	mu      sync.RWMutex
-	byName  = make(map[string]ResourcePlugin)
-	byGVR   = make(map[schema.GroupVersionResource]ResourcePlugin)
-	ordered []ResourcePlugin
+	mu          sync.RWMutex
+	byName      = make(map[string]ResourcePlugin)
+	byShortName = make(map[string]ResourcePlugin)
+	byGVR       = make(map[schema.GroupVersionResource]ResourcePlugin)
+	ordered     []ResourcePlugin
 )
 
 // Register adds a plugin to the global registry.
@@ -19,6 +20,9 @@ func Register(p ResourcePlugin) {
 	mu.Lock()
 	defer mu.Unlock()
 	byName[p.Name()] = p
+	if sn := p.ShortName(); sn != "" {
+		byShortName[sn] = p
+	}
 	byGVR[p.GVR()] = p
 	ordered = append(ordered, p)
 }
@@ -32,6 +36,9 @@ func RegisterIfAbsent(p ResourcePlugin) bool {
 		return false
 	}
 	byName[p.Name()] = p
+	if sn := p.ShortName(); sn != "" {
+		byShortName[sn] = p
+	}
 	byGVR[p.GVR()] = p
 	ordered = append(ordered, p)
 	return true
@@ -41,7 +48,10 @@ func RegisterIfAbsent(p ResourcePlugin) bool {
 func ByName(name string) (ResourcePlugin, bool) {
 	mu.RLock()
 	defer mu.RUnlock()
-	p, ok := byName[name]
+	if p, ok := byName[name]; ok {
+		return p, true
+	}
+	p, ok := byShortName[name]
 	return p, ok
 }
 
@@ -77,6 +87,7 @@ func Reset() {
 	mu.Lock()
 	defer mu.Unlock()
 	byName = make(map[string]ResourcePlugin)
+	byShortName = make(map[string]ResourcePlugin)
 	byGVR = make(map[schema.GroupVersionResource]ResourcePlugin)
 	ordered = nil
 }

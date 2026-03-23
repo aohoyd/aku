@@ -29,6 +29,14 @@ func (m *mockPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) 
 func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (render.Content, error) {
 	return render.Content{}, nil
 }
+// mockPluginExplicitShort allows explicit control over the short name.
+type mockPluginExplicitShort struct {
+	mockPlugin
+	shortName string
+}
+
+func (m *mockPluginExplicitShort) ShortName() string { return m.shortName }
+
 func TestRegistryRegisterAndLookup(t *testing.T) {
 	Reset()
 	mock := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
@@ -137,5 +145,64 @@ func TestByKindNoPlugin(t *testing.T) {
 	_, ok := ByKind("apps/v1", "Deployment")
 	if ok {
 		t.Fatal("should not find plugin when none registered for GVR")
+	}
+}
+
+func TestByNameShortNameFallback(t *testing.T) {
+	Reset()
+	mock := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	Register(mock)
+
+	// Look up by short name "po" (derived from name[:2])
+	got, ok := ByName("po")
+	if !ok {
+		t.Fatal("expected to find 'pods' plugin by short name 'po'")
+	}
+	if got.Name() != "pods" {
+		t.Fatalf("expected 'pods', got '%s'", got.Name())
+	}
+}
+
+func TestByNameFullNamePrecedenceOverShortName(t *testing.T) {
+	Reset()
+	// Register plugin A with name "po" (full name matches the short name of plugin B)
+	pluginA := &mockPluginExplicitShort{
+		mockPlugin: mockPlugin{name: "po", gvr: schema.GroupVersionResource{Version: "v1", Resource: "po"}},
+		shortName:  "p",
+	}
+	Register(pluginA)
+
+	// Register plugin B with name "pods", short name "po"
+	pluginB := &mockPluginExplicitShort{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		shortName:  "po",
+	}
+	Register(pluginB)
+
+	// ByName("po") should return pluginA (full name match), not pluginB (short name match)
+	got, ok := ByName("po")
+	if !ok {
+		t.Fatal("expected to find plugin by name 'po'")
+	}
+	if got.Name() != "po" {
+		t.Fatalf("expected full name 'po' to take precedence, got '%s'", got.Name())
+	}
+}
+
+func TestRegisterIfAbsentIndexesShortName(t *testing.T) {
+	Reset()
+	mock := &mockPlugin{name: "services", gvr: schema.GroupVersionResource{Version: "v1", Resource: "services"}}
+	ok := RegisterIfAbsent(mock)
+	if !ok {
+		t.Fatal("expected RegisterIfAbsent to return true for new plugin")
+	}
+
+	// Look up by short name "se" (derived from name[:2])
+	got, ok := ByName("se")
+	if !ok {
+		t.Fatal("expected to find 'services' plugin by short name 'se'")
+	}
+	if got.Name() != "services" {
+		t.Fatalf("expected 'services', got '%s'", got.Name())
 	}
 }
