@@ -9,10 +9,6 @@ func DefaultBindings() []Binding {
 		{Key: "y", Help: "yaml", Command: "view-yaml-focused", Visible: true},
 		{Key: "d", Help: "describe", Command: "view-describe-focused", Visible: true},
 		{Key: "Z", Help: "zoom", Command: "toggle-zoom", Visible: true},
-		{Key: "v", Help: "view", Visible: true, Keys: []Binding{
-			{Key: "y", Help: "yaml", Command: "view-yaml"},
-			{Key: "d", Help: "describe", Command: "view-describe"},
-		}},
 		{Key: "e", Help: "edit", Command: "edit", Visible: true},
 		{Key: "g", Help: "go to", Visible: true, Keys: []Binding{
 			{Key: "g", Help: "top", Command: "cursor-top"},
@@ -57,24 +53,24 @@ func DefaultBindings() []Binding {
 		{Key: "|", Help: "filter", Command: "filter-open", Visible: true},
 		{Key: "?", Help: "help", Command: "help"},
 
-		// ── Resource-list scope ──
-		{Key: "enter", Help: "detail", Command: "enter-detail", Scope: "resource-list"},
-		{Key: "right", Help: "detail", Command: "focus-panel", Scope: "resource-list"},
-		{Key: "tab", Help: "next split", Command: "focus-next", Scope: "resource-list", Visible: true},
-		{Key: "shift+tab", Help: "prev split", Command: "focus-prev", Scope: "resource-list", Visible: true},
-		{Key: "ctrl+f", Help: "page down", Command: "page-down", Scope: "resource-list", Visible: true},
-		{Key: "ctrl+b", Help: "page up", Command: "page-up", Scope: "resource-list", Visible: true},
-		{Key: "G", Help: "bottom", Command: "cursor-bottom", Scope: "resource-list"},
-		{Key: "ctrl+d", Help: "delete", Command: "delete", Scope: "resource-list", Visible: true},
-		{Key: "space", Help: "select", Command: "toggle-select", Scope: "resource-list"},
-		{Key: "ctrl+a", Help: "select all", Command: "select-all", Scope: "resource-list"},
-		{Key: "shift+left", Help: "scroll left", Command: "list-scroll-left", Scope: "resource-list"},
-		{Key: "shift+right", Help: "scroll right", Command: "list-scroll-right", Scope: "resource-list"},
-		{Key: "pgdown", Help: "page down", Command: "page-down", Scope: "resource-list"},
-		{Key: "pgup", Help: "page up", Command: "page-up", Scope: "resource-list"},
-		{Key: "home", Help: "top", Command: "cursor-top", Scope: "resource-list"},
-		{Key: "end", Help: "bottom", Command: "cursor-bottom", Scope: "resource-list"},
-		{Key: "S", Help: "sort", Scope: "resource-list", Visible: true, Keys: []Binding{
+		// ── Resources scope ──
+		{Key: "enter", Help: "detail", Command: "enter-detail", Scope: "resources"},
+		{Key: "right", Help: "detail", Command: "focus-panel", Scope: "resources"},
+		{Key: "tab", Help: "next split", Command: "focus-next", Scope: "resources", Visible: true},
+		{Key: "shift+tab", Help: "prev split", Command: "focus-prev", Scope: "resources", Visible: true},
+		{Key: "ctrl+f", Help: "page down", Command: "page-down", Scope: "resources"},
+		{Key: "ctrl+b", Help: "page up", Command: "page-up", Scope: "resources"},
+		{Key: "G", Help: "bottom", Command: "cursor-bottom", Scope: "resources"},
+		{Key: "ctrl+d", Help: "delete", Command: "delete", Scope: "resources", Visible: true},
+		{Key: "space", Help: "select", Command: "toggle-select", Scope: "resources"},
+		{Key: "ctrl+a", Help: "select all", Command: "select-all", Scope: "resources"},
+		{Key: "shift+left", Help: "scroll left", Command: "list-scroll-left", Scope: "resources"},
+		{Key: "shift+right", Help: "scroll right", Command: "list-scroll-right", Scope: "resources"},
+		{Key: "pgdown", Help: "page down", Command: "page-down", Scope: "resources"},
+		{Key: "pgup", Help: "page up", Command: "page-up", Scope: "resources"},
+		{Key: "home", Help: "top", Command: "cursor-top", Scope: "resources"},
+		{Key: "end", Help: "bottom", Command: "cursor-bottom", Scope: "resources"},
+		{Key: "S", Help: "sort", Scope: "resources", Visible: true, Keys: []Binding{
 			{Key: "n", Help: "by name", Command: "sort-NAME"},
 			{Key: "N", Help: "by namespace", Command: "sort-NAMESPACE"},
 			{Key: "a", Help: "by age", Command: "sort-AGE"},
@@ -82,36 +78,31 @@ func DefaultBindings() []Binding {
 			{Key: "k", Help: "by kind", Command: "sort-KIND", For: []string{"helmmanifest"}},
 		}},
 
-		// ── Detail-panel scope ──
-		{Key: "x", Help: "env resolve", Command: "toggle-env-resolve", Scope: "detail-panel",
+		// ── Details scope ──
+		{Key: "x", Help: "env resolve", Command: "toggle-env-resolve", Scope: "details",
 			For: []string{"pods", "secrets", "containers", "helmmanifest"}, Visible: true},
-		{Key: "H", Help: "scroll left", Command: "scroll-left", Scope: "detail-panel"},
-		{Key: "L", Help: "scroll right", Command: "scroll-right", Scope: "detail-panel"},
-		{Key: "shift+left", Help: "scroll left", Command: "scroll-left", Scope: "detail-panel"},
-		{Key: "shift+right", Help: "scroll right", Command: "scroll-right", Scope: "detail-panel"},
-		{Key: "ctrl+f", Help: "page down", Command: "page-down", Scope: "detail-panel"},
-		{Key: "ctrl+b", Help: "page up", Command: "page-up", Scope: "detail-panel"},
-		{Key: "w", Help: "wrap", Command: "toggle-wrap", Scope: "detail-panel", Visible: true},
-		{Key: "r", Help: "refresh", Command: "refresh-detail", Scope: "detail-panel"},
-		{Key: "left", Help: "back", Command: "exit-detail", Scope: "detail-panel"},
-		{Key: "h", Help: "back", Command: "exit-detail", Scope: "detail-panel"},
-		{Key: "esc", Help: "close/clear", Command: "clear-overlay", Scope: "detail-panel"},
-		{Key: "pgdown", Help: "page down", Command: "page-down", Scope: "detail-panel"},
-		{Key: "pgup", Help: "page up", Command: "page-up", Scope: "detail-panel"},
-		{Key: "home", Help: "top", Command: "cursor-top", Scope: "detail-panel"},
-		{Key: "end", Help: "bottom", Command: "cursor-bottom", Scope: "detail-panel"},
+		{Key: "H", Help: "scroll left", Command: "scroll-left", Scope: "details"},
+		{Key: "L", Help: "scroll right", Command: "scroll-right", Scope: "details"},
+		{Key: "shift+left", Help: "scroll left", Command: "scroll-left", Scope: "details"},
+		{Key: "shift+right", Help: "scroll right", Command: "scroll-right", Scope: "details"},
+		{Key: "ctrl+f", Help: "page down", Command: "page-down", Scope: "details"},
+		{Key: "ctrl+b", Help: "page up", Command: "page-up", Scope: "details"},
+		{Key: "w", Help: "wrap", Command: "toggle-wrap", Scope: "details", Visible: true},
+		{Key: "r", Help: "refresh", Command: "refresh-detail", Scope: "details"},
+		{Key: "left", Help: "back", Command: "exit-detail", Scope: "details"},
+		{Key: "h", Help: "back", Command: "exit-detail", Scope: "details"},
+		{Key: "esc", Help: "close/clear", Command: "clear-overlay", Scope: "details"},
+		{Key: "pgdown", Help: "page down", Command: "page-down", Scope: "details"},
+		{Key: "pgup", Help: "page up", Command: "page-up", Scope: "details"},
+		{Key: "home", Help: "top", Command: "cursor-top", Scope: "details"},
+		{Key: "end", Help: "bottom", Command: "cursor-bottom", Scope: "details"},
 
-		// ── Log pager controls (detail-panel scope, pods/containers only) ──
-		{Key: "a", Help: "autoscroll", Command: "toggle-autoscroll", Scope: "detail-panel",
-			For: []string{"pods", "containers"}, Visible: true},
-		{Key: "s", Help: "syntax", Command: "toggle-log-syntax", Scope: "detail-panel",
-			For: []string{"pods", "containers"}, Visible: true},
-		{Key: "c", Help: "container", Command: "select-container", Scope: "detail-panel",
-			For: []string{"pods", "containers"}, Visible: true},
-		{Key: "t", Help: "time range", Command: "select-time-range", Scope: "detail-panel",
-			For: []string{"pods", "containers"}, Visible: true},
-		{Key: "enter", Help: "mark", Command: "log-insert-marker", Scope: "detail-panel",
-			For: []string{"pods", "containers"}},
+		// ── Log pager controls ──
+		{Key: "a", Help: "autoscroll", Command: "toggle-autoscroll", Scope: "logs", Visible: true},
+		{Key: "s", Help: "syntax", Command: "toggle-log-syntax", Scope: "logs", Visible: true},
+		{Key: "c", Help: "container", Command: "select-container", Scope: "logs", Visible: true},
+		{Key: "t", Help: "time range", Command: "select-time-range", Scope: "logs", Visible: true},
+		{Key: "enter", Help: "mark", Command: "log-insert-marker", Scope: "logs"},
 
 		// ── Resource-specific ──
 		{Key: "l", Help: "logs", Command: "view-logs-focused",
@@ -127,7 +118,7 @@ func DefaultBindings() []Binding {
 		{Key: "p", Help: "...", For: []string{"pods", "containers"}, Keys: []Binding{
 			{Key: "f", Help: "port-forward", Command: "port-forward"},
 		}},
-		{Key: "s", Help: "exec", Scope: "resource-list", Visible: true,
+		{Key: "s", Help: "exec", Scope: "resources", Visible: true,
 			For: []string{"pods", "containers", "nodes"}, Keys: []Binding{
 				{Key: "d", Help: "debug", Command: "debug"},
 				{Key: "p", Help: "debug privileged", Command: "debug-privileged"},
@@ -141,5 +132,5 @@ func DefaultBindings() []Binding {
 // context (global + pods merged). Used by existing tests.
 func DefaultKeyTrie() *KeyTrie {
 	bs := NewBindingSet(DefaultBindings())
-	return bs.TrieFor("resource-list", "pods")
+	return bs.TrieFor("resources", "pods")
 }

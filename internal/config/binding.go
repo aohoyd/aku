@@ -27,8 +27,16 @@ type Binding struct {
 
 // matchesContext returns true if this binding applies to the given context.
 func (b Binding) matchesContext(componentType, resourceName string) bool {
-	if b.Scope != "" && b.Scope != componentType {
-		return false
+	if b.Scope != "" {
+		if b.Scope == "details" {
+			switch componentType {
+			case "details", "yaml", "describe", "logs":
+			default:
+				return false
+			}
+		} else if b.Scope != componentType {
+			return false
+		}
 	}
 	if len(b.For) == 0 {
 		return true

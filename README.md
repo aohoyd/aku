@@ -110,18 +110,20 @@ bindings:
   - key: "ctrl+l"
     help: "logs"
     command: "view-logs-focused"
-    scope: "resource-list"
+    scope: "resources"
     for: ["pods"]
     visible: true
 
   # Multi-key sequence
   - key: "g"
-    scope: "resource-list"
+    scope: "resources"
     keys:
       - key: "i"
         help: "ingresses"
         command: "goto-ingresses"
 ```
+
+Available scopes: `resources`, `details` (matches all detail views), `yaml`, `describe`, `logs`.
 
 ### theme.yaml
 
@@ -186,14 +188,21 @@ syntax:
 | `x` | Resolve env variables |
 | `r` | Refresh |
 
+### Logs View
+
+| Key | Action |
+|-----|--------|
+| `a` | Toggle autoscroll |
+| `s` | Toggle syntax highlighting |
+| `c` | Select container |
+| `t` | Time range |
+| `Enter` | Insert marker |
+
 ### Resource-Specific
 
 | Key | Resource | Action |
 |-----|----------|--------|
 | `l` | Pods, Containers | View logs |
-| `a` | Pods, Containers | Toggle autoscroll (logs) |
-| `c` | Pods, Containers | Select container (logs) |
-| `t` | Pods, Containers | Time range (logs) |
 | `i` | Pods, Deployments, StatefulSets, DaemonSets | Set image |
 | `R` | Deployments, Pods | Rollout restart |
 | `R` | Helm releases | Rollback |

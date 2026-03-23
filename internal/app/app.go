@@ -97,7 +97,7 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 		k8sClient:          client,
 		store:              store,
 		bindingSet:         bs,
-		keyTrie:            bs.TrieFor("resource-list", ""),
+		keyTrie:            bs.TrieFor("resources", ""),
 		layout:             layout.New(80, 24, cfg.LogBufferSize()),
 		statusBar:          ui.NewStatusBar(80),
 		resourcePicker:     ui.NewResourcePicker(40, 20),
@@ -134,7 +134,7 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 		if client != nil && store != nil {
 			store.Subscribe(p.GVR(), initialNs)
 		}
-		a.keyTrie = bs.TrieFor("resource-list", p.Name())
+		a.keyTrie = bs.TrieFor("resources", p.Name())
 	}
 
 	// Set initial status bar hints
@@ -712,9 +712,20 @@ func (a App) syncInlineSearch() {
 
 // currentContext returns the scope names for the current focus state.
 func (a App) currentContext() (componentType, resourceName string) {
-	componentType = "resource-list"
+	componentType = "resources"
 	if a.layout.FocusedDetails() {
-		componentType = "detail-panel"
+		if a.layout.IsLogMode() {
+			componentType = "logs"
+		} else {
+			switch a.layout.RightPanel().Mode() {
+			case msgs.DetailYAML:
+				componentType = "yaml"
+			case msgs.DetailDescribe:
+				componentType = "describe"
+			default:
+				componentType = "details"
+			}
+		}
 	}
 	if focused := a.layout.FocusedSplit(); focused != nil {
 		resourceName = focused.Plugin().Name()

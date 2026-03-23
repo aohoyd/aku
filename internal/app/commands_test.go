@@ -865,7 +865,7 @@ func TestUppercaseGResolvesGotoBottom(t *testing.T) {
 	app.layout.FocusedSplit().SetObjects(objs)
 
 	// First verify the trie resolves "G" to "cursor-bottom"
-	trie := app.bindingSet.TrieFor("resource-list", "pods")
+	trie := app.bindingSet.TrieFor("resources", "pods")
 	cmd, _, resolved := trie.Press("G")
 	t.Logf("Trie Press(G): command=%q resolved=%v", cmd, resolved)
 	if !resolved || cmd != "cursor-bottom" {

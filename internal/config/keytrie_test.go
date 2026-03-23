@@ -145,7 +145,7 @@ func TestLoadKeymapFallsBackToDefaults(t *testing.T) {
 		t.Fatalf("should fall back to defaults, got error: %v", err)
 	}
 	bs := km.BindingSet()
-	trie := bs.TrieFor("resource-list", "pods")
+	trie := bs.TrieFor("resources", "pods")
 	cmd, _, resolved := trie.Press("q")
 	if !resolved || cmd != "quit" {
 		t.Fatal("default config should have quit binding")
@@ -258,7 +258,7 @@ func TestEscResolvesClearOverlay(t *testing.T) {
 
 func TestDetailPanelExitBindings(t *testing.T) {
 	bs := NewBindingSet(DefaultBindings())
-	trie := bs.TrieFor("detail-panel", "pods")
+	trie := bs.TrieFor("details", "pods")
 
 	tests := []struct {
 		key     string
@@ -270,7 +270,7 @@ func TestDetailPanelExitBindings(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {
-			trie := bs.TrieFor("detail-panel", "pods")
+			trie := bs.TrieFor("details", "pods")
 			cmd, _, resolved := trie.Press(tt.key)
 			if !resolved || cmd != tt.command {
 				t.Fatalf("key %q: expected %q, got resolved=%v cmd=%q", tt.key, tt.command, resolved, cmd)

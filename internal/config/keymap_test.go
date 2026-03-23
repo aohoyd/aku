@@ -16,7 +16,7 @@ func TestDefaultKeymap(t *testing.T) {
 func TestKeymap_BindingSet(t *testing.T) {
 	km := DefaultKeymap()
 	bs := km.BindingSet()
-	trie := bs.TrieFor("resource-list", "pods")
+	trie := bs.TrieFor("resources", "pods")
 	cmd, _, resolved := trie.Press("q")
 	if !resolved || cmd != "quit" {
 		t.Fatalf("expected quit from default keymap, got resolved=%v cmd=%q", resolved, cmd)
@@ -46,13 +46,13 @@ func TestLoadKeymapFromFile(t *testing.T) {
 	}
 	bs := km.BindingSet()
 	// User binding should work
-	trie := bs.TrieFor("resource-list", "pods")
+	trie := bs.TrieFor("resources", "pods")
 	cmd, _, resolved := trie.Press("x")
 	if !resolved || cmd != "custom-action" {
 		t.Fatalf("expected custom-action, got resolved=%v cmd=%q", resolved, cmd)
 	}
 	// Defaults should be prepended
-	trie2 := bs.TrieFor("resource-list", "pods")
+	trie2 := bs.TrieFor("resources", "pods")
 	cmd, _, resolved = trie2.Press("q")
 	if !resolved || cmd != "quit" {
 		t.Fatalf("defaults should be preserved, got resolved=%v cmd=%q", resolved, cmd)
