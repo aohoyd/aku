@@ -39,12 +39,12 @@ var (
 	builtinIPv4 = regexp.MustCompile(`\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(:\d+)?\b`)
 )
 
-// Lipgloss styles for timestamp components (Kanagawa theme colors).
+// Lipgloss styles for timestamp components.
 var (
-	timestampDateStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFA066")) // SurimiOrange
-	timestampTimeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7E9CD8")) // CrystalBlue
-	timestampTZStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#727169")) // FujiGrey
-	builtinIPStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#7FB4CA")) // WaveBlue
+	timestampDateStyle = lipgloss.NewStyle().Foreground(theme.LogTimestamp)
+	timestampTimeStyle = lipgloss.NewStyle().Foreground(theme.LogTime)
+	timestampTZStyle   = lipgloss.NewStyle().Foreground(theme.LogTimezone)
+	builtinIPStyle     = lipgloss.NewStyle().Foreground(theme.LogIP)
 )
 
 // Lipgloss styles for JSON syntax coloring (Kanagawa theme colors).
@@ -56,6 +56,7 @@ var (
 	jsonNullStyle   = lipgloss.NewStyle().Foreground(theme.SyntaxNull)
 	jsonMarkerStyle = lipgloss.NewStyle().Foreground(theme.SyntaxMarker)
 )
+
 
 var fjParser fastjson.Parser
 
@@ -306,7 +307,9 @@ type LogView struct {
 	builtinsEnabled bool
 
 	// Time range
-	timeRangeLabel string
+	timeRangeLabel      string
+	defaultTimeRange    string
+	defaultSinceSeconds int64
 
 	// Virtual scroll
 	scrollOffset    int   // top-of-viewport line index in display list
@@ -314,7 +317,7 @@ type LogView struct {
 }
 
 // NewLogView creates a new log view with the given dimensions and ring buffer capacity.
-func NewLogView(width, height, bufCapacity int) LogView {
+func NewLogView(width, height, bufCapacity int, defaultTimeRange string, defaultSinceSeconds int64) LogView {
 	vp := viewport.New(viewport.WithWidth(width-2), viewport.WithHeight(height-2))
 	vp.KeyMap.Left = key.NewBinding()
 	vp.KeyMap.Right = key.NewBinding()
@@ -322,13 +325,15 @@ func NewLogView(width, height, bufCapacity int) LogView {
 	vp.SelectedHighlightStyle = lipgloss.NewStyle().Background(theme.SearchSelected).Foreground(theme.SearchFg).Bold(true)
 
 	return LogView{
-		viewport:        vp,
-		buffer:          NewDualRingBuffer(bufCapacity),
-		width:           width,
-		height:          height,
-		autoscroll:      true,
-		builtinsEnabled: true,
-		timeRangeLabel:  "1m",
+		viewport:            vp,
+		buffer:              NewDualRingBuffer(bufCapacity),
+		width:               width,
+		height:              height,
+		autoscroll:          true,
+		builtinsEnabled:     true,
+		timeRangeLabel:      defaultTimeRange,
+		defaultTimeRange:    defaultTimeRange,
+		defaultSinceSeconds: defaultSinceSeconds,
 	}
 }
 
@@ -1038,6 +1043,11 @@ func (lv *LogView) SetTimeRangeLabel(label string) {
 	lv.timeRangeLabel = label
 }
 
+// DefaultSinceSeconds returns the configured default sinceSeconds value for log streams.
+func (lv *LogView) DefaultSinceSeconds() int64 {
+	return lv.defaultSinceSeconds
+}
+
 // ClearAndRestart resets the ring buffer, clears viewport content,
 // and re-enables autoscroll for a fresh log stream.
 func (lv *LogView) ClearAndRestart() {
@@ -1049,7 +1059,7 @@ func (lv *LogView) ClearAndRestart() {
 	lv.scrollOffset = 0
 	lv.filteredIndices = nil
 	lv.autoscroll = true
-	lv.timeRangeLabel = "1m"
+	lv.timeRangeLabel = lv.defaultTimeRange
 	lv.filterState.Clear()
 	lv.searchState.Clear()
 }

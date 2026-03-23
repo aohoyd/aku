@@ -374,7 +374,7 @@ func (o Overlay) View() string {
 	// Footer
 	if o.footer != "" {
 		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Width(innerWidth).Align(lipgloss.Center).Render(o.footer))
+		lines = append(lines, lipgloss.NewStyle().Width(innerWidth-overlayChrome()).Align(lipgloss.Center).Render(o.footer))
 	}
 
 	content := strings.Join(lines, "\n")
@@ -406,12 +406,12 @@ func (o Overlay) computeInnerWidth() int {
 	chrome := overlayChrome()
 
 	// Auto-measure: find widest content
-	maxW := max(len(o.footer), len(o.title))
-	if len(o.content) > maxW {
-		maxW = len(o.content)
+	maxW := max(lipgloss.Width(o.footer), lipgloss.Width(o.title))
+	if lipgloss.Width(o.content) > maxW {
+		maxW = lipgloss.Width(o.content)
 	}
 	for _, item := range o.items {
-		w := len(item) + 4 // account for cursor prefix and padding
+		w := lipgloss.Width(item) + 4 // account for cursor prefix and padding
 		if w > maxW {
 			maxW = w
 		}

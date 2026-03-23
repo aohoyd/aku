@@ -261,6 +261,23 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		a = a.closeRightPanel()
 		return a, nil
 
+	case command == "close-current-panel":
+		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
+			a = a.closeRightPanel()
+			return a, nil
+		}
+		if a.layout.SplitCount() > 1 {
+			closing := a.layout.FocusedSplit()
+			closingGVR := closing.Plugin().GVR()
+			closingNs := closing.EffectiveNamespace()
+			a.keyTrie.Reset()
+			a.layout.CloseCurrentSplit()
+			a.unsubscribeIfUnused(closingGVR, closingNs)
+			a.statusBar.SetHints(a.currentHints())
+			return a, nil
+		}
+		return a, nil
+
 	// Focus
 	case command == "focus-next":
 		a.keyTrie.Reset()
@@ -524,6 +541,29 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 
 		a.setImageOverlay.Open(resourceName, ns, gvr, pluginName, containers)
 		a.activeOverlay = overlaySetImage
+		return a, nil
+
+	case command == "scale":
+		focused, selected, ok := a.focusedSelection()
+		if !ok {
+			return a, nil
+		}
+		if a.k8sClient == nil {
+			a.statusBar.SetError("scale: no k8s client")
+			return a, nil
+		}
+		gvr := focused.Plugin().GVR()
+		name := selected.GetName()
+		ns := selected.GetNamespace()
+		if ns == "" {
+			ns = focused.Namespace()
+		}
+		replicas, found, _ := unstructured.NestedInt64(selected.Object, "spec", "replicas")
+		if !found {
+			replicas = 1
+		}
+		a.scaleOverlay.Open(name, ns, gvr, int32(replicas))
+		a.activeOverlay = overlayScale
 		return a, nil
 
 	case command == "helm-set-chart":
@@ -1295,6 +1335,13 @@ func (a App) handleSetImageRequested(msg msgs.SetImageRequestedMsg) (tea.Model, 
 		return a, nil
 	}
 	return a, k8s.SetImageCmd(a.k8sClient.Dynamic, msg.GVR, msg.ResourceName, msg.Namespace, msg.PluginName, msg.Images)
+}
+
+func (a App) handleScaleRequested(msg msgs.ScaleRequestedMsg) (tea.Model, tea.Cmd) {
+	if a.k8sClient == nil {
+		return a, nil
+	}
+	return a, k8s.ScaleCmd(a.k8sClient.Dynamic, msg.GVR, msg.ResourceName, msg.Namespace, msg.Replicas)
 }
 
 func extractContainerImages(pluginName string, obj *unstructured.Unstructured) []msgs.ContainerImageChange {

@@ -68,6 +68,17 @@ func NewTimeRangePicker(width, height int) TimeRangePicker {
 	}, width, height)}
 }
 
+// LookupTimePreset returns the seconds value for a time range label.
+// Returns ok=false if the label is not a known preset.
+func LookupTimePreset(label string) (seconds int64, ok bool) {
+	for _, p := range timePresets {
+		if p.Label == label {
+			return p.Seconds, true
+		}
+	}
+	return 0, false
+}
+
 // OpenPresets opens the picker with the predefined time range presets.
 func (t *TimeRangePicker) OpenPresets() {
 	t.SetItems(timePresets)

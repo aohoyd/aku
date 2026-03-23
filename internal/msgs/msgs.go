@@ -125,6 +125,14 @@ type SetImageRequestedMsg struct {
 	Images       []ContainerImageChange
 }
 
+// ScaleRequestedMsg is emitted by the scale overlay when the user confirms.
+type ScaleRequestedMsg struct {
+	ResourceName string
+	Namespace    string
+	GVR          schema.GroupVersionResource
+	Replicas     int32
+}
+
 // HelmRollbackRequestedMsg is emitted by the rollback overlay.
 type HelmRollbackRequestedMsg struct {
 	ReleaseName string

@@ -57,6 +57,14 @@ var (
 	SearchFg       Color = "#1F1F28" // SumiInk0 — search match fg
 )
 
+// Log colors — log viewer timestamp and IP highlighting.
+var (
+	LogTimestamp Color = "#FFA066" // SurimiOrange — timestamp date part
+	LogTime     Color = "#7E9CD8" // CrystalBlue — timestamp time part
+	LogTimezone Color = "#727169" // FujiGrey — timestamp timezone part
+	LogIP       Color = "#7FB4CA" // WaveBlue — IP addresses
+)
+
 func init() {
 	_ = Load(ThemePath())
 }
@@ -117,6 +125,12 @@ func Load(path string) error {
 		setIf(&SearchSelected, f.Search.Selected)
 		setIf(&SearchFg, f.Search.Fg)
 	}
+	if f.Log != nil {
+		setIf(&LogTimestamp, f.Log.Timestamp)
+		setIf(&LogTime, f.Log.Time)
+		setIf(&LogTimezone, f.Log.Timezone)
+		setIf(&LogIP, f.Log.IP)
+	}
 	return nil
 }
 
@@ -127,10 +141,11 @@ func setIf(target *Color, value *string) {
 }
 
 type themeFile struct {
-	UI         *uiColors        `yaml:"ui"`
-	Status     *statusColors    `yaml:"status"`
-	Syntax     *syntaxColors    `yaml:"syntax"`
-	Search     *searchColors    `yaml:"search"`
+	UI     *uiColors     `yaml:"ui"`
+	Status *statusColors `yaml:"status"`
+	Syntax *syntaxColors `yaml:"syntax"`
+	Search *searchColors `yaml:"search"`
+	Log    *logColors    `yaml:"log"`
 }
 
 type uiColors struct {
@@ -166,4 +181,11 @@ type searchColors struct {
 	Match    *string `yaml:"match"`
 	Selected *string `yaml:"selected"`
 	Fg       *string `yaml:"fg"`
+}
+
+type logColors struct {
+	Timestamp *string `yaml:"timestamp"`
+	Time      *string `yaml:"time"`
+	Timezone  *string `yaml:"timezone"`
+	IP        *string `yaml:"ip"`
 }

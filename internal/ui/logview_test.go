@@ -11,7 +11,7 @@ import (
 )
 
 func TestLogView_AppendLine(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("hello")
 	lv.AppendLine("world")
 	if lv.buffer.Len() != 2 {
@@ -20,7 +20,7 @@ func TestLogView_AppendLine(t *testing.T) {
 }
 
 func TestLogView_Autoscroll(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	if !lv.Autoscroll() {
 		t.Fatal("autoscroll should be on by default")
 	}
@@ -35,12 +35,12 @@ func TestLogView_Autoscroll(t *testing.T) {
 }
 
 func TestLogView_Searchable(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	var _ Searchable = &lv
 }
 
 func TestLogView_FilterHidesLines(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("error: something failed")
 	lv.AppendLine("info: all good")
 	lv.AppendLine("error: another failure")
@@ -53,7 +53,7 @@ func TestLogView_FilterHidesLines(t *testing.T) {
 }
 
 func TestLogView_SearchMatchPositions(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("foo bar")
 	lv.AppendLine("foo baz")
 	lv.AppendLine("foo qux")
@@ -70,7 +70,7 @@ func TestLogView_SearchMatchPositions(t *testing.T) {
 }
 
 func TestLogView_SearchNavigationWraps(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("foo bar")
 	lv.AppendLine("foo baz")
 
@@ -99,7 +99,7 @@ func TestLogView_SearchNavigationWraps(t *testing.T) {
 }
 
 func TestLogView_ClearSearchResetsMatchState(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("foo bar")
 
 	if err := lv.ApplySearch("foo", msgs.SearchModeSearch); err != nil {
@@ -119,71 +119,72 @@ func TestLogView_ClearSearchResetsMatchState(t *testing.T) {
 }
 
 func TestLogView_FilterEvictionTriggersRebuild(t *testing.T) {
-	// Capacity 5 buffer, filter active for "error"
-	lv := NewLogView(80, 24, 5)
-	if err := lv.ApplySearch("error", msgs.SearchModeFilter); err != nil {
+	// Capacity 5 buffer, filter active for "match"
+	// Uses "match" instead of "error" to avoid collision with builtin log level highlighting.
+	lv := NewLogView(80, 24, 5, "15m", 900)
+	if err := lv.ApplySearch("match", msgs.SearchModeFilter); err != nil {
 		t.Fatalf("ApplySearch: %v", err)
 	}
 
 	// Fill buffer: 3 matching, 2 non-matching
-	lv.AppendLine("error: one")
-	lv.AppendLine("info: two")
-	lv.AppendLine("error: three")
-	lv.AppendLine("info: four")
-	lv.AppendLine("error: five")
+	lv.AppendLine("match: one")
+	lv.AppendLine("other: two")
+	lv.AppendLine("match: three")
+	lv.AppendLine("other: four")
+	lv.AppendLine("match: five")
 
-	// Buffer is now full (5/5). Viewport should show 3 error lines.
+	// Buffer is now full (5/5). Viewport should show 3 matching lines.
 	content := lv.viewport.View()
-	if !strings.Contains(content, "error: one") {
-		t.Fatal("expected 'error: one' in viewport before eviction")
+	if !strings.Contains(content, "match: one") {
+		t.Fatal("expected 'match: one' in viewport before eviction")
 	}
 
-	// Append non-matching line -> evicts "error: one" (oldest, which matched)
-	lv.AppendLine("info: six")
+	// Append non-matching line -> evicts "match: one" (oldest, which matched)
+	lv.AppendLine("other: six")
 
-	// After eviction, "error: one" should be gone from viewport
+	// After eviction, "match: one" should be gone from viewport
 	content = lv.viewport.View()
-	if strings.Contains(content, "error: one") {
-		t.Fatal("evicted line 'error: one' should not appear in viewport after eviction")
+	if strings.Contains(content, "match: one") {
+		t.Fatal("evicted line 'match: one' should not appear in viewport after eviction")
 	}
 	// Remaining matches should still be visible
-	if !strings.Contains(content, "error: three") {
-		t.Fatal("expected 'error: three' to remain visible")
+	if !strings.Contains(content, "match: three") {
+		t.Fatal("expected 'match: three' to remain visible")
 	}
-	if !strings.Contains(content, "error: five") {
-		t.Fatal("expected 'error: five' to remain visible")
+	if !strings.Contains(content, "match: five") {
+		t.Fatal("expected 'match: five' to remain visible")
 	}
 }
 
 func TestLogView_FilterEvictionWithMatchingLine(t *testing.T) {
-	lv := NewLogView(80, 24, 3)
-	if err := lv.ApplySearch("error", msgs.SearchModeFilter); err != nil {
+	lv := NewLogView(80, 24, 3, "15m", 900)
+	if err := lv.ApplySearch("match", msgs.SearchModeFilter); err != nil {
 		t.Fatalf("ApplySearch: %v", err)
 	}
-	lv.AppendLine("error: one")
-	lv.AppendLine("info: two")
-	lv.AppendLine("error: three")
-	// Buffer full: ["error: one", "info: two", "error: three"]
+	lv.AppendLine("match: one")
+	lv.AppendLine("other: two")
+	lv.AppendLine("match: three")
+	// Buffer full: ["match: one", "other: two", "match: three"]
 
 	// Append matching line that also triggers eviction
-	lv.AppendLine("error: four") // evicts "error: one"
-	// Buffer: ["info: two", "error: three", "error: four"]
+	lv.AppendLine("match: four") // evicts "match: one"
+	// Buffer: ["other: two", "match: three", "match: four"]
 
 	content := lv.viewport.View()
-	if !strings.Contains(content, "error: four") {
-		t.Fatal("new matching line 'error: four' should be visible after eviction")
+	if !strings.Contains(content, "match: four") {
+		t.Fatal("new matching line 'match: four' should be visible after eviction")
 	}
-	if !strings.Contains(content, "error: three") {
-		t.Fatal("existing matching line 'error: three' should remain visible")
+	if !strings.Contains(content, "match: three") {
+		t.Fatal("existing matching line 'match: three' should remain visible")
 	}
-	if strings.Contains(content, "error: one") {
-		t.Fatal("evicted line 'error: one' should not appear")
+	if strings.Contains(content, "match: one") {
+		t.Fatal("evicted line 'match: one' should not appear")
 	}
 }
 
 func TestLogView_SearchDoesNotMatchDroppedIndicator(t *testing.T) {
 	// Capacity 3 buffer — fill with 4 lines to trigger dropped indicator
-	lv := NewLogView(80, 24, 3)
+	lv := NewLogView(80, 24, 3, "15m", 900)
 	lv.AppendLine("alpha")
 	lv.AppendLine("beta")
 	lv.AppendLine("gamma")
@@ -200,7 +201,7 @@ func TestLogView_SearchDoesNotMatchDroppedIndicator(t *testing.T) {
 
 func TestLogView_SearchMatchIndicesWithIndicator(t *testing.T) {
 	// Capacity 3 buffer — fill with 4 lines to trigger dropped indicator
-	lv := NewLogView(80, 24, 3)
+	lv := NewLogView(80, 24, 3, "15m", 900)
 	lv.AppendLine("alpha")
 	lv.AppendLine("foo bar")
 	lv.AppendLine("baz")
@@ -225,15 +226,15 @@ func TestLogView_SearchMatchIndicesWithIndicator(t *testing.T) {
 }
 
 func TestLogView_Unavailable(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	// Initially available
 	if lv.IsUnavailable() {
 		t.Fatal("expected available by default")
 	}
 	title := lv.buildTitle()
-	if title != "Logs 1m [A]" {
-		t.Fatalf("expected default title 'Logs 1m [A]', got %q", title)
+	if title != "Logs 15m [A]" {
+		t.Fatalf("expected default title 'Logs 15m [A]', got %q", title)
 	}
 
 	// Set unavailable
@@ -252,13 +253,13 @@ func TestLogView_Unavailable(t *testing.T) {
 		t.Fatal("expected available after SetUnavailable(false)")
 	}
 	title = lv.buildTitle()
-	if title != "Logs 1m [A]" {
+	if title != "Logs 15m [A]" {
 		t.Fatalf("expected default title after clearing unavailable, got %q", title)
 	}
 }
 
 func TestLogView_ClearAndRestartResetsFilterAndSearch(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("error: something failed")
 	lv.AppendLine("info: all good")
 
@@ -293,7 +294,7 @@ func TestLogView_ClearAndRestartResetsFilterAndSearch(t *testing.T) {
 }
 
 func TestLogView_BuiltinLogLevelHighlighting(t *testing.T) {
-	lv := NewLogView(80, 24, 100) // no user rules
+	lv := NewLogView(80, 24, 100, "15m", 900) // no user rules
 
 	// ERROR should be highlighted
 	line := "2024-01-01 ERROR something failed"
@@ -307,7 +308,7 @@ func TestLogView_BuiltinLogLevelHighlighting(t *testing.T) {
 }
 
 func TestLogView_BuiltinHighlightAllLevels(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	levels := []string{
 		"ERROR", "FATAL", "WARN", "WARNING", "INFO", "DEBUG", "TRACE",
 		"error", "fatal", "warn", "warning", "info", "debug", "trace",
@@ -325,7 +326,7 @@ func TestLogView_BuiltinHighlightAllLevels(t *testing.T) {
 }
 
 func TestLogView_BuiltinHighlightWordBoundary(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	// "INFORMATIONAL" should NOT match "INFO" as a word
 	line := "INFORMATIONAL message"
 	result := lv.applyHighlights(line)
@@ -347,7 +348,7 @@ func TestLogView_BuiltinHighlightWordBoundary(t *testing.T) {
 }
 
 func TestLogView_BuiltinTimestampHighlighting(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	// ISO 8601 timestamp
 	line := "2024-03-22T14:30:00.123Z INFO starting server"
@@ -365,7 +366,7 @@ func TestLogView_BuiltinTimestampHighlighting(t *testing.T) {
 }
 
 func TestLogView_BuiltinTimestampVariants(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	variants := []string{
 		"2024-03-22T14:30:00Z message",        // Z timezone
@@ -382,7 +383,7 @@ func TestLogView_BuiltinTimestampVariants(t *testing.T) {
 }
 
 func TestLogView_BuiltinIPHighlighting(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := "connection from 192.168.1.100:8080 accepted"
 	result := lv.applyHighlights(line)
@@ -395,7 +396,7 @@ func TestLogView_BuiltinIPHighlighting(t *testing.T) {
 }
 
 func TestLogView_BuiltinIPWithoutPort(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := "resolved to 10.0.0.1"
 	result := lv.applyHighlights(line)
@@ -405,7 +406,7 @@ func TestLogView_BuiltinIPWithoutPort(t *testing.T) {
 }
 
 func TestLogView_BuiltinIPInvalidOctet(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	// 999.999.999.999 looks like an IP but has invalid octets
 	line := "version 999.999.999.999"
@@ -416,7 +417,7 @@ func TestLogView_BuiltinIPInvalidOctet(t *testing.T) {
 }
 
 func TestLogView_BuiltinJSONReformat(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `prefix {"message":"hello","count":42} suffix`
 	result := lv.applyHighlights(line)
@@ -428,7 +429,7 @@ func TestLogView_BuiltinJSONReformat(t *testing.T) {
 }
 
 func TestLogView_BuiltinJSONColoring(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `{"level":"info"}`
 	result := lv.applyHighlights(line)
@@ -445,7 +446,7 @@ func TestLogView_BuiltinJSONColoring(t *testing.T) {
 }
 
 func TestLogView_BuiltinJSONNestedObject(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `log {"a":{"b":1}} end`
 	result := lv.applyHighlights(line)
@@ -460,7 +461,7 @@ func TestLogView_BuiltinJSONNestedObject(t *testing.T) {
 }
 
 func TestLogView_BuiltinJSONNestedArrayInObject(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `{"items":[1,2]}`
 	result := lv.applyHighlights(line)
@@ -471,7 +472,7 @@ func TestLogView_BuiltinJSONNestedArrayInObject(t *testing.T) {
 }
 
 func TestLogView_BuiltinJSONArray(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `items: [1,2,3]`
 	result := lv.applyHighlights(line)
@@ -482,7 +483,7 @@ func TestLogView_BuiltinJSONArray(t *testing.T) {
 }
 
 func TestLogView_BuiltinJSONInvalidIgnored(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	// Looks like JSON start but isn't valid
 	line := `not json {invalid`
@@ -494,7 +495,7 @@ func TestLogView_BuiltinJSONInvalidIgnored(t *testing.T) {
 }
 
 func TestLogView_BuiltinJSONPreservesPrefix(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `2024-01-01T00:00:00Z INFO {"msg":"hello"}`
 	result := lv.applyHighlights(line)
@@ -506,7 +507,7 @@ func TestLogView_BuiltinJSONPreservesPrefix(t *testing.T) {
 }
 
 func TestLogView_ToggleSyntaxHighlighting(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	// Built-ins should be enabled by default
 	if !lv.SyntaxEnabled() {
@@ -540,7 +541,7 @@ func TestLogView_ToggleSyntaxHighlighting(t *testing.T) {
 }
 
 func TestLogView_ToggleSyntaxRecomputesSearchPositions(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("2024-01-01T00:00:00Z ERROR something failed")
 
 	// Search while syntax is ON
@@ -566,15 +567,15 @@ func TestLogView_ToggleSyntaxRecomputesSearchPositions(t *testing.T) {
 }
 
 func TestLogView_TimeRangeInTitle(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
-	// Default title should show "1m" time range, no [S]
+	// Default title should show "15m" time range, no [S]
 	title := lv.buildTitle()
 	if strings.Contains(title, "[S]") {
 		t.Fatalf("expected no [S] in title, got: %s", title)
 	}
-	if !strings.Contains(title, "1m") {
-		t.Fatalf("expected '1m' in title, got: %s", title)
+	if !strings.Contains(title, "15m") {
+		t.Fatalf("expected '15m' in title, got: %s", title)
 	}
 
 	// Set a different time range
@@ -584,16 +585,16 @@ func TestLogView_TimeRangeInTitle(t *testing.T) {
 		t.Fatalf("expected '5m' in title, got: %s", title)
 	}
 
-	// ClearAndRestart should reset to default "1m"
+	// ClearAndRestart should reset to default "15m"
 	lv.ClearAndRestart()
 	title = lv.buildTitle()
-	if !strings.Contains(title, "1m") {
-		t.Fatalf("expected '1m' after ClearAndRestart, got: %s", title)
+	if !strings.Contains(title, "15m") {
+		t.Fatalf("expected '15m' after ClearAndRestart, got: %s", title)
 	}
 }
 
 func TestLogView_BuiltinJSONWithLogLevel(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	// JSON containing "ERROR" as a value — ERROR inside JSON should be colored
 	// by JSON coloring, not double-colored by log level regex
@@ -611,7 +612,7 @@ func TestLogView_BuiltinJSONWithLogLevel(t *testing.T) {
 }
 
 func TestLogView_BuiltinHighlightsWithSearch(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("2024-01-01T00:00:00Z ERROR something failed")
 	lv.AppendLine("2024-01-01T00:00:01Z INFO all good")
 
@@ -625,7 +626,7 @@ func TestLogView_BuiltinHighlightsWithSearch(t *testing.T) {
 }
 
 func TestLogView_BuiltinHighlightsWithFilter(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("ERROR: failure one")
 	lv.AppendLine("INFO: all good")
 	lv.AppendLine("ERROR: failure two")
@@ -640,7 +641,7 @@ func TestLogView_BuiltinHighlightsWithFilter(t *testing.T) {
 }
 
 func TestLogView_BuiltinEmptyLine(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	result := lv.applyHighlights("")
 	if result != "" {
@@ -719,7 +720,7 @@ func TestColorizeJSON_OutputPreserved(t *testing.T) {
 }
 
 func BenchmarkApplyHighlights_PlainText(b *testing.B) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	line := "2024-03-22T14:30:00.123Z INFO processing request from 192.168.1.100:8080"
 	b.ResetTimer()
 	for range b.N {
@@ -728,7 +729,7 @@ func BenchmarkApplyHighlights_PlainText(b *testing.B) {
 }
 
 func BenchmarkApplyHighlights_JSON(b *testing.B) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	line := `2024-03-22T14:30:00Z INFO {"level":"info","msg":"request processed","duration":0.042,"status":200,"ip":"10.0.0.1"}`
 	b.ResetTimer()
 	for range b.N {
@@ -746,7 +747,7 @@ func BenchmarkAppendLine_WithHighlights(b *testing.B) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		lv := NewLogView(80, 24, 1000)
+		lv := NewLogView(80, 24, 1000, "15m", 900)
 		for i := range 1000 {
 			lv.AppendLine(lines[i%len(lines)])
 		}
@@ -763,7 +764,7 @@ func BenchmarkAppendLine_WithoutHighlights(b *testing.B) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		lv := NewLogView(80, 24, 1000)
+		lv := NewLogView(80, 24, 1000, "15m", 900)
 		lv.ToggleSyntax() // disable highlighting
 		for i := range 1000 {
 			lv.AppendLine(lines[i%len(lines)])
@@ -772,7 +773,7 @@ func BenchmarkAppendLine_WithoutHighlights(b *testing.B) {
 }
 
 func TestLogView_UpdateViewportWindowSize(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	for i := range 50 {
 		lv.AppendLine(fmt.Sprintf("line %d", i))
 	}
@@ -792,7 +793,7 @@ func BenchmarkAppendLine_Windowed(b *testing.B) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		lv := NewLogView(80, 24, 10000)
+		lv := NewLogView(80, 24, 10000, "15m", 900)
 		for i := range 10000 {
 			lv.AppendLine(lines[i%len(lines)])
 		}
@@ -800,7 +801,7 @@ func BenchmarkAppendLine_Windowed(b *testing.B) {
 }
 
 func TestLogView_ScrollOffset_Bounds(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	for i := range 50 {
 		lv.AppendLine(fmt.Sprintf("line %d", i))
 	}
@@ -819,7 +820,7 @@ func TestLogView_ScrollOffset_Bounds(t *testing.T) {
 }
 
 func TestLogView_InsertMarker(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("line one")
 	lv.InsertMarker()
 	lv.AppendLine("line two")
@@ -839,7 +840,7 @@ func TestLogView_InsertMarker(t *testing.T) {
 
 func TestLogView_WrappedModeAllLinesReachViewport(t *testing.T) {
 	// Viewport is 40 chars wide, 10 rows tall
-	lv := NewLogView(42, 12, 100) // +2 for border
+	lv := NewLogView(42, 12, 100, "15m", 900) // +2 for border
 	lv.viewport.SoftWrap = true
 
 	// Add 5 short lines and 3 long lines that will wrap
@@ -861,7 +862,7 @@ func TestLogView_WrappedModeAllLinesReachViewport(t *testing.T) {
 }
 
 func TestLogView_NonWrappedModeUnchanged(t *testing.T) {
-	lv := NewLogView(80, 12, 100)
+	lv := NewLogView(80, 12, 100, "15m", 900)
 	// SoftWrap is off by default
 
 	for i := 0; i < 20; i++ {
@@ -878,7 +879,7 @@ func TestLogView_NonWrappedModeUnchanged(t *testing.T) {
 }
 
 func TestLogView_InsertMarkerPassesFilter(t *testing.T) {
-	lv := NewLogView(80, 24, 100)
+	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("ERROR: something broke")
 	lv.AppendLine("INFO: all good")
 
@@ -899,7 +900,7 @@ func TestLogView_InsertMarkerPassesFilter(t *testing.T) {
 }
 
 func TestLogView_WrappedScrollDown(t *testing.T) {
-	lv := NewLogView(42, 12, 100)
+	lv := NewLogView(42, 12, 100, "15m", 900)
 	lv.viewport.SoftWrap = true
 
 	// Add enough lines to need scrolling

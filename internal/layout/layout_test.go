@@ -38,7 +38,7 @@ func svcsPlugin() *mockPlugin {
 }
 
 func TestLayoutAddAndRemoveSplit(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	if l.SplitCount() != 0 {
 		t.Fatalf("expected 0 splits, got %d", l.SplitCount())
 	}
@@ -63,7 +63,7 @@ func TestLayoutAddAndRemoveSplit(t *testing.T) {
 }
 
 func TestLayoutCloseLastSplit(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	shouldQuit := l.CloseCurrentSplit()
 	if !shouldQuit {
@@ -72,7 +72,7 @@ func TestLayoutCloseLastSplit(t *testing.T) {
 }
 
 func TestLayoutFocusCycling(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 
@@ -97,7 +97,7 @@ func TestLayoutFocusCycling(t *testing.T) {
 }
 
 func TestLayoutRightPanel(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	if l.RightPanelVisible() {
 		t.Fatal("right panel should start hidden")
 	}
@@ -112,14 +112,14 @@ func TestLayoutRightPanel(t *testing.T) {
 }
 
 func TestLayoutFocusedSplitNil(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	if l.FocusedSplit() != nil {
 		t.Fatal("FocusedSplit should be nil with no splits")
 	}
 }
 
 func TestLayoutView(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	view := l.View()
 	if view == "" {
@@ -128,7 +128,7 @@ func TestLayoutView(t *testing.T) {
 }
 
 func TestLayoutViewWithRightPanel(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.ShowRightPanel()
 	view := l.View()
@@ -138,7 +138,7 @@ func TestLayoutViewWithRightPanel(t *testing.T) {
 }
 
 func TestUpdateSplitObjectsNamespaceFiltering(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(podsPlugin(), "staging")
 
@@ -158,7 +158,7 @@ func TestUpdateSplitObjectsNamespaceFiltering(t *testing.T) {
 }
 
 func TestAddSplitSetsNamespace(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "kube-system")
 	if l.FocusedSplit().Namespace() != "kube-system" {
 		t.Fatalf("expected namespace 'kube-system', got %q", l.FocusedSplit().Namespace())
@@ -166,7 +166,7 @@ func TestAddSplitSetsNamespace(t *testing.T) {
 }
 
 func TestLayoutZoomSplitToggle(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 
@@ -186,7 +186,7 @@ func TestLayoutZoomSplitToggle(t *testing.T) {
 }
 
 func TestLayoutZoomDetailToggle(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.ShowRightPanel()
 
@@ -202,7 +202,7 @@ func TestLayoutZoomDetailToggle(t *testing.T) {
 }
 
 func TestLayoutUnzoomAll(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 
@@ -217,7 +217,7 @@ func TestLayoutUnzoomAll(t *testing.T) {
 }
 
 func TestLayoutZoomSplitSizing(t *testing.T) {
-	l := New(80, 26, 1000) // height = 26-1=25
+	l := New(80, 26, 1000, "15m", 900) // height = 26-1=25
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 
@@ -237,7 +237,7 @@ func TestLayoutZoomSplitSizing(t *testing.T) {
 }
 
 func TestLayoutZoomDetailSizing(t *testing.T) {
-	l := New(80, 26, 1000) // height = 25
+	l := New(80, 26, 1000, "15m", 900) // height = 25
 	l.AddSplit(podsPlugin(), "default")
 	l.ShowRightPanel()
 
@@ -257,7 +257,7 @@ func TestLayoutZoomDetailSizing(t *testing.T) {
 }
 
 func TestLayoutZoomSplitView(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 
@@ -269,7 +269,7 @@ func TestLayoutZoomSplitView(t *testing.T) {
 }
 
 func TestLayoutZoomDetailView(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.ShowRightPanel()
 
@@ -281,7 +281,7 @@ func TestLayoutZoomDetailView(t *testing.T) {
 }
 
 func TestLayoutZoomFollowsFocus(t *testing.T) {
-	l := New(80, 26, 1000) // height = 25
+	l := New(80, 26, 1000, "15m", 900) // height = 25
 	l.AddSplit(podsPlugin(), "default")  // idx 0
 	l.AddSplit(svcsPlugin(), "default")  // idx 1 (focused)
 
@@ -307,7 +307,7 @@ func TestLayoutZoomFollowsFocus(t *testing.T) {
 }
 
 func TestLayoutCloseCurrentSplitAutoUnzoom(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 
@@ -321,7 +321,7 @@ func TestLayoutCloseCurrentSplitAutoUnzoom(t *testing.T) {
 }
 
 func TestLayoutFocusTarget(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.ShowRightPanel()
 
@@ -347,7 +347,7 @@ func TestLayoutFocusTarget(t *testing.T) {
 }
 
 func TestLayoutFocusDetailsNoopWithoutRightPanel(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 
 	l.FocusDetails()
@@ -357,7 +357,7 @@ func TestLayoutFocusDetailsNoopWithoutRightPanel(t *testing.T) {
 }
 
 func TestLayoutFocusResourcesSafeWithNoSplits(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 
 	l.FocusResources()
 	if !l.FocusedResources() {
@@ -366,7 +366,7 @@ func TestLayoutFocusResourcesSafeWithNoSplits(t *testing.T) {
 }
 
 func TestLayoutZoomSplitNoopWithOneSplit(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 
 	l.ToggleZoomSplit()
@@ -376,7 +376,7 @@ func TestLayoutZoomSplitNoopWithOneSplit(t *testing.T) {
 }
 
 func TestLayoutIndependentZoomStates(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 	l.ShowRightPanel()
@@ -399,7 +399,7 @@ func TestLayoutIndependentZoomStates(t *testing.T) {
 }
 
 func TestLayoutToggleDetailPreservesSplitZoom(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 	l.ShowRightPanel()
@@ -420,7 +420,7 @@ func TestLayoutToggleDetailPreservesSplitZoom(t *testing.T) {
 }
 
 func TestLayoutToggleSplitPreservesDetailZoom(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 	l.ShowRightPanel()
@@ -441,7 +441,7 @@ func TestLayoutToggleSplitPreservesDetailZoom(t *testing.T) {
 }
 
 func TestLayoutUnzoomAllNew(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 	l.ShowRightPanel()
@@ -459,7 +459,7 @@ func TestLayoutUnzoomAllNew(t *testing.T) {
 }
 
 func TestLayoutAnyZoomed(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.AddSplit(svcsPlugin(), "default")
 	l.ShowRightPanel()
@@ -486,7 +486,7 @@ func TestLayoutAnyZoomed(t *testing.T) {
 }
 
 func TestUpdateSplitObjectsSkipsDrillDown(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 
 	// Set initial objects on the split
@@ -513,7 +513,7 @@ func TestUpdateSplitObjectsSkipsDrillDown(t *testing.T) {
 }
 
 func TestLayoutHideRightPanelClearsDetailZoom(t *testing.T) {
-	l := New(80, 26, 1000)
+	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default")
 	l.ShowRightPanel()
 

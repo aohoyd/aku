@@ -22,14 +22,22 @@ func portItemDisplay(p PortItem) string {
 	return fmt.Sprintf("%s:%d/%s", p.ContainerName, p.Port, p.Protocol)
 }
 
+// PortForward button indices.
+const (
+	pfBtnYes = 0
+	pfBtnNo  = 1
+)
+
 // PortForwardOverlay is a single-view overlay for setting up port-forwards.
 // It shows a filter input, a scrollable port list, and a local port input.
 type PortForwardOverlay struct {
-	overlay  Overlay
-	allPorts []PortItem
-	filtered []PortItem
-	podName  string
-	podNs    string
+	overlay       Overlay
+	allPorts      []PortItem
+	filtered      []PortItem
+	podName       string
+	podNs         string
+	inputFocused  bool
+	focusedButton int
 }
 
 // NewPortForwardOverlay creates a new port-forward overlay with the given dimensions.
@@ -44,6 +52,8 @@ func (p *PortForwardOverlay) Open(podName, podNs string, ports []PortItem) {
 	p.podName = podName
 	p.podNs = podNs
 	p.allPorts = ports
+	p.inputFocused = true
+	p.focusedButton = pfBtnYes
 
 	p.overlay.Reset()
 	p.overlay.SetActive(true)
@@ -65,6 +75,7 @@ func (p *PortForwardOverlay) Open(podName, podNs string, ports []PortItem) {
 
 	p.overlay.FocusInput(0)
 	p.applyFilter()
+	p.updateFooter()
 }
 
 // Close deactivates the overlay.
@@ -75,6 +86,16 @@ func (p *PortForwardOverlay) Close() {
 // Active returns whether the overlay is currently active.
 func (p PortForwardOverlay) Active() bool {
 	return p.overlay.Active()
+}
+
+// InputFocused returns whether a text input has focus (vs the button bar).
+func (p PortForwardOverlay) InputFocused() bool {
+	return p.inputFocused
+}
+
+// FocusedButton returns the currently focused button index.
+func (p PortForwardOverlay) FocusedButton() int {
+	return p.focusedButton
 }
 
 // SetSize updates the terminal dimensions available to the overlay.
@@ -100,18 +121,58 @@ func (p PortForwardOverlay) Update(msg tea.Msg) (PortForwardOverlay, tea.Cmd) {
 		return p, nil
 
 	case tea.KeyEnter:
-		return p.handleSubmit()
+		if p.inputFocused {
+			return p.handleSubmit()
+		}
+		if p.focusedButton == pfBtnYes {
+			return p.handleSubmit()
+		}
+		// No button selected.
+		p.Close()
+		return p, nil
 
 	case tea.KeyTab:
 		p.cycleFocusForward()
 		return p, nil
 
 	case tea.KeyUp, tea.KeyDown:
-		p.overlay.HandleListKeys(km)
-		p.syncLocalPort()
+		if p.inputFocused {
+			p.overlay.HandleListKeys(km)
+			p.syncLocalPort()
+			return p, nil
+		}
+		// From buttons, Up moves focus to local port input.
+		if km.Code == tea.KeyUp {
+			p.focusToInput(1)
+		}
+		return p, nil
+
+	case tea.KeyLeft:
+		if !p.inputFocused {
+			p.focusedButton = pfBtnYes
+			p.updateFooter()
+		}
+		return p, nil
+
+	case tea.KeyRight:
+		if !p.inputFocused {
+			p.focusedButton = pfBtnNo
+			p.updateFooter()
+		}
 		return p, nil
 
 	default:
+		if !p.inputFocused {
+			// Button hotkeys.
+			switch km.String() {
+			case "y", "Y":
+				return p.handleSubmit()
+			case "n", "N":
+				p.Close()
+				return p, nil
+			}
+			return p, nil
+		}
 		focus := p.overlay.FocusedInput()
 		cmd := p.overlay.UpdateInputs(km)
 		if focus == 0 {
@@ -164,16 +225,48 @@ func parseLocalPort(val string) (int, error) {
 	return port, nil
 }
 
-// cycleFocusForward cycles: filter(0) -> list(-1) -> local port(1) -> filter(0)
+// cycleFocusForward cycles: filter(0) -> list(-1) -> local port(1) -> buttons -> filter(0)
 func (p *PortForwardOverlay) cycleFocusForward() {
+	if !p.inputFocused {
+		// buttons -> filter
+		p.focusToInput(0)
+		return
+	}
 	switch p.overlay.FocusedInput() {
 	case 0: // filter -> list
 		p.overlay.FocusList()
 	case -1: // list -> local port
 		p.overlay.FocusInput(1)
-	case 1: // local port -> filter
-		p.overlay.FocusInput(0)
+	case 1: // local port -> buttons
+		p.focusToButtons()
 	}
+}
+
+// focusToInput moves focus to the text input at the given index.
+func (p *PortForwardOverlay) focusToInput(idx int) {
+	p.inputFocused = true
+	p.overlay.FocusInput(idx)
+	p.updateFooter()
+}
+
+// focusToButtons moves focus to the button bar.
+func (p *PortForwardOverlay) focusToButtons() {
+	p.inputFocused = false
+	p.overlay.blurAll()
+	p.updateFooter()
+}
+
+// updateFooter renders the Yes/No button bar as the overlay footer.
+func (p *PortForwardOverlay) updateFooter() {
+	buttons := []Button{
+		{Label: "Yes", Hotkey: "y"},
+		{Label: "No", Hotkey: "n"},
+	}
+	focused := p.focusedButton
+	if p.inputFocused {
+		focused = -1
+	}
+	p.overlay.SetFooter(RenderButtonBar(buttons, focused))
 }
 
 // syncLocalPort updates the local port input to match the currently selected port.

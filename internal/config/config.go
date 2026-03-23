@@ -15,7 +15,8 @@ type DebugConfig struct {
 
 // LogsConfig holds configuration for log viewing.
 type LogsConfig struct {
-	BufferSize int `yaml:"buffer_size,omitempty"`
+	BufferSize       int    `yaml:"buffer_size,omitempty"`
+	DefaultTimeRange string `yaml:"default_time_range,omitempty"`
 }
 
 // Config holds the application configuration.
@@ -79,6 +80,14 @@ func (c *Config) DebugCommand() []string {
 		return c.Debug.Command
 	}
 	return []string{"sh"}
+}
+
+// LogDefaultTimeRange returns the configured default time range label, defaulting to "15m".
+func (c *Config) LogDefaultTimeRange() string {
+	if c.Logs.DefaultTimeRange != "" {
+		return c.Logs.DefaultTimeRange
+	}
+	return "15m"
 }
 
 // LogBufferSize returns the configured log buffer size, defaulting to 10000.

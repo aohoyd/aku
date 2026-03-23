@@ -1,12 +1,8 @@
 package ui
 
 import (
-	"strings"
-
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/aohoyd/aku/internal/msgs"
-	"github.com/aohoyd/aku/internal/theme"
 )
 
 // buttonCount is the number of buttons in the confirm dialog.
@@ -30,6 +26,7 @@ func NewConfirmDialog(message string, width int) ConfirmDialog {
 	o := NewOverlay()
 	o.SetActive(true)
 	o.SetSize(width, 24)
+	o.SetFixedWidth(70)
 	o.SetContent(message)
 	cd := ConfirmDialog{overlay: o, focusedButton: btnNo}
 	cd.updateFooter()
@@ -81,32 +78,12 @@ func (c ConfirmDialog) View() string {
 
 // updateFooter renders the button bar and sets it as the overlay footer.
 func (c *ConfirmDialog) updateFooter() {
-	type btn struct {
-		label  string
-		hotkey string
+	buttons := []Button{
+		{Label: "Yes", Hotkey: "y"},
+		{Label: "Force", Hotkey: "f"},
+		{Label: "No", Hotkey: "N"},
 	}
-	buttons := [buttonCount]btn{
-		{label: "Yes", hotkey: "y"},
-		{label: "Force", hotkey: "f"},
-		{label: "No", hotkey: "N"},
-	}
-
-	focusedStyle := lipgloss.NewStyle().Bold(true).Foreground(theme.Highlight)
-	normalStyle := lipgloss.NewStyle().Foreground(theme.Subtle)
-	sepStyle := lipgloss.NewStyle().Foreground(theme.Muted)
-
-	sep := sepStyle.Render("│")
-	var parts []string
-	for i, b := range buttons {
-		text := b.label + "(" + b.hotkey + ")"
-		if i == c.focusedButton {
-			parts = append(parts, focusedStyle.Render(text))
-		} else {
-			parts = append(parts, normalStyle.Render(text))
-		}
-	}
-	footer := sep + " " + strings.Join(parts, " "+sep+" ") + " " + sep
-	c.overlay.SetFooter(footer)
+	c.overlay.SetFooter(RenderButtonBar(buttons, c.focusedButton))
 }
 
 // focusedAction returns the ConfirmAction for the currently focused button.

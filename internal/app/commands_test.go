@@ -2646,3 +2646,106 @@ func TestLogInsertMarkerCommand(t *testing.T) {
 		t.Fatal("expected marker line in buffer")
 	}
 }
+
+func TestCloseCurrentPanelClosesRightPanel(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+
+	plugin.Register(podsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	// Set objects so Selected() returns non-nil
+	obj := &unstructured.Unstructured{}
+	obj.SetName("test-pod")
+	obj.SetNamespace("default")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{obj})
+
+	// Open a view so the right panel is visible
+	model, _ := app.executeCommand("view-yaml")
+	app = model.(App)
+
+	if !app.layout.RightPanelVisible() {
+		t.Fatal("expected right panel to be visible before close-current-panel")
+	}
+
+	// Focus details so the command closes the right panel
+	app.layout.FocusDetails()
+
+	model, _ = app.executeCommand("close-current-panel")
+	app = model.(App)
+
+	if app.layout.RightPanelVisible() {
+		t.Fatal("expected right panel to be hidden after close-current-panel")
+	}
+}
+
+func TestCloseCurrentPanelClosesSplit(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	deploymentsPlugin := &mockPlugin{
+		name: "deployments",
+		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+
+	plugin.Register(podsPlugin)
+	plugin.Register(deploymentsPlugin)
+
+	// Add two splits
+	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(deploymentsPlugin, "default")
+	if app.layout.SplitCount() != 2 {
+		t.Fatalf("expected 2 splits, got %d", app.layout.SplitCount())
+	}
+
+	// Execute close-current-panel: should close one split
+	model, cmd := app.executeCommand("close-current-panel")
+	app = model.(App)
+
+	if cmd != nil {
+		msg := cmd()
+		if _, ok := msg.(tea.QuitMsg); ok {
+			t.Fatal("close-current-panel should not produce tea.Quit")
+		}
+	}
+
+	if app.layout.SplitCount() != 1 {
+		t.Fatalf("expected 1 split after close-current-panel, got %d", app.layout.SplitCount())
+	}
+}
+
+func TestCloseCurrentPanelNoopWithOneSplit(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+
+	plugin.Register(podsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	if app.layout.SplitCount() != 1 {
+		t.Fatalf("expected 1 split, got %d", app.layout.SplitCount())
+	}
+
+	// With one split and no right panel, close-current-panel should be a no-op
+	model, cmd := app.executeCommand("close-current-panel")
+	app = model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd for no-op close-current-panel")
+	}
+
+	if app.layout.SplitCount() != 1 {
+		t.Fatalf("expected 1 split after no-op, got %d", app.layout.SplitCount())
+	}
+}

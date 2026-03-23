@@ -46,10 +46,10 @@ type Layout struct {
 }
 
 // New creates a new layout with the given terminal dimensions.
-func New(width, height, logBufSize int) Layout {
+func New(width, height, logBufSize int, defaultTimeRange string, defaultSinceSeconds int64) Layout {
 	contentH := height - statusBarHeight
 	dp := ui.NewDetailView(0, contentH)
-	lv := ui.NewLogView(0, contentH, logBufSize)
+	lv := ui.NewLogView(0, contentH, logBufSize, defaultTimeRange, defaultSinceSeconds)
 	return Layout{
 		width:      width,
 		height:     contentH,

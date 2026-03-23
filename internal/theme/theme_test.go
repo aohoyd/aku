@@ -16,6 +16,9 @@ func TestDefaultColors(t *testing.T) {
 	if SyntaxKey == "" {
 		t.Fatal("SyntaxKey must not be empty")
 	}
+	if LogTimestamp == "" {
+		t.Fatal("LogTimestamp must not be empty")
+	}
 }
 
 func TestLoadMissingFile(t *testing.T) {
@@ -94,6 +97,11 @@ search:
   match: "207"
   selected: "208"
   fg: "209"
+log:
+  timestamp: "210"
+  time: "211"
+  timezone: "212"
+  ip: "213"
 `
 	os.WriteFile(path, []byte(content), 0644)
 
@@ -119,6 +127,10 @@ search:
 	origSearchMatch := SearchMatch
 	origSearchSelected := SearchSelected
 	origSearchFg := SearchFg
+	origLogTimestamp := LogTimestamp
+	origLogTime := LogTime
+	origLogTimezone := LogTimezone
+	origLogIP := LogIP
 	defer func() {
 		Accent = origAccent
 		Muted = origMuted
@@ -142,6 +154,10 @@ search:
 		SearchMatch = origSearchMatch
 		SearchSelected = origSearchSelected
 		SearchFg = origSearchFg
+		LogTimestamp = origLogTimestamp
+		LogTime = origLogTime
+		LogTimezone = origLogTimezone
+		LogIP = origLogIP
 	}()
 
 	if err := Load(path); err != nil {
@@ -164,6 +180,9 @@ search:
 	}
 	if string(SearchMatch) != "207" {
 		t.Fatalf("expected SearchMatch 207, got %s", string(SearchMatch))
+	}
+	if string(LogTimestamp) != "210" {
+		t.Fatalf("expected LogTimestamp 210, got %s", string(LogTimestamp))
 	}
 }
 
@@ -194,6 +213,10 @@ func TestKanagawaWaveDefaults(t *testing.T) {
 	SearchMatch = "#FF9E3B"
 	SearchSelected = "#957FB8"
 	SearchFg = "#1F1F28"
+	LogTimestamp = "#FFA066"
+	LogTime = "#7E9CD8"
+	LogTimezone = "#727169"
+	LogIP = "#7FB4CA"
 
 	if err := Load(ThemePath()); err != nil {
 		t.Fatal(err)
@@ -226,10 +249,37 @@ func TestKanagawaWaveDefaults(t *testing.T) {
 		{"SearchMatch", SearchMatch, "#FF9E3B"},
 		{"SearchSelected", SearchSelected, "#957FB8"},
 		{"SearchFg", SearchFg, "#1F1F28"},
+		{"LogTimestamp", LogTimestamp, "#FFA066"},
+		{"LogTime", LogTime, "#7E9CD8"},
+		{"LogTimezone", LogTimezone, "#727169"},
+		{"LogIP", LogIP, "#7FB4CA"},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
 			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
 		}
+	}
+}
+
+func TestLoadPartialOverrideLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "theme.yaml")
+	os.WriteFile(path, []byte("log:\n  timestamp: \"#00FF00\"\n"), 0644)
+
+	origTimestamp := LogTimestamp
+	origTime := LogTime
+	defer func() {
+		LogTimestamp = origTimestamp
+		LogTime = origTime
+	}()
+
+	if err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if string(LogTimestamp) != "#00FF00" {
+		t.Fatalf("expected #00FF00, got %s", string(LogTimestamp))
+	}
+	if LogTime != origTime {
+		t.Fatal("non-overridden field should keep default")
 	}
 }

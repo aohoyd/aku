@@ -15,9 +15,8 @@ type LogOptions struct {
 	Follow       bool
 }
 
-// DefaultLogOptions returns sensible defaults: since 1 minute, follow enabled.
-func DefaultLogOptions() LogOptions {
-	sinceSeconds := int64(60)
+// DefaultLogOptions returns sensible defaults: since given seconds, follow enabled.
+func DefaultLogOptions(sinceSeconds int64) LogOptions {
 	return LogOptions{
 		SinceSeconds: &sinceSeconds,
 		Follow:       true,

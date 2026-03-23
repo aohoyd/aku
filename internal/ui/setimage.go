@@ -7,14 +7,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+// SetImage button indices.
+const (
+	setImageBtnYes = 0
+	setImageBtnNo  = 1
+)
+
 // SetImageOverlay is an overlay for changing container images.
 type SetImageOverlay struct {
-	overlay      Overlay
-	containers   []msgs.ContainerImageChange // original state for diffing
-	resourceName string
-	namespace    string
-	gvr          schema.GroupVersionResource
-	pluginName   string
+	overlay       Overlay
+	containers    []msgs.ContainerImageChange // original state for diffing
+	resourceName  string
+	namespace     string
+	gvr           schema.GroupVersionResource
+	pluginName    string
+	inputFocused  bool
+	focusedButton int
 }
 
 // NewSetImageOverlay creates a new set-image overlay with the given dimensions.
@@ -31,6 +39,8 @@ func (s *SetImageOverlay) Open(resourceName, namespace string, gvr schema.GroupV
 	s.gvr = gvr
 	s.pluginName = pluginName
 	s.containers = containers
+	s.inputFocused = true
+	s.focusedButton = setImageBtnYes
 
 	s.overlay.Reset()
 	s.overlay.SetActive(true)
@@ -47,6 +57,7 @@ func (s *SetImageOverlay) Open(resourceName, namespace string, gvr schema.GroupV
 	if len(containers) > 0 {
 		s.overlay.FocusInput(0)
 	}
+	s.updateFooter()
 }
 
 // Close deactivates the overlay.
@@ -57,6 +68,16 @@ func (s *SetImageOverlay) Close() {
 // Active returns whether the overlay is currently active.
 func (s SetImageOverlay) Active() bool {
 	return s.overlay.Active()
+}
+
+// InputFocused returns whether a text input has focus (vs the button bar).
+func (s SetImageOverlay) InputFocused() bool {
+	return s.inputFocused
+}
+
+// FocusedButton returns the currently focused button index.
+func (s SetImageOverlay) FocusedButton() int {
+	return s.focusedButton
 }
 
 // SetSize updates the terminal dimensions available to the overlay.
@@ -82,20 +103,102 @@ func (s SetImageOverlay) Update(msg tea.Msg) (SetImageOverlay, tea.Cmd) {
 		return s, nil
 
 	case tea.KeyEnter:
-		return s.handleSubmit()
+		if s.inputFocused {
+			return s.handleSubmit()
+		}
+		if s.focusedButton == setImageBtnYes {
+			return s.handleSubmit()
+		}
+		// No button selected.
+		s.Close()
+		return s, nil
 
-	case tea.KeyTab, tea.KeyDown:
-		s.overlay.FocusNextInput()
+	case tea.KeyTab:
+		if s.inputFocused {
+			// If on last input, move to buttons; otherwise next input.
+			current := s.overlay.FocusedInput()
+			if current >= s.overlay.InputCount()-1 {
+				s.focusToButtons()
+			} else {
+				s.overlay.FocusNextInput()
+			}
+		} else {
+			// From buttons, return to first input.
+			s.focusToInput(0)
+		}
+		return s, nil
+
+	case tea.KeyDown:
+		if s.inputFocused {
+			s.overlay.FocusNextInput()
+		}
 		return s, nil
 
 	case tea.KeyUp:
-		s.overlay.FocusPrevInput()
+		if s.inputFocused {
+			s.overlay.FocusPrevInput()
+		} else {
+			// From buttons, move focus to last input.
+			s.focusToInput(s.overlay.InputCount() - 1)
+		}
+		return s, nil
+
+	case tea.KeyLeft:
+		if !s.inputFocused {
+			s.focusedButton = setImageBtnYes
+			s.updateFooter()
+		}
+		return s, nil
+
+	case tea.KeyRight:
+		if !s.inputFocused {
+			s.focusedButton = setImageBtnNo
+			s.updateFooter()
+		}
 		return s, nil
 
 	default:
+		if !s.inputFocused {
+			// Button hotkeys.
+			switch km.String() {
+			case "y", "Y":
+				return s.handleSubmit()
+			case "n", "N":
+				s.Close()
+				return s, nil
+			}
+			return s, nil
+		}
 		cmd := s.overlay.UpdateInputs(km)
 		return s, cmd
 	}
+}
+
+// focusToInput moves focus to the text input at the given index.
+func (s *SetImageOverlay) focusToInput(idx int) {
+	s.inputFocused = true
+	s.overlay.FocusInput(idx)
+	s.updateFooter()
+}
+
+// focusToButtons moves focus to the button bar.
+func (s *SetImageOverlay) focusToButtons() {
+	s.inputFocused = false
+	s.overlay.blurAll()
+	s.updateFooter()
+}
+
+// updateFooter renders the Yes/No button bar as the overlay footer.
+func (s *SetImageOverlay) updateFooter() {
+	buttons := []Button{
+		{Label: "Yes", Hotkey: "y"},
+		{Label: "No", Hotkey: "n"},
+	}
+	focused := s.focusedButton
+	if s.inputFocused {
+		focused = -1
+	}
+	s.overlay.SetFooter(RenderButtonBar(buttons, focused))
 }
 
 func (s SetImageOverlay) handleSubmit() (SetImageOverlay, tea.Cmd) {

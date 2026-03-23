@@ -41,6 +41,7 @@ const (
 	overlayChartInput
 	overlayContainerPicker
 	overlayTimeRange
+	overlayScale
 )
 
 // App is the root Bubbletea model.
@@ -72,6 +73,7 @@ type App struct {
 	chartInputOverlay   ui.ChartInputOverlay
 	containerPicker     ui.ContainerPicker
 	timeRangePicker     ui.TimeRangePicker
+	scaleOverlay        ui.ScaleOverlay
 
 	// Helm
 	helmClient helm.Client
@@ -93,12 +95,18 @@ type App struct {
 // New creates a new App with all dependencies.
 func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *config.Config, pfRegistry *portforward.Registry, helmClient helm.Client) App {
 	bs := keymap.BindingSet()
+	defaultTimeRange := cfg.LogDefaultTimeRange()
+	defaultSinceSeconds, ok := ui.LookupTimePreset(defaultTimeRange)
+	if !ok {
+		defaultTimeRange = "15m"
+		defaultSinceSeconds = 900
+	}
 	a := App{
 		k8sClient:          client,
 		store:              store,
 		bindingSet:         bs,
 		keyTrie:            bs.TrieFor("resources", ""),
-		layout:             layout.New(80, 24, cfg.LogBufferSize()),
+		layout:             layout.New(80, 24, cfg.LogBufferSize(), defaultTimeRange, defaultSinceSeconds),
 		statusBar:          ui.NewStatusBar(80),
 		resourcePicker:     ui.NewResourcePicker(40, 20),
 		nsPicker:           ui.NewNsPicker(40, 20),
@@ -113,6 +121,7 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 		chartInputOverlay:   ui.NewChartInputOverlay(40, 20),
 		containerPicker:     ui.NewContainerPicker(40, 20),
 		timeRangePicker:     ui.NewTimeRangePicker(40, 20),
+		scaleOverlay:        ui.NewScaleOverlay(40, 20),
 	}
 
 	// Populate fuzzy picker with all registered plugins
@@ -178,6 +187,7 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.chartInputOverlay.SetSize(overlayW, overlayH)
 		a.containerPicker.SetSize(overlayW, overlayH)
 		a.timeRangePicker.SetSize(overlayW, overlayH)
+		a.scaleOverlay.SetSize(overlayW, overlayH)
 		a.helpOverlay.SetSize(msg.Width, msg.Height)
 		if a.activeOverlay == overlayConfirm {
 			a.confirmDialog.SetWidth(msg.Width)
@@ -188,6 +198,18 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Ctrl-c always quits immediately
 		if msg.String() == "ctrl+c" {
 			return a, tea.Quit
+		}
+
+		// ctrl+w closes current panel / overlay
+		if msg.String() == "ctrl+w" {
+			if a.activeOverlay != overlayNone {
+				a.activeOverlay = overlayNone
+				a.pendingRun = nil
+				a.pendingBulkDelete = nil
+				a.pendingDelete = nil
+				return a, nil
+			}
+			// Fall through to handleKey → executeCommand for structural panels
 		}
 
 		switch a.activeOverlay {
@@ -265,6 +287,13 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			updated, cmd := a.timeRangePicker.Update(msg)
 			a.timeRangePicker = updated
 			if !a.timeRangePicker.Active() {
+				a.activeOverlay = overlayNone
+			}
+			return a, cmd
+		case overlayScale:
+			updated, cmd := a.scaleOverlay.Update(msg)
+			a.scaleOverlay = updated
+			if !a.scaleOverlay.Active() {
 				a.activeOverlay = overlayNone
 			}
 			return a, cmd
@@ -380,6 +409,9 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgs.SetImageRequestedMsg:
 		return a.handleSetImageRequested(msg)
 
+	case msgs.ScaleRequestedMsg:
+		return a.handleScaleRequested(msg)
+
 	case msgs.HelmRollbackRequestedMsg:
 		return a.handleHelmRollback(msg)
 
@@ -471,7 +503,7 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if ns == "" {
 			ns = focused.Namespace()
 		}
-		a, cmd := a.startLogStream(podName, msg.Container, ns, k8s.DefaultLogOptions())
+		a, cmd := a.startLogStream(podName, msg.Container, ns, a.defaultLogOptions())
 		return a, cmd
 
 	case msgs.LogTimeRangeSelectedMsg:
@@ -665,8 +697,24 @@ func (a App) restartLogForCursor() (tea.Model, tea.Cmd) {
 	lv.SetContainers(containers)
 	lv.SetActiveContainer(containerName)
 
-	a, cmd := a.startLogStream(podName, containerName, ns, k8s.DefaultLogOptions())
+	a, cmd := a.startLogStream(podName, containerName, ns, a.defaultLogOptions())
 	return a, cmd
+}
+
+// defaultLogOptions builds LogOptions from the configured default time range,
+// correctly handling sentinel values like "tail 200" (-1) and "all" (0).
+func (a App) defaultLogOptions() k8s.LogOptions {
+	lv := a.layout.LogView()
+	s := lv.DefaultSinceSeconds()
+	opts := k8s.LogOptions{Follow: true}
+	if s > 0 {
+		opts.SinceSeconds = &s
+	} else if s == -1 {
+		tail := int64(200)
+		opts.TailLines = &tail
+	}
+	// s == 0 ("all") leaves both nil, streaming everything
+	return opts
 }
 
 // searchTarget returns the component that should receive search operations
@@ -863,6 +911,10 @@ func (a App) View() tea.View {
 		}
 	case overlayTimeRange:
 		if v := a.timeRangePicker.View(); v != "" {
+			main = ui.PlaceOverlay(a.width, a.height, main, v)
+		}
+	case overlayScale:
+		if v := a.scaleOverlay.View(); v != "" {
 			main = ui.PlaceOverlay(a.width, a.height, main, v)
 		}
 	}

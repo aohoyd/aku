@@ -256,6 +256,14 @@ func TestEscResolvesClearOverlay(t *testing.T) {
 	}
 }
 
+func TestCtrlWResolvesCloseCurrentPanel(t *testing.T) {
+	trie := DefaultKeyTrie()
+	cmd, _, resolved := trie.Press("ctrl+w")
+	if !resolved || cmd != "close-current-panel" {
+		t.Fatalf("ctrl+w should resolve to close-current-panel, got resolved=%v cmd=%q", resolved, cmd)
+	}
+}
+
 func TestDetailPanelExitBindings(t *testing.T) {
 	bs := NewBindingSet(DefaultBindings())
 	trie := bs.TrieFor("details", "pods")

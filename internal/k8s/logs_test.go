@@ -9,7 +9,7 @@ import (
 func TestStreamLogsNilClient(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	ch, err := StreamLogs(ctx, nil, "pod", "container", "ns", DefaultLogOptions())
+	ch, err := StreamLogs(ctx, nil, "pod", "container", "ns", DefaultLogOptions(60))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -21,7 +21,7 @@ func TestStreamLogsNilClient(t *testing.T) {
 
 func TestStreamLogsContextCancelClosesChannel(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
-	ch, err := StreamLogs(ctx, nil, "pod", "container", "ns", DefaultLogOptions())
+	ch, err := StreamLogs(ctx, nil, "pod", "container", "ns", DefaultLogOptions(60))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -34,13 +34,14 @@ func DefaultBindings() []Binding {
 			{Key: "n", Help: "namespaces", Command: "split-namespaces"},
 			{Key: "S", Help: "statefulsets", Command: "split-statefulsets"},
 			{Key: "D", Help: "daemonsets", Command: "split-daemonsets"},
-			{Key: "f", Help: "port-forwards", Command: "goto-portforwards"},
+			{Key: "f", Help: "port-forwards", Command: "split-portforwards"},
 			{Key: "H", Help: "helm", Command: "split-helmreleases"},
 		}},
 
 		// ── Global, hidden from statusbar (default) ──
 		{Key: ":", Help: "resource picker", Command: "resource-picker"},
 		{Key: "esc", Help: "close/clear", Command: "clear-overlay"},
+		{Key: "ctrl+w", Help: "close panel", Command: "close-current-panel"},
 		{Key: "ctrl+r", Help: "reload", Command: "reload-all"},
 		{Key: "j", Help: "down", Command: "cursor-down"},
 		{Key: "k", Help: "up", Command: "cursor-up"},
@@ -109,15 +110,14 @@ func DefaultBindings() []Binding {
 			For: []string{"pods", "containers"}, Visible: true},
 		{Key: "i", Help: "set image", Command: "set-image",
 			For: []string{"pods", "containers", "deployments", "statefulsets", "daemonsets"}, Visible: true},
+		{Key: "s", Help: "scale", Command: "scale", Scope: "resources",
+			For: []string{"deployments", "statefulsets"}, Visible: true},
 		{Key: "R", Help: "rollout restart", Command: "rollout-restart",
 			For: []string{"pods", "deployments"}, Visible: true},
 		{Key: "R", Help: "rollback", Command: "helm-rollback",
 			For: []string{"helmreleases"}, Visible: true},
 		{Key: "C", Help: "set chart", Command: "helm-set-chart",
 			For: []string{"helmreleases"}, Visible: true},
-		{Key: "p", Help: "...", For: []string{"pods", "containers"}, Keys: []Binding{
-			{Key: "f", Help: "port-forward", Command: "port-forward"},
-		}},
 		{Key: "s", Help: "exec", Scope: "resources", Visible: true,
 			For: []string{"pods", "containers", "nodes"}, Keys: []Binding{
 				{Key: "d", Help: "debug", Command: "debug"},
@@ -125,6 +125,9 @@ func DefaultBindings() []Binding {
 				{Key: "s", Help: "exec", Command: "exec",
 					For: []string{"pods", "containers"}, Visible: true},
 			}},
+		{Key: "f", Help: "port-forward", Command: "port-forward", For: []string{"pods", "containers"}},
+		{Key: "F", Help: "port-forwards", Scope: "resources", Command: "split-portforwards",
+			For: []string{"pods", "containers"}, Visible: true},
 	}
 }
 

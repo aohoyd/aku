@@ -79,11 +79,17 @@ func TestPortForwardTabCycle(t *testing.T) {
 	if pf.overlay.FocusedInput() != 0 {
 		t.Fatalf("expected filter focused (0), got %d", pf.overlay.FocusedInput())
 	}
+	if !pf.InputFocused() {
+		t.Fatal("expected input focused initially")
+	}
 
 	// Tab -> list
 	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if pf.overlay.FocusedInput() != -1 {
 		t.Fatalf("expected list focused (-1), got %d", pf.overlay.FocusedInput())
+	}
+	if !pf.InputFocused() {
+		t.Fatal("expected input focused (list is still input area)")
 	}
 
 	// Tab -> local port (input 1)
@@ -91,11 +97,23 @@ func TestPortForwardTabCycle(t *testing.T) {
 	if pf.overlay.FocusedInput() != 1 {
 		t.Fatalf("expected local port focused (1), got %d", pf.overlay.FocusedInput())
 	}
+	if !pf.InputFocused() {
+		t.Fatal("expected input focused on local port")
+	}
+
+	// Tab -> buttons
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if pf.InputFocused() {
+		t.Fatal("expected buttons focused after Tab from local port")
+	}
 
 	// Tab -> back to filter (input 0)
 	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	if pf.overlay.FocusedInput() != 0 {
 		t.Fatalf("expected filter focused (0), got %d", pf.overlay.FocusedInput())
+	}
+	if !pf.InputFocused() {
+		t.Fatal("expected input focused after cycling back to filter")
 	}
 }
 
@@ -181,5 +199,170 @@ func TestPortForwardInvalidPort(t *testing.T) {
 	}
 	if !pf.Active() {
 		t.Fatal("overlay should stay active on invalid port")
+	}
+}
+
+// ── Focus and button tests ──
+
+func TestPortForwardTabTogglesFocus(t *testing.T) {
+	pf := NewPortForwardOverlay(80, 30)
+	pf.Open("my-pod", "default", testPorts[:1])
+
+	if !pf.InputFocused() {
+		t.Fatal("expected input focused initially")
+	}
+
+	// Tab through: filter -> list -> local port -> buttons
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // list
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // local port
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // buttons
+	if pf.InputFocused() {
+		t.Fatal("expected buttons focused after Tab from local port")
+	}
+
+	// Tab back to filter (input).
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !pf.InputFocused() {
+		t.Fatal("expected input focused after Tab from buttons")
+	}
+}
+
+func TestPortForwardButtonHotkeys(t *testing.T) {
+	pf := NewPortForwardOverlay(80, 30)
+	pf.Open("my-pod", "default", testPorts[:1])
+
+	// Tab to buttons: filter -> list -> local port -> buttons
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+
+	// Press y — should submit.
+	pf, cmd := pf.Update(tea.KeyPressMsg{Code: -1, Text: "y"})
+	if pf.Active() {
+		t.Fatal("expected overlay to close after y hotkey")
+	}
+	if cmd == nil {
+		t.Fatal("expected a command from y hotkey")
+	}
+	msg := cmd()
+	pfMsg, ok := msg.(msgs.PortForwardRequestedMsg)
+	if !ok {
+		t.Fatalf("expected PortForwardRequestedMsg, got %T", msg)
+	}
+	if pfMsg.LocalPort != 80 || pfMsg.RemotePort != 80 {
+		t.Errorf("expected ports 80:80, got %d:%d", pfMsg.LocalPort, pfMsg.RemotePort)
+	}
+}
+
+func TestPortForwardHotkeysIgnoredWhenInputFocused(t *testing.T) {
+	pf := NewPortForwardOverlay(80, 30)
+	pf.Open("my-pod", "default", testPorts[:1])
+
+	// Input is focused — y/n should go to the input, not act as hotkeys.
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: -1, Text: "y"})
+	if !pf.Active() {
+		t.Fatal("overlay should remain active when y typed into input")
+	}
+
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: -1, Text: "n"})
+	if !pf.Active() {
+		t.Fatal("overlay should remain active when n typed into input")
+	}
+}
+
+func TestPortForwardButtonNavigation(t *testing.T) {
+	pf := NewPortForwardOverlay(80, 30)
+	pf.Open("my-pod", "default", testPorts[:1])
+
+	// Tab to buttons: filter -> list -> local port -> buttons
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+
+	// Yes is focused by default.
+	if pf.FocusedButton() != pfBtnYes {
+		t.Fatal("expected Yes button focused")
+	}
+
+	// Right arrow → No.
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	if pf.FocusedButton() != pfBtnNo {
+		t.Fatal("expected No button focused after Right")
+	}
+
+	// Left arrow → Yes.
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if pf.FocusedButton() != pfBtnYes {
+		t.Fatal("expected Yes button focused after Left")
+	}
+}
+
+func TestPortForwardEnterOnNoButton(t *testing.T) {
+	pf := NewPortForwardOverlay(80, 30)
+	pf.Open("my-pod", "default", testPorts[:1])
+
+	// Tab to buttons, navigate to No, press Enter.
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	pf, cmd := pf.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if pf.Active() {
+		t.Fatal("expected overlay to close after Enter on No")
+	}
+	if cmd != nil {
+		t.Fatal("expected no command from No button")
+	}
+}
+
+func TestPortForwardUpFromButtonsFocusesInput(t *testing.T) {
+	pf := NewPortForwardOverlay(80, 30)
+	pf.Open("my-pod", "default", testPorts[:1])
+
+	// Tab to buttons: filter -> list -> local port -> buttons
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if pf.InputFocused() {
+		t.Fatal("expected buttons focused")
+	}
+
+	// Up arrow returns to local port input (1).
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	if !pf.InputFocused() {
+		t.Fatal("expected input focused after Up from buttons")
+	}
+	if pf.overlay.FocusedInput() != 1 {
+		t.Fatalf("expected local port focused (1), got %d", pf.overlay.FocusedInput())
+	}
+}
+
+func TestPortForwardSubmitViaButtonYes(t *testing.T) {
+	pf := NewPortForwardOverlay(80, 30)
+	pf.Open("my-pod", "default", testPorts[:1])
+
+	// Tab to buttons: filter -> list -> local port -> buttons
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+
+	// Yes is focused by default. Press Enter.
+	pf, cmd := pf.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if pf.Active() {
+		t.Fatal("expected overlay to close after Enter on Yes button")
+	}
+	if cmd == nil {
+		t.Fatal("expected a command from Yes button")
+	}
+	msg := cmd()
+	pfMsg, ok := msg.(msgs.PortForwardRequestedMsg)
+	if !ok {
+		t.Fatalf("expected PortForwardRequestedMsg, got %T", msg)
+	}
+	if pfMsg.LocalPort != 80 || pfMsg.RemotePort != 80 {
+		t.Errorf("expected ports 80:80, got %d:%d", pfMsg.LocalPort, pfMsg.RemotePort)
+	}
+	if pfMsg.PodName != "my-pod" || pfMsg.PodNamespace != "default" {
+		t.Errorf("expected pod my-pod/default, got %s/%s", pfMsg.PodName, pfMsg.PodNamespace)
 	}
 }
