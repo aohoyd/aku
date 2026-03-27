@@ -438,10 +438,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			ns = focused.Namespace()
 		}
 		podName := resolvePodName(focused, selected)
-		containerName := ""
-		if focused.Plugin().Name() == "containers" {
-			containerName = selected.GetName()
-		}
+		containerName := resolveContainerName(focused, selected)
 		return a, k8s.ExecCmd(a.k8sClient, podName, containerName, ns, a.config.ExecCommand())
 
 	case command == "debug" || command == "debug-privileged":
@@ -1019,8 +1016,6 @@ func (a App) unsubscribeIfUnused(gvr schema.GroupVersionResource, namespace stri
 }
 
 func (a App) handleNamespaceSwitch(ns string) (tea.Model, tea.Cmd) {
-	a = a.stopLogStream()
-	a.layout.SetLogMode(false)
 	a.envResolved = false
 	focused := a.layout.FocusedSplit()
 	if focused == nil {
@@ -1036,6 +1031,11 @@ func (a App) handleNamespaceSwitch(ns string) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
+	// Tear down log stream only after confirming we'll actually switch
+	wasLogMode := a.layout.IsLogMode()
+	a = a.stopLogStream()
+	a.layout.SetLogMode(false)
+
 	oldGVR := focused.Plugin().GVR()
 
 	// Update pane namespace and clear stale data
@@ -1048,6 +1048,15 @@ func (a App) handleNamespaceSwitch(ns string) (tea.Model, tea.Cmd) {
 
 	// Unsubscribe old if no other pane uses it
 	a.unsubscribeIfUnused(oldGVR, oldNs)
+
+	// Restore log mode: mark unavailable until objects arrive
+	if wasLogMode && isLoggablePlugin(focused.Plugin().Name()) {
+		a.layout.SetLogMode(true)
+		if lv := a.layout.LogView(); lv != nil {
+			lv.ClearAndRestart()
+			lv.SetUnavailable(true)
+		}
+	}
 
 	a = a.refreshDetailPanel()
 	return a, nil
@@ -1220,10 +1229,7 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 		ns = focused.Namespace()
 	}
 	podName := resolvePodName(focused, selected)
-	containerName := ""
-	if pluginName == "containers" {
-		containerName = selected.GetName()
-	}
+	containerName := resolveContainerName(focused, selected)
 
 	return a, k8s.DebugCmd(a.k8sClient, podName, containerName, ns, image, command, privileged)
 }
@@ -1556,6 +1562,25 @@ func resolvePodName(split *ui.ResourceList, obj *unstructured.Unstructured) stri
 		}
 	}
 	return obj.GetName()
+}
+
+// resolveContainerName returns an explicit container name for exec/debug.
+// In the containers view the selected row is the container itself. In the pods
+// view we pick the first regular container from spec.containers so the
+// Kubernetes API never receives an empty name (which fails for multi-container pods).
+func resolveContainerName(split *ui.ResourceList, obj *unstructured.Unstructured) string {
+	if split.Plugin().Name() == "containers" {
+		return obj.GetName()
+	}
+	specs, _, _ := unstructured.NestedSlice(obj.Object, "spec", "containers")
+	for _, spec := range specs {
+		if m, ok := spec.(map[string]any); ok {
+			if name, ok := m["name"].(string); ok {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 func extractContainerNames(obj *unstructured.Unstructured) []string {

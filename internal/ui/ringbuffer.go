@@ -6,6 +6,7 @@ package ui
 type DualRingBuffer struct {
 	raw      []string
 	colored  []string
+	widths   []int
 	head     int // next write position
 	count    int // current number of valid lines
 	capacity int
@@ -20,17 +21,20 @@ func NewDualRingBuffer(capacity int) *DualRingBuffer {
 	return &DualRingBuffer{
 		raw:      make([]string, capacity),
 		colored:  make([]string, capacity),
+		widths:   make([]int, capacity),
 		capacity: capacity,
 	}
 }
 
-// Append adds a raw and colored line pair. If at capacity, the oldest pair is evicted.
-func (d *DualRingBuffer) Append(raw, colored string) {
+// Append adds a raw and colored line pair with a pre-computed display width.
+// If at capacity, the oldest pair is evicted.
+func (d *DualRingBuffer) Append(raw, colored string, rawWidth int) {
 	if d.count == d.capacity {
 		d.dropped++
 	}
 	d.raw[d.head] = raw
 	d.colored[d.head] = colored
+	d.widths[d.head] = rawWidth
 	d.head = (d.head + 1) % d.capacity
 	if d.count < d.capacity {
 		d.count++
@@ -59,12 +63,28 @@ func (d *DualRingBuffer) ColoredGet(i int) string {
 	return d.colored[d.physIdx(i)]
 }
 
+// WidthGet returns the pre-computed display width at logical index i (0 = oldest).
+// Returns 0 for out-of-bounds indices.
+func (d *DualRingBuffer) WidthGet(i int) int {
+	if i < 0 || i >= d.count {
+		return 0
+	}
+	return d.widths[d.physIdx(i)]
+}
+
+// WidthSlice returns a copy of widths[start:end] in logical order.
+func (d *DualRingBuffer) WidthSlice(start, end int) []int {
+	return d.copyIntSlice(d.widths, start, end)
+}
+
 // SetColored overwrites the colored line at logical index i.
-func (d *DualRingBuffer) SetColored(i int, s string) {
+func (d *DualRingBuffer) SetColored(i int, s string, width int) {
 	if i < 0 || i >= d.count {
 		return
 	}
-	d.colored[d.physIdx(i)] = s
+	idx := d.physIdx(i)
+	d.colored[idx] = s
+	d.widths[idx] = width
 }
 
 // RawAll returns all raw lines in order (oldest to newest) using bulk copy.
@@ -85,6 +105,7 @@ func (d *DualRingBuffer) ColoredSlice(start, end int) []string {
 func (d *DualRingBuffer) Reset() {
 	clear(d.raw)
 	clear(d.colored)
+	clear(d.widths)
 	d.head = 0
 	d.count = 0
 	d.dropped = 0
@@ -109,6 +130,31 @@ func (d *DualRingBuffer) copySlice(arr []string, start, end int) []string {
 	}
 	n := end - start
 	result := make([]string, n)
+	physStart := d.physIdx(start)
+	if physStart+n <= d.capacity {
+		copy(result, arr[physStart:physStart+n])
+	} else {
+		first := d.capacity - physStart
+		copy(result[:first], arr[physStart:])
+		copy(result[first:], arr[:n-first])
+	}
+	return result
+}
+
+// copyIntSlice extracts a logical range [start, end) from the given int backing array
+// using bulk copy where possible.
+func (d *DualRingBuffer) copyIntSlice(arr []int, start, end int) []int {
+	if start < 0 {
+		start = 0
+	}
+	if end > d.count {
+		end = d.count
+	}
+	if start >= end {
+		return nil
+	}
+	n := end - start
+	result := make([]int, n)
 	physStart := d.physIdx(start)
 	if physStart+n <= d.capacity {
 		copy(result, arr[physStart:physStart+n])

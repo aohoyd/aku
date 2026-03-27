@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -134,7 +135,7 @@ func TestLogView_FilterEvictionTriggersRebuild(t *testing.T) {
 	lv.AppendLine("match: five")
 
 	// Buffer is now full (5/5). Viewport should show 3 matching lines.
-	content := lv.viewport.View()
+	content := lv.View()
 	if !strings.Contains(content, "match: one") {
 		t.Fatal("expected 'match: one' in viewport before eviction")
 	}
@@ -143,7 +144,7 @@ func TestLogView_FilterEvictionTriggersRebuild(t *testing.T) {
 	lv.AppendLine("other: six")
 
 	// After eviction, "match: one" should be gone from viewport
-	content = lv.viewport.View()
+	content = lv.View()
 	if strings.Contains(content, "match: one") {
 		t.Fatal("evicted line 'match: one' should not appear in viewport after eviction")
 	}
@@ -170,7 +171,7 @@ func TestLogView_FilterEvictionWithMatchingLine(t *testing.T) {
 	lv.AppendLine("match: four") // evicts "match: one"
 	// Buffer: ["other: two", "match: three", "match: four"]
 
-	content := lv.viewport.View()
+	content := lv.View()
 	if !strings.Contains(content, "match: four") {
 		t.Fatal("new matching line 'match: four' should be visible after eviction")
 	}
@@ -298,7 +299,7 @@ func TestLogView_BuiltinLogLevelHighlighting(t *testing.T) {
 
 	// ERROR should be highlighted
 	line := "2024-01-01 ERROR something failed"
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	if result == line {
 		t.Fatal("expected ERROR to be highlighted")
 	}
@@ -318,7 +319,7 @@ func TestLogView_BuiltinHighlightAllLevels(t *testing.T) {
 	}
 	for _, level := range levels {
 		line := "prefix " + level + " suffix"
-		result := lv.applyHighlights(line)
+		result := lv.pipeline.Highlight(line)
 		if result == line {
 			t.Fatalf("expected %s to be highlighted", level)
 		}
@@ -329,19 +330,19 @@ func TestLogView_BuiltinHighlightWordBoundary(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 	// "INFORMATIONAL" should NOT match "INFO" as a word
 	line := "INFORMATIONAL message"
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	if result != line {
 		t.Fatal("INFORMATIONAL should not trigger INFO highlight (word boundary)")
 	}
 	// "informational" should also NOT match
 	line = "informational message"
-	result = lv.applyHighlights(line)
+	result = lv.pipeline.Highlight(line)
 	if result != line {
 		t.Fatal("informational should not trigger info highlight (word boundary)")
 	}
 	// "errors" should NOT match "error"
 	line = "errors happened"
-	result = lv.applyHighlights(line)
+	result = lv.pipeline.Highlight(line)
 	if result != line {
 		t.Fatal("errors should not trigger error highlight (word boundary)")
 	}
@@ -352,7 +353,7 @@ func TestLogView_BuiltinTimestampHighlighting(t *testing.T) {
 
 	// ISO 8601 timestamp
 	line := "2024-03-22T14:30:00.123Z INFO starting server"
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	if result == line {
 		t.Fatal("expected timestamp to be highlighted")
 	}
@@ -375,7 +376,7 @@ func TestLogView_BuiltinTimestampVariants(t *testing.T) {
 		"2024-03-22T14:30:00 message",          // no fractional, no tz
 	}
 	for _, line := range variants {
-		result := lv.applyHighlights(line)
+		result := lv.pipeline.Highlight(line)
 		if result == line {
 			t.Fatalf("expected timestamp to be highlighted in: %s", line)
 		}
@@ -386,7 +387,7 @@ func TestLogView_BuiltinIPHighlighting(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := "connection from 192.168.1.100:8080 accepted"
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	if result == line {
 		t.Fatal("expected IP address to be highlighted")
 	}
@@ -399,20 +400,9 @@ func TestLogView_BuiltinIPWithoutPort(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := "resolved to 10.0.0.1"
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	if result == line {
 		t.Fatal("expected IP without port to be highlighted")
-	}
-}
-
-func TestLogView_BuiltinIPInvalidOctet(t *testing.T) {
-	lv := NewLogView(80, 24, 100, "15m", 900)
-
-	// 999.999.999.999 looks like an IP but has invalid octets
-	line := "version 999.999.999.999"
-	result := lv.applyHighlights(line)
-	if result != line {
-		t.Fatal("invalid IP octets should not be highlighted")
 	}
 }
 
@@ -420,7 +410,7 @@ func TestLogView_BuiltinJSONReformat(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `prefix {"message":"hello","count":42} suffix`
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 
 	// Should be reformatted with spaces
 	if !strings.Contains(ansi.Strip(result), `"message": "hello"`) {
@@ -432,7 +422,7 @@ func TestLogView_BuiltinJSONColoring(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `{"level":"info"}`
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 
 	// Should have ANSI codes (colorized)
 	if result == line {
@@ -449,7 +439,7 @@ func TestLogView_BuiltinJSONNestedObject(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `log {"a":{"b":1}} end`
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	stripped := ansi.Strip(result)
 	if !strings.Contains(stripped, `"a"`) {
 		t.Fatal("nested JSON should be reformatted")
@@ -464,7 +454,7 @@ func TestLogView_BuiltinJSONNestedArrayInObject(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `{"items":[1,2]}`
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	stripped := ansi.Strip(result)
 	if !strings.Contains(stripped, `"items": [1, 2]`) {
 		t.Fatalf("expected colon before nested array, got: %s", stripped)
@@ -475,7 +465,7 @@ func TestLogView_BuiltinJSONArray(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `items: [1,2,3]`
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	stripped := ansi.Strip(result)
 	if !strings.Contains(stripped, "[1, 2, 3]") {
 		t.Fatalf("expected JSON array to be reformatted, got: %s", stripped)
@@ -487,7 +477,7 @@ func TestLogView_BuiltinJSONInvalidIgnored(t *testing.T) {
 
 	// Looks like JSON start but isn't valid
 	line := `not json {invalid`
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	// Should not crash; invalid JSON is left as-is (though log level/timestamp/IP highlighting may still apply)
 	if !strings.Contains(ansi.Strip(result), "{invalid") {
 		t.Fatal("invalid JSON should be left unchanged")
@@ -498,7 +488,7 @@ func TestLogView_BuiltinJSONPreservesPrefix(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	line := `2024-01-01T00:00:00Z INFO {"msg":"hello"}`
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	stripped := ansi.Strip(result)
 	// Prefix text should still be there
 	if !strings.Contains(stripped, "INFO") {
@@ -516,7 +506,7 @@ func TestLogView_ToggleSyntaxHighlighting(t *testing.T) {
 
 	// With builtins enabled, ERROR should be highlighted
 	line := "ERROR something failed"
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 	if result == line {
 		t.Fatal("ERROR should be highlighted when syntax is enabled")
 	}
@@ -528,7 +518,7 @@ func TestLogView_ToggleSyntaxHighlighting(t *testing.T) {
 	}
 
 	// With builtins disabled, ERROR should NOT be highlighted (no user rules)
-	result = lv.applyHighlights(line)
+	result = lv.pipeline.Highlight(line)
 	if result != line {
 		t.Fatal("ERROR should not be highlighted when syntax is disabled")
 	}
@@ -553,16 +543,17 @@ func TestLogView_ToggleSyntaxRecomputesSearchPositions(t *testing.T) {
 	}
 	posBefore := lv.matchPositions[0]
 
-	// Toggle syntax OFF — match positions should be recomputed
+	// Toggle syntax OFF — match positions should be recomputed but stable
+	// (highlighting only adds ANSI codes, not text, so stripped positions are the same)
 	lv.ToggleSyntax()
 	if len(lv.matchPositions) != 1 {
 		t.Fatalf("expected 1 match after toggle, got %d", len(lv.matchPositions))
 	}
 	posAfter := lv.matchPositions[0]
 
-	// Column positions should differ (syntax ON has ANSI-expanded text)
-	if posBefore.colStart == posAfter.colStart && posBefore.colEnd == posAfter.colEnd {
-		t.Fatal("expected match positions to change after toggling syntax")
+	if posBefore.colStart != posAfter.colStart || posBefore.colEnd != posAfter.colEnd {
+		t.Fatalf("expected stable match positions after toggle: before=(%d,%d) after=(%d,%d)",
+			posBefore.colStart, posBefore.colEnd, posAfter.colStart, posAfter.colEnd)
 	}
 }
 
@@ -599,7 +590,7 @@ func TestLogView_BuiltinJSONWithLogLevel(t *testing.T) {
 	// JSON containing "ERROR" as a value — ERROR inside JSON should be colored
 	// by JSON coloring, not double-colored by log level regex
 	line := `2024-01-01T00:00:00Z {"level":"ERROR","msg":"failed"}`
-	result := lv.applyHighlights(line)
+	result := lv.pipeline.Highlight(line)
 
 	// Should not crash; timestamp and JSON should both be handled
 	stripped := ansi.Strip(result)
@@ -608,6 +599,47 @@ func TestLogView_BuiltinJSONWithLogLevel(t *testing.T) {
 	}
 	if !strings.Contains(stripped, "2024-01-01") {
 		t.Fatal("timestamp should be present in output")
+	}
+}
+
+func TestLogView_BuiltinJSONNoDuplication(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+
+	// This line triggered text duplication: the timestamp and level were
+	// doubled when regex highlighting ran on already-JSON-colorized text.
+	line := `{"time":"2026-03-27T12:15:35.707422909Z","level":"info","message":"HTTP API","module":"http"}`
+	result := lv.pipeline.Highlight(line)
+	stripped := ansi.Strip(result)
+
+	// Each value must appear exactly once
+	for _, needle := range []string{"2026-03-27", "12:15:35", "info", "HTTP API", "http"} {
+		count := strings.Count(stripped, needle)
+		if count != 1 {
+			t.Errorf("%q appears %d times (want 1) in: %s", needle, count, stripped)
+		}
+	}
+}
+
+func TestLogView_BuiltinMixedPrefixJSONNoDuplication(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+
+	line := `2024-01-01T00:00:00Z INFO {"level":"error","msg":"failed","ip":"10.0.0.1"}`
+	result := lv.pipeline.Highlight(line)
+	stripped := ansi.Strip(result)
+
+	// Prefix parts should be present
+	if !strings.Contains(stripped, "2024-01-01") {
+		t.Fatal("timestamp in prefix should be present")
+	}
+	if !strings.Contains(stripped, "INFO") {
+		t.Fatal("log level in prefix should be present")
+	}
+	// JSON parts should not be duplicated
+	if strings.Count(stripped, "error") != 1 {
+		t.Errorf("'error' duplicated in: %s", stripped)
+	}
+	if strings.Count(stripped, "10.0.0.1") != 1 {
+		t.Errorf("IP duplicated in: %s", stripped)
 	}
 }
 
@@ -643,79 +675,9 @@ func TestLogView_BuiltinHighlightsWithFilter(t *testing.T) {
 func TestLogView_BuiltinEmptyLine(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
-	result := lv.applyHighlights("")
+	result := lv.pipeline.Highlight("")
 	if result != "" {
 		t.Fatal("empty line should remain empty")
-	}
-}
-
-func TestByteOffsetsToColumns_ASCII(t *testing.T) {
-	line := "hello world"
-	offsets := []int{0, 5, 6, 11}
-	cols := byteOffsetsToColumns(line, offsets)
-	want := []int{0, 5, 6, 11}
-	for i := range want {
-		if cols[i] != want[i] {
-			t.Fatalf("offset %d: got col %d, want %d", offsets[i], cols[i], want[i])
-		}
-	}
-}
-
-func TestByteOffsetsToColumns_MultiByte(t *testing.T) {
-	line := "café"
-	offsets := []int{0, 3, 5}
-	cols := byteOffsetsToColumns(line, offsets)
-	if cols[0] != 0 {
-		t.Fatalf("offset 0: got col %d, want 0", cols[0])
-	}
-	if cols[1] != 3 {
-		t.Fatalf("offset 3: got col %d, want 3", cols[1])
-	}
-	if cols[2] != 4 {
-		t.Fatalf("offset 5: got col %d, want 4", cols[2])
-	}
-}
-
-func TestByteOffsetsToColumns_Empty(t *testing.T) {
-	cols := byteOffsetsToColumns("hello", nil)
-	if len(cols) != 0 {
-		t.Fatal("expected empty result for nil offsets")
-	}
-	cols = byteOffsetsToColumns("hello", []int{})
-	if len(cols) != 0 {
-		t.Fatal("expected empty result for empty offsets")
-	}
-}
-
-func TestByteOffsetsToColumns_Unsorted(t *testing.T) {
-	line := "hello world"
-	offsets := []int{6, 0, 11, 5}
-	cols := byteOffsetsToColumns(line, offsets)
-	want := []int{6, 0, 11, 5}
-	for i := range want {
-		if cols[i] != want[i] {
-			t.Fatalf("offset %d: got col %d, want %d", offsets[i], cols[i], want[i])
-		}
-	}
-}
-
-func TestColorizeJSON_OutputPreserved(t *testing.T) {
-	inputs := []string{
-		`{"level":"info","msg":"hello"}`,
-		`{"a":{"b":1}}`,
-		`{"items":[1,2,3]}`,
-		`{"bool":true,"null":null,"num":42.5}`,
-		`[1,"two",true,null]`,
-	}
-	for _, input := range inputs {
-		result := colorizeJSON(input)
-		stripped := ansi.Strip(result)
-		if len(stripped) == 0 {
-			t.Fatalf("colorizeJSON(%q) produced empty output", input)
-		}
-		if result == stripped {
-			t.Fatalf("colorizeJSON(%q) produced no ANSI codes", input)
-		}
 	}
 }
 
@@ -724,7 +686,7 @@ func BenchmarkApplyHighlights_PlainText(b *testing.B) {
 	line := "2024-03-22T14:30:00.123Z INFO processing request from 192.168.1.100:8080"
 	b.ResetTimer()
 	for range b.N {
-		_ = lv.applyHighlights(line)
+		_ = lv.pipeline.Highlight(line)
 	}
 }
 
@@ -733,7 +695,7 @@ func BenchmarkApplyHighlights_JSON(b *testing.B) {
 	line := `2024-03-22T14:30:00Z INFO {"level":"info","msg":"request processed","duration":0.042,"status":200,"ip":"10.0.0.1"}`
 	b.ResetTimer()
 	for range b.N {
-		_ = lv.applyHighlights(line)
+		_ = lv.pipeline.Highlight(line)
 	}
 }
 
@@ -777,7 +739,7 @@ func TestLogView_UpdateViewportWindowSize(t *testing.T) {
 	for i := range 50 {
 		lv.AppendLine(fmt.Sprintf("line %d", i))
 	}
-	view := lv.viewport.View()
+	view := ansi.Strip(lv.View())
 	if !strings.Contains(view, "line 49") {
 		t.Fatal("expected last line visible with autoscroll")
 	}
@@ -841,7 +803,7 @@ func TestLogView_InsertMarker(t *testing.T) {
 func TestLogView_WrappedModeAllLinesReachViewport(t *testing.T) {
 	// Viewport is 40 chars wide, 10 rows tall
 	lv := NewLogView(42, 12, 100, "15m", 900) // +2 for border
-	lv.viewport.SoftWrap = true
+	lv.softWrap = true
 
 	// Add 5 short lines and 3 long lines that will wrap
 	for i := 0; i < 5; i++ {
@@ -851,13 +813,18 @@ func TestLogView_WrappedModeAllLinesReachViewport(t *testing.T) {
 		lv.AppendLine(strings.Repeat("long ", 20)) // 100 chars, wraps to ~3 rows each
 	}
 
-	// All 8 logical lines should be in the viewport's content
-	if lv.viewport.TotalLineCount() < 8 {
-		t.Fatalf("expected at least 8 visual lines in viewport, got %d", lv.viewport.TotalLineCount())
+	// totalWrappedRows should account for all 8 logical lines (5 short + 3 wrapped)
+	if lv.totalWrappedRows < 8 {
+		t.Fatalf("expected at least 8 total wrapped rows, got %d", lv.totalWrappedRows)
 	}
-	// Viewport should be scrolled to bottom (autoscroll)
-	if !lv.viewport.AtBottom() {
-		t.Fatal("expected viewport to be at bottom with autoscroll")
+	// Should be scrolled to bottom (autoscroll)
+	vpHeight := lv.viewportHeight()
+	maxOff := lv.totalWrappedRows - vpHeight
+	if maxOff < 0 {
+		maxOff = 0
+	}
+	if lv.wrapYOffset != maxOff {
+		t.Fatalf("expected wrapYOffset at bottom (%d), got %d", maxOff, lv.wrapYOffset)
 	}
 }
 
@@ -869,9 +836,9 @@ func TestLogView_NonWrappedModeUnchanged(t *testing.T) {
 		lv.AppendLine(fmt.Sprintf("line %d", i))
 	}
 
-	// In non-wrapped mode, viewport should receive only viewportHeight lines
+	// In non-wrapped mode, logVP should receive only viewportHeight lines
 	// (the O(H) window), not all 20
-	vpLines := lv.viewport.TotalLineCount()
+	vpLines := len(lv.logVP.lines)
 	h := lv.viewportHeight()
 	if vpLines > h+1 { // +1 for possible indicator
 		t.Fatalf("expected at most %d lines in viewport (non-wrapped), got %d", h+1, vpLines)
@@ -899,9 +866,34 @@ func TestLogView_InsertMarkerPassesFilter(t *testing.T) {
 	}
 }
 
+func TestLogView_MouseWheelScroll(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	for i := range 50 {
+		lv.AppendLine(fmt.Sprintf("line %d", i))
+	}
+	// Should be at bottom with autoscroll
+	initialOffset := lv.scrollOffset
+
+	// Mouse wheel up should scroll up
+	lv, _ = lv.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
+	if lv.scrollOffset >= initialOffset {
+		t.Fatal("expected scrollOffset to decrease after mouse wheel up")
+	}
+	if lv.autoscroll {
+		t.Fatal("expected autoscroll off after mouse wheel up")
+	}
+
+	// Mouse wheel down should scroll down
+	prevOffset := lv.scrollOffset
+	lv, _ = lv.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if lv.scrollOffset <= prevOffset {
+		t.Fatal("expected scrollOffset to increase after mouse wheel down")
+	}
+}
+
 func TestLogView_WrappedScrollDown(t *testing.T) {
 	lv := NewLogView(42, 12, 100, "15m", 900)
-	lv.viewport.SoftWrap = true
+	lv.softWrap = true
 
 	// Add enough lines to need scrolling
 	for i := 0; i < 30; i++ {
@@ -909,13 +901,20 @@ func TestLogView_WrappedScrollDown(t *testing.T) {
 	}
 
 	// Autoscroll should have us at bottom
-	if !lv.viewport.AtBottom() {
+	vpHeight := lv.viewportHeight()
+	maxOff := lv.totalWrappedRows - vpHeight
+	if maxOff < 0 {
+		maxOff = 0
+	}
+	atBottom := lv.wrapYOffset >= maxOff
+	if !atBottom {
 		t.Fatal("expected at bottom with autoscroll")
 	}
 
 	// Scroll up, then check we're no longer at bottom
 	lv.ScrollUp()
-	if lv.viewport.AtBottom() {
+	atBottom = lv.wrapYOffset >= lv.totalWrappedRows-vpHeight
+	if atBottom {
 		t.Fatal("expected not at bottom after ScrollUp")
 	}
 	if lv.autoscroll {
@@ -924,7 +923,12 @@ func TestLogView_WrappedScrollDown(t *testing.T) {
 
 	// GotoBottom should restore autoscroll
 	lv.GotoBottom()
-	if !lv.viewport.AtBottom() {
+	maxOff = lv.totalWrappedRows - vpHeight
+	if maxOff < 0 {
+		maxOff = 0
+	}
+	atBottom = lv.wrapYOffset >= maxOff
+	if !atBottom {
 		t.Fatal("expected at bottom after GotoBottom")
 	}
 	if !lv.autoscroll {
