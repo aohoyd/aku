@@ -1,7 +1,10 @@
 package k8s
 
 import (
+	"context"
 	"io"
+	"os"
+	"os/signal"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/aohoyd/aku/internal/msgs"
@@ -29,11 +32,14 @@ func (e *execCommand) SetStderr(w io.Writer) { e.stderr = w }
 
 // Run executes the exec workflow: set raw terminal and attach via SPDY exec subresource.
 func (e *execCommand) Run() error {
-	return execContainer(e.stdin, e.stdout, e.stderr, e.client.Config, e.client.Typed, e.podName, e.container, e.namespace, e.command)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	return execContainer(ctx, e.stdin, e.stdout, e.stderr, e.client.Config, e.client.Typed, e.podName, e.container, e.namespace, e.command)
 }
 
 // execContainer builds the exec subresource URL and streams via SPDY.
-func execContainer(stdin io.Reader, stdout, stderr io.Writer, restConfig *rest.Config, typed kubernetes.Interface, podName, containerName, namespace string, command []string) error {
+func execContainer(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, restConfig *rest.Config, typed kubernetes.Interface, podName, containerName, namespace string, command []string) error {
 	execURL := typed.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
@@ -48,7 +54,7 @@ func execContainer(stdin io.Reader, stdout, stderr io.Writer, restConfig *rest.C
 		}, scheme.ParameterCodec).
 		URL()
 
-	return spdyStream(stdin, stdout, restConfig, execURL)
+	return spdyStream(ctx, stdin, stdout, restConfig, execURL)
 }
 
 // ExecCmd returns a tea.Cmd that suspends the TUI and execs into a container via SPDY.

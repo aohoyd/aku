@@ -679,7 +679,7 @@ func TestAutoReloadPreservesScrollPosition(t *testing.T) {
 	}
 
 	// Simulate auto-reload via reloadDetailPanel
-	app = app.reloadDetailPanel()
+	app, _ = app.reloadDetailPanel()
 
 	// The panel should still be visible and mode unchanged
 	if !app.layout.RightPanelVisible() {

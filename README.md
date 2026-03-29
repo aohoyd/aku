@@ -100,6 +100,11 @@ debug:
 # Log viewer settings
 logs:
   buffer_size: 10000       # max lines to buffer (default)
+
+# API timeout for async operations (describe, helm, log stream)
+api:
+  timeout_seconds: 5       # default
+  heartbeat_seconds: 5     # cluster health check interval (default)
 ```
 
 ### keymap.yaml

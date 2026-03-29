@@ -106,6 +106,26 @@ func NewClient(kubeconfigPath, contextOverride, namespaceOverride string) (*Clie
 	}, nil
 }
 
+// CheckHealth pings the Kubernetes API server and returns true if it responds.
+// The provided context controls the request timeout via a goroutine+select
+// pattern, since Discovery().ServerVersion() does not accept a context.
+func CheckHealth(ctx context.Context, client *Client) bool {
+	if client == nil || client.Typed == nil {
+		return false
+	}
+	ch := make(chan error, 1)
+	go func() {
+		_, err := client.Typed.Discovery().ServerVersion()
+		ch <- err
+	}()
+	select {
+	case err := <-ch:
+		return err == nil
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // WithNamespace returns a copy of the client with updated namespace.
 func (c *Client) WithNamespace(ns string) *Client {
 	return &Client{

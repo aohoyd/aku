@@ -63,3 +63,79 @@ func TestHelmRollbackNavigation(t *testing.T) {
 		t.Fatalf("expected revision 2, got %d", result.Revision)
 	}
 }
+
+func TestHelmRollbackOpenLoading(t *testing.T) {
+	o := NewHelmRollbackOverlay(60, 20)
+	o.OpenLoading("my-release", "default")
+	if !o.Active() {
+		t.Fatal("expected overlay to be active after OpenLoading")
+	}
+	if !o.loading {
+		t.Fatal("expected loading to be true after OpenLoading")
+	}
+}
+
+func TestHelmRollbackSetRevisions(t *testing.T) {
+	o := NewHelmRollbackOverlay(60, 20)
+	o.OpenLoading("my-release", "default")
+	entries := []HelmRevisionEntry{
+		{Revision: 3, Display: "Rev 3 | deployed"},
+		{Revision: 2, Display: "Rev 2 | superseded"},
+	}
+	o.SetRevisions(entries)
+	if o.loading {
+		t.Fatal("expected loading to be false after SetRevisions")
+	}
+	if o.loadErr != "" {
+		t.Fatalf("expected no error, got %q", o.loadErr)
+	}
+	if len(o.revisions) != 2 {
+		t.Fatalf("expected 2 revisions, got %d", len(o.revisions))
+	}
+}
+
+func TestHelmRollbackSetError(t *testing.T) {
+	o := NewHelmRollbackOverlay(60, 20)
+	o.OpenLoading("my-release", "default")
+	o.SetError("timeout")
+	if o.loading {
+		t.Fatal("expected loading to be false after SetError")
+	}
+	if o.loadErr != "timeout" {
+		t.Fatalf("expected loadErr %q, got %q", "timeout", o.loadErr)
+	}
+}
+
+func TestHelmRollbackEnterDuringLoading(t *testing.T) {
+	o := NewHelmRollbackOverlay(60, 20)
+	o.OpenLoading("my-release", "default")
+	o, cmd := o.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("Enter during loading should return nil cmd")
+	}
+	if !o.Active() {
+		t.Fatal("overlay should still be active during loading")
+	}
+}
+
+func TestHelmRollbackEnterDuringError(t *testing.T) {
+	o := NewHelmRollbackOverlay(60, 20)
+	o.OpenLoading("my-release", "default")
+	o.SetError("something went wrong")
+	o, cmd := o.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("Enter during error should return nil cmd")
+	}
+	if !o.Active() {
+		t.Fatal("overlay should still be active during error")
+	}
+}
+
+func TestHelmRollbackEscDuringLoading(t *testing.T) {
+	o := NewHelmRollbackOverlay(60, 20)
+	o.OpenLoading("my-release", "default")
+	o, _ = o.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if o.Active() {
+		t.Fatal("Esc should close the overlay even during loading")
+	}
+}

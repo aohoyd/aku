@@ -525,6 +525,67 @@ func TestComputeMatchPositions(t *testing.T) {
 	}
 }
 
+func TestDetailViewSetLoading(t *testing.T) {
+	dv := NewDetailView(60, 15)
+	dv.SetMode(msgs.DetailDescribe)
+
+	dv.SetLoading(true)
+	if !dv.Loading() {
+		t.Fatal("Loading() should be true after SetLoading(true)")
+	}
+	if dv.LoadErr() != "" {
+		t.Fatal("LoadErr() should be empty after SetLoading(true)")
+	}
+}
+
+func TestDetailViewSetLoadError(t *testing.T) {
+	dv := NewDetailView(60, 15)
+	dv.SetMode(msgs.DetailDescribe)
+
+	dv.SetLoadError("timeout")
+	if dv.Loading() {
+		t.Fatal("Loading() should be false after SetLoadError")
+	}
+	if dv.LoadErr() != "timeout" {
+		t.Fatalf("LoadErr() = %q, want %q", dv.LoadErr(), "timeout")
+	}
+}
+
+func TestDetailViewSetContentClearsLoading(t *testing.T) {
+	dv := NewDetailView(60, 15)
+	dv.SetMode(msgs.DetailDescribe)
+
+	dv.SetLoading(true)
+	dv.SetLoadError("some error")
+	s := "real content"
+	dv.SetContent(render.Content{Raw: s, Display: s}, true)
+
+	if dv.Loading() {
+		t.Fatal("Loading() should be false after SetContent")
+	}
+	if dv.LoadErr() != "" {
+		t.Fatalf("LoadErr() should be empty after SetContent, got %q", dv.LoadErr())
+	}
+}
+
+func TestDetailViewLoadingThenError(t *testing.T) {
+	dv := NewDetailView(60, 15)
+	dv.SetMode(msgs.DetailDescribe)
+
+	dv.SetLoading(true)
+	if !dv.Loading() {
+		t.Fatal("Loading() should be true")
+	}
+
+	dv.SetLoadError("x")
+	if dv.Loading() {
+		t.Fatal("Loading() should be false after SetLoadError")
+	}
+	if dv.LoadErr() != "x" {
+		t.Fatalf("LoadErr() = %q, want %q", dv.LoadErr(), "x")
+	}
+}
+
 func TestDetailViewSetObjectFilterCompatibility(t *testing.T) {
 	dv := NewDetailView(80, 20)
 	dv.SetMode(msgs.DetailYAML)

@@ -100,3 +100,70 @@ func TestStatusBarIndicatorClear(t *testing.T) {
 		t.Fatal("indicator should be cleared")
 	}
 }
+
+func TestStatusBarHealthDotOnline(t *testing.T) {
+	sb := NewStatusBar(80)
+	sb.SetOnline(true)
+	view := sb.View()
+	if !strings.Contains(view, "●") {
+		t.Fatal("online status bar should contain health dot")
+	}
+}
+
+func TestStatusBarHealthDotOffline(t *testing.T) {
+	sb := NewStatusBar(80)
+	view := sb.View()
+	if !strings.Contains(view, "●") {
+		t.Fatal("offline status bar should contain health dot")
+	}
+}
+
+func TestStatusBarStartEndOperation(t *testing.T) {
+	sb := NewStatusBar(80)
+	if sb.Busy() {
+		t.Fatal("should not be busy initially")
+	}
+	sb.StartOperation()
+	if !sb.Busy() {
+		t.Fatal("should be busy after StartOperation")
+	}
+	sb.StartOperation()
+	if !sb.Busy() {
+		t.Fatal("should still be busy after second StartOperation")
+	}
+	sb.EndOperation()
+	if !sb.Busy() {
+		t.Fatal("should still be busy with one inflight")
+	}
+	sb.EndOperation()
+	if sb.Busy() {
+		t.Fatal("should not be busy after all EndOperation calls")
+	}
+}
+
+func TestStatusBarStartOperationReturnsTick(t *testing.T) {
+	sb := NewStatusBar(80)
+	cmd := sb.StartOperation()
+	if cmd == nil {
+		t.Fatal("first StartOperation should return a non-nil cmd")
+	}
+	cmd2 := sb.StartOperation()
+	if cmd2 != nil {
+		t.Fatal("second StartOperation should return nil")
+	}
+}
+
+func TestStatusBarSetOnline(t *testing.T) {
+	sb := NewStatusBar(80)
+	if sb.online {
+		t.Fatal("should default to offline")
+	}
+	sb.SetOnline(true)
+	if !sb.online {
+		t.Fatal("should be online after SetOnline(true)")
+	}
+	sb.SetOnline(false)
+	if sb.online {
+		t.Fatal("should be offline after SetOnline(false)")
+	}
+}

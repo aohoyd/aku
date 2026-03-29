@@ -23,6 +23,8 @@ var (
 	StatusHelpStyle  = lipgloss.NewStyle().Foreground(theme.Muted)
 	StatusErrorStyle   = lipgloss.NewStyle().Foreground(theme.Error).Bold(true)
 	StatusWarningStyle = lipgloss.NewStyle().Foreground(theme.Warning).Bold(true)
+	StatusOnlineStyle  = lipgloss.NewStyle().Foreground(theme.StatusRunning)
+	StatusOfflineStyle = lipgloss.NewStyle().Foreground(theme.Error)
 
 	// Zoom indicator
 	ZoomIndicatorStyle = lipgloss.NewStyle().

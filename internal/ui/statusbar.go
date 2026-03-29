@@ -4,7 +4,11 @@ import (
 	"fmt"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/aohoyd/aku/internal/config"
+	"github.com/aohoyd/aku/internal/theme"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -17,10 +21,15 @@ type StatusBar struct {
 	warning     string
 	warningTime time.Time
 	width       int
+	spinner     spinner.Model
+	online      bool
+	inflight    int
 }
 
 func NewStatusBar(width int) StatusBar {
-	return StatusBar{width: width}
+	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
+	sp.Style = lipgloss.NewStyle().Foreground(theme.StatusRunning)
+	return StatusBar{width: width, spinner: sp}
 }
 
 func (s *StatusBar) SetHints(hints []config.KeyHint) {
@@ -49,6 +58,42 @@ func (s *StatusBar) SetWidth(w int) {
 	s.width = w
 }
 
+func (s *StatusBar) SetOnline(v bool) {
+	s.online = v
+	if v {
+		s.spinner.Style = lipgloss.NewStyle().Foreground(theme.StatusRunning)
+	} else {
+		s.spinner.Style = lipgloss.NewStyle().Foreground(theme.Error)
+	}
+}
+
+func (s *StatusBar) StartOperation() tea.Cmd {
+	s.inflight++
+	if s.inflight == 1 {
+		return s.spinner.Tick
+	}
+	return nil
+}
+
+func (s *StatusBar) EndOperation() {
+	if s.inflight > 0 {
+		s.inflight--
+	}
+}
+
+func (s *StatusBar) Busy() bool {
+	return s.inflight > 0
+}
+
+func (s *StatusBar) UpdateSpinner(msg tea.Msg) tea.Cmd {
+	if s.inflight <= 0 {
+		return nil
+	}
+	var cmd tea.Cmd
+	s.spinner, cmd = s.spinner.Update(msg)
+	return cmd
+}
+
 func (s StatusBar) View() string {
 	if s.width < 2 {
 		return ""
@@ -56,8 +101,19 @@ func (s StatusBar) View() string {
 
 	var line string
 
+	// Health indicator slot
+	var healthSlot string
+	if s.inflight > 0 {
+		healthSlot = s.spinner.View() + " "
+	} else if s.online {
+		healthSlot = StatusOnlineStyle.Render("●") + " "
+	} else {
+		healthSlot = StatusOfflineStyle.Render("●") + " "
+	}
+
+	line = healthSlot
 	if s.indicator != "" {
-		line = s.indicator
+		line += s.indicator
 	}
 
 	// Show error if recent (< 3 seconds)

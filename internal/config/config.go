@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +19,12 @@ type ExecConfig struct {
 	Command []string `yaml:"command,omitempty"`
 }
 
+// APIConfig holds configuration for Kubernetes API calls.
+type APIConfig struct {
+	TimeoutSeconds   int `yaml:"timeout_seconds,omitempty"`
+	HeartbeatSeconds int `yaml:"heartbeat_seconds,omitempty"`
+}
+
 // LogsConfig holds configuration for log viewing.
 type LogsConfig struct {
 	BufferSize       int    `yaml:"buffer_size,omitempty"`
@@ -27,6 +34,7 @@ type LogsConfig struct {
 // Config holds the application configuration.
 type Config struct {
 	Charts map[string]map[string]string `yaml:"charts,omitempty"`
+	API    APIConfig                    `yaml:"api,omitempty"`
 	Debug  DebugConfig                  `yaml:"debug,omitempty"`
 	Exec   ExecConfig                   `yaml:"exec,omitempty"`
 	Logs   LogsConfig                   `yaml:"logs,omitempty"`
@@ -110,6 +118,22 @@ func (c *Config) LogBufferSize() int {
 		return c.Logs.BufferSize
 	}
 	return 10000
+}
+
+// APITimeout returns the configured API timeout duration, defaulting to 5s.
+func (c *Config) APITimeout() time.Duration {
+	if c.API.TimeoutSeconds > 0 {
+		return time.Duration(c.API.TimeoutSeconds) * time.Second
+	}
+	return 5 * time.Second
+}
+
+// HeartbeatInterval returns the configured heartbeat interval duration, defaulting to 5s.
+func (c *Config) HeartbeatInterval() time.Duration {
+	if c.API.HeartbeatSeconds > 0 {
+		return time.Duration(c.API.HeartbeatSeconds) * time.Second
+	}
+	return 5 * time.Second
 }
 
 // SetChartRef sets the chart reference for a release in a namespace.

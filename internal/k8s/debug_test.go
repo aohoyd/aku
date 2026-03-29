@@ -1,9 +1,18 @@
 package k8s
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestBuildEphemeralContainer(t *testing.T) {
@@ -85,5 +94,164 @@ func TestGenerateDebugName(t *testing.T) {
 	name2 := generateDebugName("debugger")
 	if name == name2 {
 		t.Fatal("names should be unique")
+	}
+}
+
+func TestRunPodDebugSpinnerOnGetPodError(t *testing.T) {
+	// Use an empty fake clientset — no pods exist, so Get will fail.
+	fakeClient := fake.NewSimpleClientset()
+	var buf bytes.Buffer
+
+	d := &debugCommand{
+		stdout:    &buf,
+		stderr:    &buf,
+		client:    &Client{Typed: fakeClient},
+		podName:   "nonexistent-pod",
+		namespace: "default",
+		image:     "busybox:latest",
+		command:   []string{"sh"},
+	}
+
+	err := d.runPodDebug(context.Background())
+	if err == nil {
+		t.Fatal("expected error for nonexistent pod")
+	}
+	if !strings.Contains(err.Error(), "get pod") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	// Spinner should have rendered something (at least the clear sequence).
+	// The ANSI clear sequence \r\033[2K is written on Stop.
+	if !strings.Contains(output, "\033[2K") {
+		t.Fatal("expected spinner clear sequence in output")
+	}
+}
+
+func TestRunPodDebugSpinnerStatusProgression(t *testing.T) {
+	// Create a fake clientset with a pod that exists but whose container
+	// never becomes Running — we cancel the context to exit waitForContainerRunning.
+	existingPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "app", Image: "nginx"},
+			},
+		},
+	}
+	fakeClient := fake.NewSimpleClientset(existingPod)
+	var buf bytes.Buffer
+
+	d := &debugCommand{
+		stdout:    &buf,
+		stderr:    &buf,
+		client:    &Client{Typed: fakeClient},
+		podName:   "test-pod",
+		namespace: "default",
+		image:     "busybox:latest",
+		command:   []string{"sh"},
+	}
+
+	// Cancel context after enough time for spinner to render both statuses.
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	err := d.runPodDebug(ctx)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+
+	output := buf.String()
+	// Verify spinner rendered the initial status.
+	if !strings.Contains(output, "Creating debug container...") {
+		t.Fatal("expected 'Creating debug container...' in output")
+	}
+	// Verify spinner updated to the waiting status.
+	if !strings.Contains(output, "Waiting for container...") {
+		t.Fatal("expected 'Waiting for container...' in output")
+	}
+}
+
+func TestRunNodeDebugSpinnerOnCreateError(t *testing.T) {
+	fakeClient := fake.NewSimpleClientset()
+	fakeClient.PrependReactor("create", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("simulated create failure")
+	})
+	var buf bytes.Buffer
+
+	d := &debugCommand{
+		stdout:   &buf,
+		stderr:   &buf,
+		client:   &Client{Typed: fakeClient, Namespace: "default"},
+		nodeMode: true,
+		nodeName: "test-node",
+		image:    "busybox:latest",
+		command:  []string{"sh"},
+	}
+
+	err := d.runNodeDebug(context.Background())
+	if err == nil {
+		t.Fatal("expected error from create failure")
+	}
+	if !strings.Contains(err.Error(), "create debug pod") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	// Spinner should have been started and stopped (clear sequence present).
+	if !strings.Contains(output, "\033[2K") {
+		t.Fatal("expected spinner clear sequence in output")
+	}
+}
+
+func TestRunNodeDebugSpinnerStatusProgression(t *testing.T) {
+	fakeClient := fake.NewSimpleClientset()
+	var buf bytes.Buffer
+
+	d := &debugCommand{
+		stdout:   &buf,
+		stderr:   &buf,
+		client:   &Client{Typed: fakeClient, Namespace: "default"},
+		nodeMode: true,
+		nodeName: "mynode",
+		image:    "busybox:latest",
+		command:  []string{"sh"},
+	}
+
+	// Cancel context after enough time for spinner to render both statuses.
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+
+	err := d.runNodeDebug(ctx)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+
+	output := buf.String()
+	// Verify spinner rendered the node-specific initial status.
+	if !strings.Contains(output, "Creating debug pod on mynode...") {
+		t.Fatal("expected 'Creating debug pod on mynode...' in output")
+	}
+	// Verify spinner updated to the waiting status.
+	if !strings.Contains(output, "Waiting for pod...") {
+		t.Fatal("expected 'Waiting for pod...' in output")
+	}
+}
+
+func TestWaitForContainerRunningCancelledContext(t *testing.T) {
+	fakeClient := fake.NewSimpleClientset()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := waitForContainerRunning(ctx, fakeClient, "pod", "container", "default")
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if !strings.Contains(err.Error(), "context canceled") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestChartRefLookup(t *testing.T) {
@@ -77,6 +78,52 @@ func TestExecCommandCustom(t *testing.T) {
 	cmd := c.ExecCommand()
 	if len(cmd) != 2 || cmd[0] != "/bin/bash" || cmd[1] != "-l" {
 		t.Fatalf("custom exec command not returned: got %v", cmd)
+	}
+}
+
+func TestAPITimeoutDefault(t *testing.T) {
+	c := &Config{}
+	if got := c.APITimeout(); got != 5*time.Second {
+		t.Fatalf("default API timeout should be 5s, got %v", got)
+	}
+}
+
+func TestAPITimeoutCustom(t *testing.T) {
+	c := &Config{}
+	c.API.TimeoutSeconds = 10
+	if got := c.APITimeout(); got != 10*time.Second {
+		t.Fatalf("custom API timeout should be 10s, got %v", got)
+	}
+}
+
+func TestAPITimeoutNegative(t *testing.T) {
+	c := &Config{}
+	c.API.TimeoutSeconds = -5
+	if got := c.APITimeout(); got != 5*time.Second {
+		t.Fatalf("negative API timeout should fall back to default 5s, got %v", got)
+	}
+}
+
+func TestHeartbeatIntervalDefault(t *testing.T) {
+	c := &Config{}
+	if got := c.HeartbeatInterval(); got != 5*time.Second {
+		t.Fatalf("default heartbeat interval should be 5s, got %v", got)
+	}
+}
+
+func TestHeartbeatIntervalCustom(t *testing.T) {
+	c := &Config{}
+	c.API.HeartbeatSeconds = 10
+	if got := c.HeartbeatInterval(); got != 10*time.Second {
+		t.Fatalf("custom heartbeat interval should be 10s, got %v", got)
+	}
+}
+
+func TestHeartbeatIntervalNegative(t *testing.T) {
+	c := &Config{}
+	c.API.HeartbeatSeconds = -1
+	if got := c.HeartbeatInterval(); got != 5*time.Second {
+		t.Fatalf("negative heartbeat interval should fall back to default 5s, got %v", got)
 	}
 }
 

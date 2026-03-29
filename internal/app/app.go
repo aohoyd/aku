@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/lipgloss/v2"
 
 	"github.com/aohoyd/aku/internal/config"
@@ -91,6 +92,9 @@ type App struct {
 	logCh           <-chan string
 	logDebounceSeq  uint64
 	logStreamGen    uint64
+
+	describeGen         uint64
+	describeDebounceSeq uint64
 }
 
 // ResourceSpec describes a resource pane to open at startup.
@@ -194,10 +198,13 @@ func (a App) Init() tea.Cmd {
 	if a.k8sClient == nil {
 		return nil
 	}
-	return func() tea.Msg {
-		resources, err := k8s.DiscoverAPIResources(a.k8sClient.Typed)
-		return k8s.APIResourcesDiscoveredMsg{Resources: resources, Err: err}
-	}
+	return tea.Batch(
+		func() tea.Msg {
+			resources, err := k8s.DiscoverAPIResources(a.k8sClient.Typed)
+			return k8s.APIResourcesDiscoveredMsg{Resources: resources, Err: err}
+		},
+		initialHeartbeatCmd(a.k8sClient),
+	)
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -346,6 +353,7 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handleNamespaceSwitch(msg.Namespace)
 
 	case msgs.NamespacesLoadedMsg:
+		a.statusBar.EndOperation()
 		if msg.Err != nil {
 			a.statusBar.SetError("namespaces: " + msg.Err.Error())
 		} else if a.activeOverlay == overlayNsPicker {
@@ -419,7 +427,19 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if !listSearchActive && !detailSearchActive {
-			a = a.reloadDetailPanel()
+			if panel := a.layout.RightPanel(); panel != nil && panel.Mode() == msgs.DetailDescribe {
+				a.describeDebounceSeq++
+				return a, a.describeDebounceCmd()
+			}
+			var descCmd tea.Cmd
+			a, descCmd = a.reloadDetailPanel()
+			// Start log stream if log mode is waiting for objects
+			if a.layout.IsLogMode() && a.logCh == nil {
+				var logCmd tea.Cmd
+				a, logCmd = a.syncLogPanel()
+				return a, tea.Batch(descCmd, logCmd)
+			}
+			return a, descCmd
 		}
 		// Start log stream if log mode is waiting for objects
 		if a.layout.IsLogMode() && a.logCh == nil {
@@ -452,6 +472,36 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgs.HelmRollbackRequestedMsg:
 		return a.handleHelmRollback(msg)
+
+	case msgs.HelmHistoryLoadedMsg:
+		a.statusBar.EndOperation()
+		if a.activeOverlay != overlayHelmRollback {
+			return a, nil // overlay was dismissed, discard
+		}
+		if msg.Err != nil {
+			a.helmRollbackOverlay.SetError("helm history: " + msg.Err.Error())
+			return a, nil
+		}
+		entries := make([]ui.HelmRevisionEntry, len(msg.Entries))
+		for i, e := range msg.Entries {
+			entries[i] = ui.HelmRevisionEntry{Revision: e.Revision, Display: e.Display}
+		}
+		a.helmRollbackOverlay.SetRevisions(entries)
+		return a, nil
+
+	case msgs.HelmReleasesLoadedMsg:
+		a.statusBar.EndOperation()
+		if msg.Err != nil {
+			a.statusBar.SetError("helm releases: " + msg.Err.Error())
+			return a, nil
+		}
+		for i := range a.layout.SplitCount() {
+			split := a.layout.SplitAt(i)
+			if split != nil && split.Plugin().Name() == "helmreleases" && split.Namespace() == msg.Namespace {
+				split.SetObjects(msg.Objects)
+			}
+		}
+		return a, nil
 
 	case msgs.HelmChartRefSetMsg:
 		return a.handleHelmChartRefSet(msg)
@@ -536,6 +586,19 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.logCh = nil
 		return a, nil
 
+	case msgs.LogStreamReadyMsg:
+		a.statusBar.EndOperation()
+		if msg.Gen != a.logStreamGen {
+			return a, nil // stale, discard
+		}
+		if msg.Err != nil {
+			a.statusBar.SetError("logs: " + msg.Err.Error())
+			a.logStreamCancel = nil
+			return a, nil
+		}
+		a.logCh = msg.Ch
+		return a, readLogLine(msg.Ch, msg.Gen)
+
 	case msgs.LogDebounceFiredMsg:
 		if msg.Seq != a.logDebounceSeq {
 			return a, nil
@@ -597,6 +660,60 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		containerName := lv.ActiveContainer()
 		a, cmd := a.startLogStream(podName, containerName, ns, opts)
 		return a, cmd
+
+	case msgs.DescribeLoadedMsg:
+		a.statusBar.EndOperation()
+		if msg.Gen != a.describeGen {
+			return a, nil // stale, discard
+		}
+		panel := a.layout.RightPanel()
+		if panel == nil {
+			return a, nil
+		}
+		if panel.Mode() != msgs.DetailDescribe {
+			return a, nil // mode changed, discard stale describe result
+		}
+		if msg.Err != nil {
+			panel.SetLoadError(msg.Err.Error())
+			return a, nil
+		}
+		content := msg.Content
+		if msg.Events.Raw != "" {
+			content = content.Append(msg.Events)
+		}
+		panel.SetContent(content, false) // preserve scroll position
+		return a, nil
+
+	case msgs.DescribeDebounceFiredMsg:
+		if msg.Seq != a.describeDebounceSeq {
+			return a, nil
+		}
+		if !a.layout.RightPanelVisible() || a.layout.IsLogMode() {
+			return a, nil
+		}
+		a, cmd := a.reloadDetailPanel()
+		return a, cmd
+
+	case spinner.TickMsg:
+		var cmds []tea.Cmd
+		// Forward to detail panel spinner
+		if panel := a.layout.RightPanel(); panel != nil && panel.Loading() {
+			updated, cmd := panel.Update(msg)
+			*panel = updated
+			cmds = append(cmds, cmd)
+		}
+		// Forward to status bar spinner
+		if a.statusBar.Busy() {
+			cmds = append(cmds, a.statusBar.UpdateSpinner(msg))
+		}
+		return a, tea.Batch(cmds...)
+
+	case msgs.ClusterHealthMsg:
+		a.statusBar.SetOnline(msg.Online)
+		if a.k8sClient == nil {
+			return a, nil
+		}
+		return a, heartbeatCmd(a.k8sClient, a.config.HeartbeatInterval())
 	}
 
 	return a, nil
@@ -638,21 +755,21 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return a.executeCommand(command)
 }
 
-func (a App) refreshDetailPanelOpts(preserve bool) App {
+func (a App) refreshDetailPanelOpts(preserve bool) (App, tea.Cmd) {
 	if a.layout.IsLogMode() {
 		// In log mode, refreshes are handled by the log stream, not the detail panel
-		return a
+		return a, nil
 	}
 	if !a.layout.RightPanelVisible() {
-		return a
+		return a, nil
 	}
 	focused := a.layout.FocusedSplit()
 	if focused == nil {
-		return a
+		return a, nil
 	}
 	sel := focused.Selected()
 	if sel == nil {
-		return a
+		return a, nil
 	}
 	panel := a.layout.RightPanel()
 	refresh := !preserve
@@ -663,61 +780,74 @@ func (a App) refreshDetailPanelOpts(preserve bool) App {
 			panel.SetContent(content, refresh)
 		}
 	case msgs.DetailDescribe:
-		var content render.Content
-		var err error
-		if a.envResolved {
-			if unc, ok := focused.Plugin().(plugin.Uncoverable); ok {
-				content, err = unc.DescribeUncovered(context.Background(), sel)
-				if err != nil {
-					content, err = focused.Plugin().Describe(context.Background(), sel)
-				}
-			}
+		spinCmd := panel.SetLoading(true)
+		opCmd := a.statusBar.StartOperation()
+		a.describeGen++
+		gen := a.describeGen
+		p := focused.Plugin()
+		selCopy := sel.DeepCopy()
+		envResolved := a.envResolved
+		ns := sel.GetNamespace()
+		if ns == "" {
+			ns = focused.Namespace()
 		}
-		if content.Raw == "" && err == nil {
-			content, err = focused.Plugin().Describe(context.Background(), sel)
-		}
-		if err == nil && content.Raw != "" {
-			if a.store != nil && focused.Plugin().GVR() != eventsGVR {
-				kind, ok := k8s.KindForGVR(focused.Plugin().GVR())
-				if ok {
-					ns := sel.GetNamespace()
-					if ns == "" {
-						ns = focused.Namespace()
+		gvr := p.GVR()
+		store := a.store
+		timeout := a.config.APITimeout()
+		describeCmd := func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			var content render.Content
+			var err error
+			if envResolved {
+				if unc, ok := p.(plugin.Uncoverable); ok {
+					content, err = unc.DescribeUncovered(ctx, selCopy)
+					if err != nil {
+						content, err = p.Describe(ctx, selCopy)
 					}
-					a.store.Subscribe(eventsGVR, ns)
-					allEvents := a.store.List(eventsGVR, ns)
-					content = content.Append(render.RenderEvents(allEvents, kind, sel.GetName(), ns))
 				}
 			}
-			panel.SetContent(content, refresh)
+			if content.Raw == "" && err == nil {
+				content, err = p.Describe(ctx, selCopy)
+			}
+			var events render.Content
+			if err == nil && content.Raw != "" && store != nil && gvr != eventsGVR {
+				if kind, ok := k8s.KindForGVR(gvr); ok {
+					store.Subscribe(eventsGVR, ns)
+					allEvents := store.List(eventsGVR, ns)
+					events = render.RenderEvents(allEvents, kind, selCopy.GetName(), ns)
+				}
+			}
+			return msgs.DescribeLoadedMsg{Content: content, Events: events, Gen: gen, Err: err}
 		}
+		return a, tea.Batch(spinCmd, opCmd, describeCmd)
 	case msgs.DetailLogs:
 		// Log mode: handled by LogView + streaming, not by detail panel
 		if a.layout.IsLogMode() {
-			return a
+			return a, nil
 		}
 		msg := "Log streaming not yet implemented"
 		panel.SetContent(render.Content{Raw: msg, Display: msg}, refresh)
 	}
-	return a
+	return a, nil
 }
 
 // refreshDetailPanel resets scroll to top — used after cursor navigation, tab switch, focus change.
-func (a App) refreshDetailPanel() App {
+func (a App) refreshDetailPanel() (App, tea.Cmd) {
 	return a.refreshDetailPanelOpts(false)
 }
 
 // reloadDetailPanel preserves scroll position — used for background auto-reload and manual ctrl+r.
-func (a App) reloadDetailPanel() App {
+func (a App) reloadDetailPanel() (App, tea.Cmd) {
 	return a.refreshDetailPanelOpts(true)
 }
 
 // refreshDetailPanelOrLog wraps refreshDetailPanel for cursor navigation.
 // In log mode it debounces a stream restart; otherwise it delegates to
-// refreshDetailPanel and returns a nil cmd.
+// refreshDetailPanel.
 func (a App) refreshDetailPanelOrLog() (App, tea.Cmd) {
 	if !a.layout.IsLogMode() {
-		return a.refreshDetailPanel(), nil
+		return a.refreshDetailPanel()
 	}
 	a = a.stopLogStream()
 	if lv := a.layout.LogView(); lv != nil {
@@ -725,6 +855,16 @@ func (a App) refreshDetailPanelOrLog() (App, tea.Cmd) {
 	}
 	a.logDebounceSeq++
 	return a, a.logDebounceCmd()
+}
+
+// describeDebounceCmd returns a tea.Cmd that fires DescribeDebounceFiredMsg
+// after a short delay. Used to coalesce rapid resource updates.
+func (a App) describeDebounceCmd() tea.Cmd {
+	seq := a.describeDebounceSeq
+	return func() tea.Msg {
+		time.Sleep(100 * time.Millisecond)
+		return msgs.DescribeDebounceFiredMsg{Seq: seq}
+	}
 }
 
 // restartLogForCursor resolves the pod/container from the current cursor
@@ -1097,18 +1237,36 @@ func (a App) handleHelmChartRefSet(msg msgs.HelmChartRefSetMsg) (tea.Model, tea.
 }
 
 func (a App) refreshHelmSplits() (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
 	for i := range a.layout.SplitCount() {
 		split := a.layout.SplitAt(i)
 		if split != nil && split.Plugin().Name() == "helmreleases" {
-			if r, ok := split.Plugin().(plugin.Refreshable); ok {
-				r.Refresh(split.Namespace())
-			}
-			if sp, ok := split.Plugin().(plugin.SelfPopulating); ok {
-				split.SetObjects(sp.Objects())
+			if a.helmClient != nil {
+				opCmd := a.statusBar.StartOperation()
+				cmds = append(cmds, opCmd, fetchHelmReleasesCmd(a.helmClient, split.Namespace(), a.config.APITimeout()))
 			}
 		}
 	}
-	return a, nil
+	return a, tea.Batch(cmds...)
+}
+
+func heartbeatCmd(client *k8s.Client, interval time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(interval)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		online := k8s.CheckHealth(ctx, client)
+		return msgs.ClusterHealthMsg{Online: online}
+	}
+}
+
+func initialHeartbeatCmd(client *k8s.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		online := k8s.CheckHealth(ctx, client)
+		return msgs.ClusterHealthMsg{Online: online}
+	}
 }
 
 func readLogLine(ch <-chan string, gen uint64) tea.Cmd {
@@ -1189,12 +1347,19 @@ func (a App) startLogStream(podName, containerName, namespace string, opts k8s.L
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a.logStreamCancel = cancel
-	ch, err := k8s.StreamLogs(ctx, a.k8sClient, podName, containerName, namespace, opts)
-	if err != nil {
-		cancel()
-		a.statusBar.SetError("logs: " + err.Error())
-		return a, nil
+	gen := a.logStreamGen
+	client := a.k8sClient
+	// Show "Connecting..." in the log view
+	if lv := a.layout.LogView(); lv != nil {
+		lv.AppendLine("[connecting...]")
 	}
-	a.logCh = ch
-	return a, readLogLine(ch, a.logStreamGen)
+	opCmd := a.statusBar.StartOperation()
+	return a, tea.Batch(opCmd, func() tea.Msg {
+		ch, err := k8s.StreamLogs(ctx, client, podName, containerName, namespace, opts)
+		if err != nil {
+			cancel()
+			return msgs.LogStreamReadyMsg{Gen: gen, Err: err}
+		}
+		return msgs.LogStreamReadyMsg{Ch: ch, Gen: gen}
+	})
 }

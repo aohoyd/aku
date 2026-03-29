@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -25,7 +26,10 @@ type matchPosition struct {
 // DetailView wraps a viewport for displaying YAML, describe, or log content.
 type DetailView struct {
 	viewport       viewport.Model
+	spinner        spinner.Model
 	mode           msgs.DetailMode
+	loading        bool
+	loadErr        string
 	focused        bool
 	borderless     bool
 	width          int
@@ -42,6 +46,33 @@ type DetailView struct {
 // SetInlineSearch sets the inline search input text for rendering in the title.
 func (d *DetailView) SetInlineSearch(s string) { d.inlineSearch = s }
 
+// SetLoading enables or disables the loading state.
+// When true, clears viewport content and resets any load error.
+// Returns a tea.Cmd to start the spinner animation (nil when disabling).
+func (d *DetailView) SetLoading(v bool) tea.Cmd {
+	if v {
+		d.loading = true
+		d.loadErr = ""
+		d.viewport.SetContent("")
+		return d.spinner.Tick
+	}
+	d.loading = false
+	return nil
+}
+
+// SetLoadError sets a load error message and clears the loading state.
+func (d *DetailView) SetLoadError(msg string) {
+	d.loading = false
+	d.loadErr = msg
+	d.viewport.SetContent(msg)
+}
+
+// Loading reports whether the detail view is in a loading state.
+func (d DetailView) Loading() bool { return d.loading }
+
+// LoadErr returns the current load error message, if any.
+func (d DetailView) LoadErr() string { return d.loadErr }
+
 // NewDetailView creates a new detail view with the given dimensions.
 func NewDetailView(width, height int) DetailView {
 	vp := viewport.New(viewport.WithWidth(width-2), viewport.WithHeight(height-2)) // -2 border
@@ -49,8 +80,10 @@ func NewDetailView(width, height int) DetailView {
 	vp.KeyMap.Right = key.NewBinding()
 	vp.HighlightStyle = lipgloss.NewStyle().Background(theme.SearchMatch).Foreground(theme.SearchFg)
 	vp.SelectedHighlightStyle = lipgloss.NewStyle().Background(theme.SearchSelected).Foreground(theme.SearchFg).Bold(true)
+	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 	return DetailView{
 		viewport: vp,
+		spinner:  sp,
 		width:    width,
 		height:   height,
 	}
@@ -73,7 +106,10 @@ func (d *DetailView) SetMode(mode msgs.DetailMode) {
 
 // SetContent sets the detail view content from pre-rendered render.Content.
 // When refresh is true, scroll resets to top; when false, scroll position is preserved.
+// Setting content also clears the loading and error states.
 func (d *DetailView) SetContent(content render.Content, refresh bool) {
+	d.loading = false
+	d.loadErr = ""
 	if !refresh {
 		y := d.viewport.YOffset()
 		x := d.viewport.XOffset()
@@ -179,6 +215,13 @@ func (d *DetailView) SetSize(w, h int) {
 
 // Update handles key messages for viewport scrolling.
 func (d DetailView) Update(msg tea.Msg) (DetailView, tea.Cmd) {
+	if d.loading {
+		if _, ok := msg.(spinner.TickMsg); ok {
+			var cmd tea.Cmd
+			d.spinner, cmd = d.spinner.Update(msg)
+			return d, cmd
+		}
+	}
 	var cmd tea.Cmd
 	d.viewport, cmd = d.viewport.Update(msg)
 	return d, cmd
@@ -213,6 +256,9 @@ func (d DetailView) View() string {
 	styled := borderStyle.Width(d.width).Height(d.height).Render(content)
 
 	baseTitle := d.modeName()
+	if d.loading {
+		baseTitle += " " + d.spinner.View()
+	}
 	titleRendered := BuildPanelTitle(baseTitle, d.filterState.DisplayPattern(), d.searchState.DisplayPattern(), d.width, d.inlineSearch)
 	return injectBorderTitle(styled, titleRendered, d.focused)
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/aohoyd/aku/internal/config"
@@ -159,7 +160,9 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if target := a.searchTarget(); target != nil && target.SearchActive() {
 			target.SearchNext()
 			if a.layout.FocusedResources() {
-				a = a.refreshDetailPanel()
+				var descCmd tea.Cmd
+				a, descCmd = a.refreshDetailPanel()
+				return a, descCmd
 			}
 		}
 		return a, nil
@@ -168,7 +171,9 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if target := a.searchTarget(); target != nil && target.SearchActive() {
 			target.SearchPrev()
 			if a.layout.FocusedResources() {
-				a = a.refreshDetailPanel()
+				var descCmd tea.Cmd
+				a, descCmd = a.refreshDetailPanel()
+				return a, descCmd
 			}
 		}
 		return a, nil
@@ -184,14 +189,18 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			if target.SearchActive() {
 				target.ClearSearch()
 				if a.layout.FocusedResources() {
-					a = a.refreshDetailPanel()
+					var descCmd tea.Cmd
+					a, descCmd = a.refreshDetailPanel()
+					return a, descCmd
 				}
 				return a, nil
 			}
 			if target.FilterActive() {
 				target.ClearFilter()
 				if a.layout.FocusedResources() {
-					a = a.refreshDetailPanel()
+					var descCmd tea.Cmd
+					a, descCmd = a.refreshDetailPanel()
+					return a, descCmd
 				}
 				return a, nil
 			}
@@ -282,19 +291,21 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 	case command == "focus-next":
 		a.keyTrie.Reset()
 		a.layout.FocusNext()
-		a = a.refreshDetailPanel()
+		var descCmd tea.Cmd
+		a, descCmd = a.refreshDetailPanel()
 		var cmd tea.Cmd
 		a, cmd = a.syncLogPanel()
 		a.statusBar.SetHints(a.currentHints())
-		return a, cmd
+		return a, tea.Batch(descCmd, cmd)
 	case command == "focus-prev":
 		a.keyTrie.Reset()
 		a.layout.FocusPrev()
-		a = a.refreshDetailPanel()
+		var descCmd tea.Cmd
+		a, descCmd = a.refreshDetailPanel()
 		var cmd tea.Cmd
 		a, cmd = a.syncLogPanel()
 		a.statusBar.SetHints(a.currentHints())
-		return a, cmd
+		return a, tea.Batch(descCmd, cmd)
 
 	// Quit
 	case command == "quit":
@@ -345,10 +356,11 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		a.nsPicker.Open()
 		if a.k8sClient != nil {
 			client := a.k8sClient
-			return a, func() tea.Msg {
+			opCmd := a.statusBar.StartOperation()
+			return a, tea.Batch(opCmd, func() tea.Msg {
 				nsList, err := client.ListNamespaces(context.Background())
 				return msgs.NamespacesLoadedMsg{Namespaces: nsList, Err: err}
-			}
+			})
 		}
 		return a, nil
 
@@ -448,7 +460,9 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 	case command == "toggle-env-resolve":
 		a.envResolved = !a.envResolved
 		if a.layout.RightPanelVisible() && a.layout.RightPanel().Mode() == msgs.DetailDescribe {
-			a = a.reloadDetailPanel()
+			var descCmd tea.Cmd
+			a, descCmd = a.reloadDetailPanel()
+			return a, descCmd
 		}
 		return a, nil
 
@@ -601,21 +615,10 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		name := selected.GetName()
 		ns := selected.GetNamespace()
-		revisions, err := a.helmClient.History(name, ns)
-		if err != nil {
-			a.statusBar.SetError("helm history: " + err.Error())
-			return a, nil
-		}
-		entries := make([]ui.HelmRevisionEntry, len(revisions))
-		for i, r := range revisions {
-			entries[i] = ui.HelmRevisionEntry{
-				Revision: r.Revision,
-				Display:  fmt.Sprintf("Rev %d | %s | %s | %s", r.Revision, r.Status, r.Chart, r.Updated.Format("2006-01-02 15:04")),
-			}
-		}
-		a.helmRollbackOverlay.Open(name, ns, entries)
+		a.helmRollbackOverlay.OpenLoading(name, ns)
 		a.activeOverlay = overlayHelmRollback
-		return a, nil
+		opCmd := a.statusBar.StartOperation()
+		return a, tea.Batch(opCmd, fetchHelmHistoryCmd(a.helmClient, name, ns, a.config.APITimeout()))
 
 	case command == "toggle-autoscroll":
 		if a.layout.IsLogMode() {
@@ -729,7 +732,9 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 				// For log mode, restart the stream
 				return a.startLogViewForSelected()
 			}
-			a = a.reloadDetailPanel()
+			var descCmd tea.Cmd
+			a, descCmd = a.reloadDetailPanel()
+			return a, descCmd
 		}
 		return a, nil
 	}
@@ -780,18 +785,19 @@ func (a App) handleGoto(resourceName string, targetNs string) (tea.Model, tea.Cm
 		focused.SetNamespace(targetNs)
 	}
 	ns := focused.EffectiveNamespace()
-	a.subscribeAndPopulate(focused, p, ns)
+	populateCmd := a.subscribeAndPopulate(focused, p, ns)
 
 	// Clean up old GVR subscription if unused
 	if a.store != nil && oldPlugin.GVR() != p.GVR() {
 		a.unsubscribeIfUnused(oldPlugin.GVR(), oldNs)
 	}
 
-	a = a.refreshDetailPanel()
+	var descCmd tea.Cmd
+	a, descCmd = a.refreshDetailPanel()
 	var cmd tea.Cmd
 	a, cmd = a.syncLogPanel()
 	a.statusBar.SetHints(a.currentHints())
-	return a, cmd
+	return a, tea.Batch(populateCmd, descCmd, cmd)
 }
 
 func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
@@ -819,13 +825,14 @@ func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 	a.keyTrie.Reset()
 	a.layout.AddSplit(p, ns)
 	newSplit := a.layout.FocusedSplit()
-	a.subscribeAndPopulate(newSplit, p, newSplit.EffectiveNamespace())
+	populateCmd := a.subscribeAndPopulate(newSplit, p, newSplit.EffectiveNamespace())
 
-	a = a.refreshDetailPanel()
+	var descCmd tea.Cmd
+	a, descCmd = a.refreshDetailPanel()
 	var cmd tea.Cmd
 	a, cmd = a.syncLogPanel()
 	a.statusBar.SetHints(a.currentHints())
-	return a, cmd
+	return a, tea.Batch(populateCmd, descCmd, cmd)
 }
 
 func (a App) handleView(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
@@ -861,8 +868,8 @@ func (a App) handleView(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
 	a.layout.ShowRightPanel()
 	panel := a.layout.RightPanel()
 	panel.SetMode(mode)
-	a = a.refreshDetailPanel()
-	return a, nil
+	a, cmd := a.refreshDetailPanel()
+	return a, cmd
 }
 
 func (a App) handleViewFocused(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
@@ -901,10 +908,11 @@ func (a App) handleViewFocused(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
 
 	a.layout.ShowRightPanel()
 	a.layout.RightPanel().SetMode(mode)
-	a = a.refreshDetailPanel()
+	var descCmd tea.Cmd
+	a, descCmd = a.refreshDetailPanel()
 	a.layout.FocusDetails()
 	a.statusBar.SetHints(a.currentHints())
-	return a, nil
+	return a, descCmd
 }
 
 func (a App) handleResourcePickerCommand(input string) (tea.Model, tea.Cmd) {
@@ -926,16 +934,24 @@ func (a App) handleResourcePickerCommand(input string) (tea.Model, tea.Cmd) {
 
 // subscribeAndPopulate subscribes to the store for real resources,
 // or falls back to SelfPopulating for synthetic plugins.
-func (a App) subscribeAndPopulate(split *ui.ResourceList, p plugin.ResourcePlugin, ns string) {
+// For helm releases it returns a tea.Cmd to fetch data asynchronously.
+func (a App) subscribeAndPopulate(split *ui.ResourceList, p plugin.ResourcePlugin, ns string) tea.Cmd {
 	if a.store != nil && p.GVR().Group != "_ktui" {
 		objs := a.store.Subscribe(p.GVR(), ns)
 		split.SetObjects(objs)
-	} else if sp, ok := p.(plugin.SelfPopulating); ok {
-		if r, ok := p.(plugin.Refreshable); ok {
-			r.Refresh(ns)
+		return nil
+	}
+	if sp, ok := p.(plugin.SelfPopulating); ok {
+		if _, ok := p.(plugin.Refreshable); ok {
+			if a.helmClient != nil {
+				split.SetObjects(sp.Objects()) // show cached data immediately
+				opCmd := a.statusBar.StartOperation()
+				return tea.Batch(opCmd, fetchHelmReleasesCmd(a.helmClient, ns, a.config.APITimeout()))
+			}
 		}
 		split.SetObjects(sp.Objects())
 	}
+	return nil
 }
 
 func (a App) reloadAll() (tea.Model, tea.Cmd) {
@@ -964,16 +980,20 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	a.keyTrie.Reset()
 
 	// Reset each split to root and re-subscribe
+	var populateCmds []tea.Cmd
 	for i := range a.layout.SplitCount() {
 		split := a.layout.SplitAt(i)
 		if split == nil {
 			continue
 		}
 		split.ResetForReload()
-		a.subscribeAndPopulate(split, split.Plugin(), split.EffectiveNamespace())
+		if cmd := a.subscribeAndPopulate(split, split.Plugin(), split.EffectiveNamespace()); cmd != nil {
+			populateCmds = append(populateCmds, cmd)
+		}
 	}
 
 	// Restore detail panel state
+	var descCmd tea.Cmd
 	if wasRightVisible && wasLogMode {
 		a.layout.SetLogMode(true)
 		if lv := a.layout.LogView(); lv != nil {
@@ -981,7 +1001,7 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 			lv.SetUnavailable(true)
 		}
 	} else {
-		a = a.reloadDetailPanel()
+		a, descCmd = a.reloadDetailPanel()
 	}
 
 	// Update status bar
@@ -989,7 +1009,8 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	a.statusBar.SetHints(a.currentHints())
 	a = a.syncIndicators()
 
-	return a, func() tea.Msg { return tea.ClearScreen() }
+	allCmds := append(populateCmds, descCmd, func() tea.Msg { return tea.ClearScreen() })
+	return a, tea.Batch(allCmds...)
 }
 
 func (a App) unsubscribeIfUnused(gvr schema.GroupVersionResource, namespace string) {
@@ -1044,7 +1065,7 @@ func (a App) handleNamespaceSwitch(ns string) (tea.Model, tea.Cmd) {
 	focused.SetObjects(nil)
 
 	// Subscribe to new (GVR, namespace) pair
-	a.subscribeAndPopulate(focused, focused.Plugin(), ns)
+	populateCmd := a.subscribeAndPopulate(focused, focused.Plugin(), ns)
 
 	// Unsubscribe old if no other pane uses it
 	a.unsubscribeIfUnused(oldGVR, oldNs)
@@ -1058,8 +1079,8 @@ func (a App) handleNamespaceSwitch(ns string) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	a = a.refreshDetailPanel()
-	return a, nil
+	a, cmd := a.refreshDetailPanel()
+	return a, tea.Batch(populateCmd, cmd)
 }
 
 func (a App) executeSingleDelete(obj *unstructured.Unstructured, force bool) (tea.Model, tea.Cmd) {
@@ -1245,7 +1266,9 @@ func (a App) handleSearchSubmitted(msg msgs.SearchSubmittedMsg) (tea.Model, tea.
 	} else {
 		a.statusBar.SetError("")
 		if a.layout.FocusedResources() {
-			a = a.refreshDetailPanel()
+			var descCmd tea.Cmd
+			a, descCmd = a.refreshDetailPanel()
+			return a, descCmd
 		}
 	}
 	return a, nil
@@ -1261,7 +1284,9 @@ func (a App) handleSearchChanged(msg msgs.SearchChangedMsg) (tea.Model, tea.Cmd)
 	} else {
 		a.searchBar.SetError("")
 		if a.layout.FocusedResources() {
-			a = a.refreshDetailPanel()
+			var descCmd tea.Cmd
+			a, descCmd = a.refreshDetailPanel()
+			return a, descCmd
 		}
 	}
 	return a, nil
@@ -1278,7 +1303,9 @@ func (a App) handleSearchCleared(msg msgs.SearchClearedMsg) (tea.Model, tea.Cmd)
 		target.ClearSearch()
 	}
 	if a.layout.FocusedResources() {
-		a = a.refreshDetailPanel()
+		var descCmd tea.Cmd
+		a, descCmd = a.refreshDetailPanel()
+		return a, descCmd
 	}
 	return a, nil
 }
@@ -1602,4 +1629,68 @@ func extractContainerNames(obj *unstructured.Unstructured) []string {
 		}
 	}
 	return names
+}
+
+func fetchHelmReleasesCmd(hc helm.Client, ns string, timeout time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		type result struct {
+			releases []helm.ReleaseInfo
+			err      error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			r, err := hc.ListReleases(ns)
+			ch <- result{r, err}
+		}()
+		var releases []helm.ReleaseInfo
+		var err error
+		select {
+		case res := <-ch:
+			releases, err = res.releases, res.err
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+		if err != nil {
+			return msgs.HelmReleasesLoadedMsg{Namespace: ns, Err: err}
+		}
+		objs := make([]*unstructured.Unstructured, len(releases))
+		for i, r := range releases {
+			objs[i] = helm.ReleaseToUnstructured(r)
+		}
+		return msgs.HelmReleasesLoadedMsg{Namespace: ns, Objects: objs}
+	}
+}
+
+func fetchHelmHistoryCmd(hc helm.Client, name, ns string, timeout time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		type result struct {
+			revisions []helm.RevisionInfo
+			err       error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			r, err := hc.History(name, ns)
+			ch <- result{r, err}
+		}()
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				return msgs.HelmHistoryLoadedMsg{ReleaseName: name, Namespace: ns, Err: res.err}
+			}
+			entries := make([]msgs.HelmHistoryEntry, len(res.revisions))
+			for i, r := range res.revisions {
+				entries[i] = msgs.HelmHistoryEntry{
+					Revision: r.Revision,
+					Display:  fmt.Sprintf("Rev %d | %s | %s | %s", r.Revision, r.Status, r.Chart, r.Updated.Format("2006-01-02 15:04")),
+				}
+			}
+			return msgs.HelmHistoryLoadedMsg{ReleaseName: name, Namespace: ns, Entries: entries}
+		case <-ctx.Done():
+			return msgs.HelmHistoryLoadedMsg{ReleaseName: name, Namespace: ns, Err: ctx.Err()}
+		}
+	}
 }

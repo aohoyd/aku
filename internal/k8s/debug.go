@@ -132,7 +132,8 @@ func (d *debugCommand) SetStderr(w io.Writer) { d.stderr = w }
 
 // Run executes the debug workflow: create ephemeral container or debug pod, then attach.
 func (d *debugCommand) Run() error {
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 
 	if d.nodeMode {
 		return d.runNodeDebug(ctx)
@@ -141,12 +142,16 @@ func (d *debugCommand) Run() error {
 }
 
 func (d *debugCommand) runPodDebug(ctx context.Context) error {
+	sp := newSpinner(d.stdout, "Creating debug container...")
+	sp.Start()
+
 	debugName := generateDebugName("debugger")
 	ec := buildEphemeralContainer(debugName, d.image, d.command, d.container, d.privileged)
 
 	// Get current pod
 	pod, err := d.client.Typed.CoreV1().Pods(d.namespace).Get(ctx, d.podName, metav1.GetOptions{})
 	if err != nil {
+		sp.Stop("")
 		return fmt.Errorf("get pod: %w", err)
 	}
 
@@ -158,19 +163,28 @@ func (d *debugCommand) runPodDebug(ctx context.Context) error {
 		ctx, d.podName, pod, metav1.UpdateOptions{},
 	)
 	if err != nil {
+		sp.Stop("")
 		return fmt.Errorf("update ephemeral containers: %w", err)
 	}
 
+	sp.SetStatus("Waiting for container...")
+
 	// Wait for the container to be running
 	if err := waitForContainerRunning(ctx, d.client.Typed, d.podName, debugName, d.namespace); err != nil {
+		sp.Stop("")
 		return err
 	}
 
+	sp.Stop("")
+
 	// Attach
-	return attachContainer(d.stdin, d.stdout, d.stderr, d.client.Config, d.client.Typed, d.podName, debugName, d.namespace)
+	return attachContainer(ctx, d.stdin, d.stdout, d.stderr, d.client.Config, d.client.Typed, d.podName, debugName, d.namespace)
 }
 
 func (d *debugCommand) runNodeDebug(ctx context.Context) error {
+	sp := newSpinner(d.stdout, "Creating debug pod on "+d.nodeName+"...")
+	sp.Start()
+
 	prefix := "ktui-debug-" + d.nodeName
 	if len(prefix) > 57 { // leave room for "-xxxxx"
 		prefix = prefix[:57]
@@ -182,6 +196,7 @@ func (d *debugCommand) runNodeDebug(ctx context.Context) error {
 
 	created, err := d.client.Typed.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
+		sp.Stop("")
 		return fmt.Errorf("create debug pod: %w", err)
 	}
 
@@ -196,13 +211,18 @@ func (d *debugCommand) runNodeDebug(ctx context.Context) error {
 		}()
 	}()
 
+	sp.SetStatus("Waiting for pod...")
+
 	containerName := created.Spec.Containers[0].Name
 
 	if err := waitForContainerRunning(ctx, d.client.Typed, created.Name, containerName, ns); err != nil {
+		sp.Stop("")
 		return err
 	}
 
-	return attachContainer(d.stdin, d.stdout, d.stderr, d.client.Config, d.client.Typed, created.Name, containerName, ns)
+	sp.Stop("")
+
+	return attachContainer(ctx, d.stdin, d.stdout, d.stderr, d.client.Config, d.client.Typed, created.Name, containerName, ns)
 }
 
 // waitForContainerRunning polls until the named container is in Running state.
@@ -249,7 +269,7 @@ func waitForContainerRunning(ctx context.Context, typed kubernetes.Interface, po
 }
 
 // attachContainer builds the attach subresource URL and streams via SPDY.
-func attachContainer(stdin io.Reader, stdout, stderr io.Writer, restConfig *rest.Config, typed kubernetes.Interface, podName, containerName, namespace string) error {
+func attachContainer(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, restConfig *rest.Config, typed kubernetes.Interface, podName, containerName, namespace string) error {
 	attachURL := typed.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
@@ -263,12 +283,12 @@ func attachContainer(stdin io.Reader, stdout, stderr io.Writer, restConfig *rest
 		}, scheme.ParameterCodec).
 		URL()
 
-	return spdyStream(stdin, stdout, restConfig, attachURL)
+	return spdyStream(ctx, stdin, stdout, restConfig, attachURL)
 }
 
 // spdyStream sets the terminal to raw mode and streams stdin/stdout via SPDY.
 // The caller builds the subresource URL; this function handles everything else.
-func spdyStream(stdin io.Reader, stdout io.Writer, restConfig *rest.Config, reqURL *url.URL) error {
+func spdyStream(ctx context.Context, stdin io.Reader, stdout io.Writer, restConfig *rest.Config, reqURL *url.URL) error {
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	if err != nil {
 		return fmt.Errorf("set raw terminal: %w", err)
@@ -309,7 +329,7 @@ func spdyStream(stdin io.Reader, stdout io.Writer, restConfig *rest.Config, reqU
 		}
 	})
 
-	err = executor.StreamWithContext(context.Background(), remotecommand.StreamOptions{
+	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdin:             inR,
 		Stdout:            stdout,
 		Tty:               true,

@@ -1,6 +1,8 @@
 package msgs
 
 import (
+	"github.com/aohoyd/aku/internal/render"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -186,5 +188,54 @@ type LogTimeRangeSelectedMsg struct {
 // app's counter to discard stale fires.
 type LogDebounceFiredMsg struct {
 	Seq uint64
+}
+
+// DescribeLoadedMsg carries the result of an async describe operation.
+type DescribeLoadedMsg struct {
+	Content render.Content
+	Events  render.Content
+	Gen     uint64
+	Err     error
+}
+
+// HelmHistoryEntry represents a single Helm release revision.
+// Defined here to avoid circular imports with the ui package.
+type HelmHistoryEntry struct {
+	Revision int
+	Display  string
+}
+
+// HelmHistoryLoadedMsg carries the result of an async Helm history lookup.
+type HelmHistoryLoadedMsg struct {
+	ReleaseName string
+	Namespace   string
+	Entries     []HelmHistoryEntry
+	Err         error
+}
+
+// HelmReleasesLoadedMsg carries the result of an async Helm releases listing.
+type HelmReleasesLoadedMsg struct {
+	Namespace string
+	Objects   []*unstructured.Unstructured
+	Err       error
+}
+
+// LogStreamReadyMsg carries the result of an async log stream connection.
+type LogStreamReadyMsg struct {
+	Ch  <-chan string
+	Gen uint64
+	Err error
+}
+
+// DescribeDebounceFiredMsg is sent after the debounce interval elapses
+// following a cursor move in describe mode. Seq is compared against the
+// app's counter to discard stale fires.
+type DescribeDebounceFiredMsg struct {
+	Seq uint64
+}
+
+// ClusterHealthMsg carries the result of a cluster health check.
+type ClusterHealthMsg struct {
+	Online bool
 }
 
