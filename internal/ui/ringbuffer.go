@@ -44,6 +44,9 @@ func (d *DualRingBuffer) Append(raw, colored string, rawWidth int) {
 // Len returns the number of line pairs currently stored.
 func (d *DualRingBuffer) Len() int { return d.count }
 
+// Cap returns the maximum capacity of the ring buffer.
+func (d *DualRingBuffer) Cap() int { return d.capacity }
+
 // Dropped returns the total number of pairs evicted since creation or last reset.
 func (d *DualRingBuffer) Dropped() int { return d.dropped }
 

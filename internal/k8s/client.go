@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/aohoyd/aku/internal/msgs"
@@ -107,23 +108,27 @@ func NewClient(kubeconfigPath, contextOverride, namespaceOverride string) (*Clie
 }
 
 // CheckHealth pings the Kubernetes API server and returns true if it responds.
-// The provided context controls the request timeout via a goroutine+select
-// pattern, since Discovery().ServerVersion() does not accept a context.
+// It creates a short-lived discovery client with a 2s HTTP timeout so the call
+// blocks at most 2s and never leaks a goroutine on an unreachable server.
 func CheckHealth(ctx context.Context, client *Client) bool {
-	if client == nil || client.Typed == nil {
+	if client == nil || client.Config == nil {
 		return false
 	}
-	ch := make(chan error, 1)
-	go func() {
-		_, err := client.Typed.Discovery().ServerVersion()
-		ch <- err
-	}()
-	select {
-	case err := <-ch:
-		return err == nil
-	case <-ctx.Done():
+
+	// If the caller's context is already cancelled, return early.
+	if ctx.Err() != nil {
 		return false
 	}
+
+	cfg := rest.CopyConfig(client.Config)
+	cfg.Timeout = 2 * time.Second
+
+	disc, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return false
+	}
+	_, err = disc.Discovery().ServerVersion()
+	return err == nil
 }
 
 // WithNamespace returns a copy of the client with updated namespace.

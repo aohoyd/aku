@@ -14,9 +14,9 @@ func TestActivePortForwardStopIdempotent(t *testing.T) {
 	}()
 
 	apf := &ActivePortForward{
-		Ready: make(chan struct{}),
-		Done:  done,
-		ErrCh: errCh,
+		ready: make(chan struct{}),
+		done:  done,
+		errCh: errCh,
 		stop:  stop,
 	}
 

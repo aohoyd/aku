@@ -990,3 +990,57 @@ func TestResourceListScrollResetOnSetSize(t *testing.T) {
 	}
 }
 
+func TestColumnWidthsCachedWhenRowCountSame(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 80, 15)
+	objs := []*unstructured.Unstructured{makeObj("pod-a"), makeObj("pod-b")}
+	rl.SetObjects(objs)
+
+	// After SetObjects, the cache should be populated
+	if rl.cachedColumnWidths == nil {
+		t.Fatal("expected cachedColumnWidths to be populated after SetObjects")
+	}
+	if rl.cachedRowCount != 2 {
+		t.Fatalf("expected cachedRowCount 2, got %d", rl.cachedRowCount)
+	}
+	savedCols := rl.cachedColumnWidths
+	savedCW := rl.cachedContentWidth
+
+	// Set objects with same count — cache should be reused (same slice pointer)
+	objs2 := []*unstructured.Unstructured{makeObj("pod-c"), makeObj("pod-d")}
+	rl.SetObjects(objs2)
+
+	if rl.cachedRowCount != 2 {
+		t.Fatalf("expected cachedRowCount still 2, got %d", rl.cachedRowCount)
+	}
+	// Column widths should be the same cached slice (pointer equality)
+	if &rl.cachedColumnWidths[0] != &savedCols[0] {
+		t.Fatal("expected cachedColumnWidths to be reused when row count is unchanged")
+	}
+	if rl.cachedContentWidth != savedCW {
+		t.Fatalf("expected cachedContentWidth %d, got %d", savedCW, rl.cachedContentWidth)
+	}
+}
+
+func TestColumnWidthsRecomputedWhenRowCountChanges(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 80, 15)
+	objs := []*unstructured.Unstructured{makeObj("pod-a"), makeObj("pod-b")}
+	rl.SetObjects(objs)
+
+	if rl.cachedRowCount != 2 {
+		t.Fatalf("expected cachedRowCount 2, got %d", rl.cachedRowCount)
+	}
+	savedCols := rl.cachedColumnWidths
+
+	// Set objects with different count — cache should be invalidated and recomputed
+	objs2 := []*unstructured.Unstructured{makeObj("pod-a"), makeObj("pod-b"), makeObj("pod-c-with-a-longer-name")}
+	rl.SetObjects(objs2)
+
+	if rl.cachedRowCount != 3 {
+		t.Fatalf("expected cachedRowCount 3, got %d", rl.cachedRowCount)
+	}
+	// Column widths should have been recomputed (different slice)
+	if &rl.cachedColumnWidths[0] == &savedCols[0] {
+		t.Fatal("expected cachedColumnWidths to be recomputed when row count changes")
+	}
+}
+

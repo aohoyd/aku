@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/aohoyd/aku/internal/config"
@@ -45,18 +45,32 @@ const (
 	overlayScale
 )
 
+// pendingDebugAction stores the parameters for a debug command waiting for
+// user confirmation. Both node debug and privileged ephemeral container debug
+// are dangerous operations that require explicit confirmation.
+type pendingDebugAction struct {
+	nodeMode      bool     // true for node debug
+	privileged    bool     // true for privileged ephemeral container
+	nodeName      string   // node name (node mode)
+	podName       string   // pod name (pod/container mode)
+	containerName string   // container name (pod/container mode)
+	namespace     string   // namespace (pod/container mode)
+	image         string   // debug image
+	command       []string // debug command
+}
+
 // App is the root Bubbletea model.
 type App struct {
-	k8sClient  *k8s.Client
-	store      *k8s.Store
-	bindingSet *config.BindingSet
+	k8sClient        *k8s.Client
+	store            *k8s.Store
+	bindingSet       *config.BindingSet
 	keyTrie          *config.KeyTrie
 	trieContextType  string
 	trieResourceName string
 	layout           layout.Layout
-	statusBar  ui.StatusBar
-	width      int
-	height     int
+	statusBar        ui.StatusBar
+	width            int
+	height           int
 
 	// envResolved toggles resolved environment variable display in describe view
 	envResolved bool
@@ -80,12 +94,13 @@ type App struct {
 	helmClient helm.Client
 
 	// Port-forward
-	pfRegistry *portforward.Registry
-	pfHandles  map[string]*k8s.ActivePortForward
-	config     *config.Config
-	pendingRun        *config.RunConfig             // external command waiting for confirm
+	pfRegistry        *portforward.Registry
+	pfHandles         map[string]msgs.PortForwardHandle
+	config            *config.Config
+	pendingRun        *config.RunConfig            // external command waiting for confirm
 	pendingBulkDelete []*unstructured.Unstructured // bulk delete targets waiting for confirm
 	pendingDelete     *unstructured.Unstructured   // single delete target waiting for confirm
+	pendingDebug      *pendingDebugAction          // debug action waiting for confirm
 
 	// Log stream
 	logStreamCancel context.CancelFunc
@@ -113,21 +128,21 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 		defaultSinceSeconds = 900
 	}
 	a := App{
-		k8sClient:          client,
-		store:              store,
-		bindingSet:         bs,
-		keyTrie:            bs.TrieFor("resources", ""),
-		layout:             layout.New(80, 24, cfg.LogBufferSize(), defaultTimeRange, defaultSinceSeconds),
-		statusBar:          ui.NewStatusBar(80),
-		resourcePicker:     ui.NewResourcePicker(40, 20),
-		nsPicker:           ui.NewNsPicker(40, 20),
-		searchBar:          ui.NewSearchBar(80),
-		helpOverlay:        ui.NewHelpOverlay(80, 24),
-		helmClient:         helmClient,
-		pfRegistry:         pfRegistry,
-		pfHandles:          make(map[string]*k8s.ActivePortForward),
-		portForwardOverlay: ui.NewPortForwardOverlay(40, 20),
-		setImageOverlay:    ui.NewSetImageOverlay(40, 20),
+		k8sClient:           client,
+		store:               store,
+		bindingSet:          bs,
+		keyTrie:             bs.TrieFor("resources", ""),
+		layout:              layout.New(80, 24, cfg.LogBufferSize(), defaultTimeRange, defaultSinceSeconds),
+		statusBar:           ui.NewStatusBar(80),
+		resourcePicker:      ui.NewResourcePicker(40, 20),
+		nsPicker:            ui.NewNsPicker(40, 20),
+		searchBar:           ui.NewSearchBar(80),
+		helpOverlay:         ui.NewHelpOverlay(80, 24),
+		helmClient:          helmClient,
+		pfRegistry:          pfRegistry,
+		pfHandles:           make(map[string]msgs.PortForwardHandle),
+		portForwardOverlay:  ui.NewPortForwardOverlay(40, 20),
+		setImageOverlay:     ui.NewSetImageOverlay(40, 20),
 		helmRollbackOverlay: ui.NewHelmRollbackOverlay(40, 20),
 		config:              cfg,
 		chartInputOverlay:   ui.NewChartInputOverlay(40, 20),
@@ -252,6 +267,7 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.pendingRun = nil
 				a.pendingBulkDelete = nil
 				a.pendingDelete = nil
+				a.pendingDebug = nil
 				return a, nil
 			}
 			// Fall through to handleKey → executeCommand for structural panels
@@ -355,7 +371,8 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgs.NamespacesLoadedMsg:
 		a.statusBar.EndOperation()
 		if msg.Err != nil {
-			a.statusBar.SetError("namespaces: " + msg.Err.Error())
+			cmd := a.statusBar.SetError("namespaces: " + msg.Err.Error())
+			return a, cmd
 		} else if a.activeOverlay == overlayNsPicker {
 			a.nsPicker.SetNamespaces(msg.Namespaces)
 		}
@@ -390,18 +407,28 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
+		if a.pendingDebug != nil {
+			dbg := a.pendingDebug
+			a.pendingDebug = nil
+			if msg.Action == msgs.ConfirmYes || msg.Action == msgs.ConfirmForce {
+				return a.executePendingDebug(dbg)
+			}
+			return a, nil
+		}
 		return a, nil
 
 	case msgs.ActionResultMsg:
+		var clearCmd tea.Cmd
 		if msg.Err != nil {
-			a.statusBar.SetError(msg.Err.Error())
+			clearCmd = a.statusBar.SetError(msg.Err.Error())
 		} else {
-			a.statusBar.SetError("") // clear any previous error
+			clearCmd = a.statusBar.SetError("") // clear any previous error
 		}
 		if strings.HasPrefix(msg.ActionID, "helm-") {
-			return a.refreshHelmSplits()
+			model, helmCmd := a.refreshHelmSplits()
+			return model, tea.Batch(clearCmd, helmCmd)
 		}
-		return a, nil
+		return a, clearCmd
 
 	case k8s.ResourceUpdatedMsg:
 		// Find plugin by GVR and update matching splits
@@ -492,8 +519,8 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgs.HelmReleasesLoadedMsg:
 		a.statusBar.EndOperation()
 		if msg.Err != nil {
-			a.statusBar.SetError("helm releases: " + msg.Err.Error())
-			return a, nil
+			cmd := a.statusBar.SetError("helm releases: " + msg.Err.Error())
+			return a, cmd
 		}
 		for i := range a.layout.SplitCount() {
 			split := a.layout.SplitAt(i)
@@ -511,18 +538,18 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgs.PortForwardStartedMsg:
 		if msg.Err != nil {
-			a.statusBar.SetError("port-forward failed: " + msg.Err.Error())
-			return a, nil
+			cmd := a.statusBar.SetError("port-forward failed: " + msg.Err.Error())
+			return a, cmd
 		}
-		a.statusBar.SetError(fmt.Sprintf("port-forward starting: localhost:%d", msg.LocalPort))
+		clearCmd := a.statusBar.SetError(fmt.Sprintf("port-forward starting: localhost:%d", msg.LocalPort))
 		a = a.syncIndicators()
 		a = a.refreshPortforwardSplits()
 		// Store the handle in the main Update loop (single-threaded) to avoid data race.
-		if apf, ok := msg.Handle.(*k8s.ActivePortForward); ok && apf != nil {
-			a.pfHandles[msg.ID] = apf
-			return a, watchPortForwardReady(msg.ID, apf)
+		if msg.Handle != nil {
+			a.pfHandles[msg.ID] = msg.Handle
+			return a, tea.Batch(clearCmd, watchPortForwardReady(msg.ID, msg.Handle))
 		}
-		return a, nil
+		return a, clearCmd
 
 	case msgs.PortForwardStoppedMsg:
 		a = a.syncIndicators()
@@ -532,22 +559,25 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.pfRegistry.UpdateStatus(msg.ID, msg.Status)
 		switch msg.Status {
 		case portforward.StatusReady:
-			a.statusBar.SetError(fmt.Sprintf("port-forward ready: localhost:%d", a.localPortForPF(msg.ID)))
+			clearCmd := a.statusBar.SetError(fmt.Sprintf("port-forward ready: localhost:%d", a.localPortForPF(msg.ID)))
 			var cmd tea.Cmd
 			if apf, ok := a.pfHandles[msg.ID]; ok {
 				cmd = watchPortForwardDone(msg.ID, apf)
 			}
 			a = a.syncIndicators()
 			a = a.refreshPortforwardSplits()
-			return a, cmd
+			return a, tea.Batch(clearCmd, cmd)
 		case portforward.StatusError:
 			errMsg := "port-forward error"
 			if msg.Err != nil {
 				errMsg = "port-forward error: " + msg.Err.Error()
 			}
-			a.statusBar.SetError(errMsg)
+			clearCmd := a.statusBar.SetError(errMsg)
 			a.pfRegistry.Remove(msg.ID)
 			delete(a.pfHandles, msg.ID)
+			a = a.syncIndicators()
+			a = a.refreshPortforwardSplits()
+			return a, clearCmd
 		case portforward.StatusStopped:
 			a.pfRegistry.Remove(msg.ID)
 			delete(a.pfHandles, msg.ID)
@@ -557,12 +587,12 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case msgs.WarningMsg:
-		a.statusBar.SetWarning(msg.Text)
-		return a, nil
+		cmd := a.statusBar.SetWarning(msg.Text)
+		return a, cmd
 
 	case msgs.ErrMsg:
-		a.statusBar.SetError(msg.Error())
-		return a, nil
+		cmd := a.statusBar.SetError(msg.Error())
+		return a, cmd
 
 	case msgs.LogLineMsg:
 		if msg.Gen != a.logStreamGen {
@@ -580,11 +610,12 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Gen != a.logStreamGen {
 			return a, nil
 		}
+		var clearCmd tea.Cmd
 		if msg.Err != nil {
-			a.statusBar.SetError("log stream: " + msg.Err.Error())
+			clearCmd = a.statusBar.SetError("log stream: " + msg.Err.Error())
 		}
 		a.logCh = nil
-		return a, nil
+		return a, clearCmd
 
 	case msgs.LogStreamReadyMsg:
 		a.statusBar.EndOperation()
@@ -592,9 +623,9 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil // stale, discard
 		}
 		if msg.Err != nil {
-			a.statusBar.SetError("logs: " + msg.Err.Error())
+			clearCmd := a.statusBar.SetError("logs: " + msg.Err.Error())
 			a.logStreamCancel = nil
-			return a, nil
+			return a, clearCmd
 		}
 		a.logCh = msg.Ch
 		return a, readLogLine(msg.Ch, msg.Gen)
@@ -693,6 +724,10 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a, cmd := a.reloadDetailPanel()
 		return a, cmd
+
+	case msgs.StatusBarClearErrorMsg, msgs.StatusBarClearWarningMsg:
+		a.statusBar.Update(msg)
+		return a, nil
 
 	case spinner.TickMsg:
 		var cmds []tea.Cmd
@@ -890,8 +925,8 @@ func (a App) restartLogForCursor() (tea.Model, tea.Cmd) {
 	} else {
 		containers = extractContainerNames(selected)
 		if len(containers) == 0 {
-			a.statusBar.SetError("no containers found")
-			return a, nil
+			cmd := a.statusBar.SetError("no containers found")
+			return a, cmd
 		}
 		containerName = containers[0]
 	}
@@ -1028,12 +1063,13 @@ func (a App) localPortForPF(id string) int {
 }
 
 func (a App) handleAPIResourcesDiscovered(msg k8s.APIResourcesDiscoveredMsg) (tea.Model, tea.Cmd) {
+	var clearCmd tea.Cmd
 	if msg.Err != nil && len(msg.Resources) == 0 {
-		a.statusBar.SetError("api discovery: " + msg.Err.Error())
-		return a, nil
+		clearCmd = a.statusBar.SetError("api discovery: " + msg.Err.Error())
+		return a, clearCmd
 	}
 	if msg.Err != nil {
-		a.statusBar.SetError("api discovery partial: " + msg.Err.Error())
+		clearCmd = a.statusBar.SetError("api discovery partial: " + msg.Err.Error())
 	}
 
 	// Register generic plugins for undiscovered resources
@@ -1070,7 +1106,7 @@ func (a App) handleAPIResourcesDiscovered(msg k8s.APIResourcesDiscoveredMsg) (te
 		}
 	}
 
-	return a, nil
+	return a, clearCmd
 }
 
 // toggleZoomDetailAndSync toggles detail zoom and updates the indicator.
@@ -1214,8 +1250,8 @@ func (a App) refreshDrillDownSplits(updatedGVR schema.GroupVersionResource, name
 
 func (a App) handleHelmRollback(msg msgs.HelmRollbackRequestedMsg) (tea.Model, tea.Cmd) {
 	if a.helmClient == nil {
-		a.statusBar.SetError("helm: no client")
-		return a, nil
+		cmd := a.statusBar.SetError("helm: no client")
+		return a, cmd
 	}
 	return a, func() tea.Msg {
 		if err := a.helmClient.Rollback(msg.ReleaseName, msg.Namespace, msg.Revision); err != nil {
@@ -1230,8 +1266,8 @@ func (a App) handleHelmChartRefSet(msg msgs.HelmChartRefSetMsg) (tea.Model, tea.
 		a.config.SetChartRef(msg.Namespace, msg.ReleaseName, msg.ChartRef)
 	}
 	if a.helmClient == nil {
-		a.statusBar.SetError("helm: no client")
-		return a, nil
+		cmd := a.statusBar.SetError("helm: no client")
+		return a, cmd
 	}
 	return a, helm.EditValuesCmd(a.helmClient, msg.ReleaseName, msg.Namespace)
 }

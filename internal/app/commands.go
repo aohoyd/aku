@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -356,9 +357,12 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		a.nsPicker.Open()
 		if a.k8sClient != nil {
 			client := a.k8sClient
+			timeout := a.config.APITimeout()
 			opCmd := a.statusBar.StartOperation()
 			return a, tea.Batch(opCmd, func() tea.Msg {
-				nsList, err := client.ListNamespaces(context.Background())
+				ctx, cancel := context.WithTimeout(context.Background(), timeout)
+				defer cancel()
+				nsList, err := client.ListNamespaces(ctx)
 				return msgs.NamespacesLoadedMsg{Namespaces: nsList, Err: err}
 			})
 		}
@@ -442,8 +446,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if a.k8sClient == nil {
-			a.statusBar.SetError("exec: no k8s client")
-			return a, nil
+			cmd := a.statusBar.SetError("exec: no k8s client")
+			return a, cmd
 		}
 		ns := selected.GetNamespace()
 		if ns == "" {
@@ -474,8 +478,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		ports := a.extractPorts(focused, selected)
 		if len(ports) == 0 {
-			a.statusBar.SetError("no ports found on this resource")
-			return a, nil
+			cmd := a.statusBar.SetError("no ports found on this resource")
+			return a, cmd
 		}
 		ns := selected.GetNamespace()
 		if ns == "" {
@@ -486,21 +490,21 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		a.activeOverlay = overlayPortForward
 		return a, nil
 	case command == "rollout-restart":
-		a.statusBar.SetError("rollout-restart: not yet implemented")
-		return a, nil
+		cmd := a.statusBar.SetError("rollout-restart: not yet implemented")
+		return a, cmd
 	case command == "edit":
 		focused, selected, ok := a.focusedSelection()
 		if !ok {
 			return a, nil
 		}
 		if a.k8sClient == nil {
-			a.statusBar.SetError("edit: no k8s client")
-			return a, nil
+			cmd := a.statusBar.SetError("edit: no k8s client")
+			return a, cmd
 		}
 		if focused.Plugin().Name() == "helmreleases" {
 			if a.helmClient == nil {
-				a.statusBar.SetError("helm: no client")
-				return a, nil
+				cmd := a.statusBar.SetError("helm: no client")
+				return a, cmd
 			}
 			name := selected.GetName()
 			ns := selected.GetNamespace()
@@ -527,14 +531,14 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if a.k8sClient == nil {
-			a.statusBar.SetError("set-image: no k8s client")
-			return a, nil
+			cmd := a.statusBar.SetError("set-image: no k8s client")
+			return a, cmd
 		}
 		pluginName := focused.Plugin().Name()
 		containers := extractContainerImages(pluginName, selected)
 		if len(containers) == 0 {
-			a.statusBar.SetError("no containers found on this resource")
-			return a, nil
+			cmd := a.statusBar.SetError("no containers found on this resource")
+			return a, cmd
 		}
 
 		// Resolve target resource for patching
@@ -564,8 +568,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if a.k8sClient == nil {
-			a.statusBar.SetError("scale: no k8s client")
-			return a, nil
+			cmd := a.statusBar.SetError("scale: no k8s client")
+			return a, cmd
 		}
 		gvr := focused.Plugin().GVR()
 		name := selected.GetName()
@@ -610,8 +614,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if a.helmClient == nil {
-			a.statusBar.SetError("helm: no client")
-			return a, nil
+			cmd := a.statusBar.SetError("helm: no client")
+			return a, cmd
 		}
 		name := selected.GetName()
 		ns := selected.GetNamespace()
@@ -739,8 +743,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	a.statusBar.SetError(fmt.Sprintf("unknown command: %s", command))
-	return a, nil
+	cmd := a.statusBar.SetError(fmt.Sprintf("unknown command: %s", command))
+	return a, cmd
 }
 
 // closeRightPanel performs full right-panel teardown: stops log stream,
@@ -760,8 +764,8 @@ func (a App) closeRightPanel() App {
 func (a App) handleGoto(resourceName string, targetNs string) (tea.Model, tea.Cmd) {
 	p, ok := plugin.ByName(resourceName)
 	if !ok {
-		a.statusBar.SetError(fmt.Sprintf("unknown resource: %s", resourceName))
-		return a, nil
+		cmd := a.statusBar.SetError(fmt.Sprintf("unknown resource: %s", resourceName))
+		return a, cmd
 	}
 
 	if a.layout.AnyZoomed() {
@@ -803,8 +807,8 @@ func (a App) handleGoto(resourceName string, targetNs string) (tea.Model, tea.Cm
 func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 	p, ok := plugin.ByName(resourceName)
 	if !ok {
-		a.statusBar.SetError(fmt.Sprintf("unknown resource: %s", resourceName))
-		return a, nil
+		cmd := a.statusBar.SetError(fmt.Sprintf("unknown resource: %s", resourceName))
+		return a, cmd
 	}
 
 	if a.layout.AnyZoomed() {
@@ -925,11 +929,11 @@ func (a App) handleResourcePickerCommand(input string) (tea.Model, tea.Cmd) {
 		if len(parts) >= 2 {
 			return a.handleGoto(parts[1], "")
 		}
-		a.statusBar.SetError("usage: goto <resource>")
+		cmd := a.statusBar.SetError("usage: goto <resource>")
+		return a, cmd
 	default:
 		return a.handleGoto(parts[0], "")
 	}
-	return a, nil
 }
 
 // subscribeAndPopulate subscribes to the store for real resources,
@@ -970,6 +974,7 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	a.pendingRun = nil
 	a.pendingBulkDelete = nil
 	a.pendingDelete = nil
+	a.pendingDebug = nil
 
 	// Reset UI state
 	if a.layout.AnyZoomed() {
@@ -1005,11 +1010,11 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	}
 
 	// Update status bar
-	a.statusBar.SetError("")
+	a.statusBar.SetError("") // clear immediately, no cmd needed
 	a.statusBar.SetHints(a.currentHints())
 	a = a.syncIndicators()
 
-	allCmds := append(populateCmds, descCmd, func() tea.Msg { return tea.ClearScreen() })
+	allCmds := append(populateCmds, descCmd, tea.ClearScreen)
 	return a, tea.Batch(allCmds...)
 }
 
@@ -1118,8 +1123,7 @@ func (a App) executeSingleDelete(obj *unstructured.Unstructured, force bool) (te
 		return a, func() tea.Msg {
 			opts := metav1.DeleteOptions{}
 			if force {
-				zero := int64(0)
-				opts.GracePeriodSeconds = &zero
+				opts.GracePeriodSeconds = new(int64)
 			}
 			var err error
 			if p.IsClusterScoped() {
@@ -1186,8 +1190,7 @@ func (a App) executeBulkDelete(targets []*unstructured.Unstructured, force bool)
 	return a, func() tea.Msg {
 		opts := metav1.DeleteOptions{}
 		if force {
-			zero := int64(0)
-			opts.GracePeriodSeconds = &zero
+			opts.GracePeriodSeconds = new(int64)
 		}
 		var errs []string
 		for _, obj := range targets {
@@ -1239,9 +1242,18 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 
 	pluginName := focused.Plugin().Name()
 
-	// Node debugging — always privileged
+	// Node debugging — always privileged, requires confirmation
 	if pluginName == "nodes" {
-		return a, k8s.DebugNodeCmd(a.k8sClient, selected.GetName(), image, command)
+		msg := fmt.Sprintf("Debug node %s?\n\nThis creates a privileged pod with full host access\n(HostPID, HostNetwork, HostIPC, host root at /host).", selected.GetName())
+		a.pendingDebug = &pendingDebugAction{
+			nodeMode: true,
+			nodeName: selected.GetName(),
+			image:    image,
+			command:  command,
+		}
+		a.confirmDialog = ui.NewConfirmDialog(msg, a.width)
+		a.activeOverlay = overlayConfirm
+		return a, nil
 	}
 
 	// Pod / container debugging
@@ -1252,7 +1264,35 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 	podName := resolvePodName(focused, selected)
 	containerName := resolveContainerName(focused, selected)
 
-	return a, k8s.DebugCmd(a.k8sClient, podName, containerName, ns, image, command, privileged)
+	// Privileged debug requires confirmation
+	if privileged {
+		msg := fmt.Sprintf("Debug pod %s/%s with privileged container?\n\nThis creates an ephemeral container with elevated privileges.", ns, podName)
+		a.pendingDebug = &pendingDebugAction{
+			privileged:    true,
+			podName:       podName,
+			containerName: containerName,
+			namespace:     ns,
+			image:         image,
+			command:       command,
+		}
+		a.confirmDialog = ui.NewConfirmDialog(msg, a.width)
+		a.activeOverlay = overlayConfirm
+		return a, nil
+	}
+
+	return a, k8s.DebugCmd(a.k8sClient, podName, containerName, ns, image, command, false)
+}
+
+// executePendingDebug runs a debug action that was confirmed by the user.
+func (a App) executePendingDebug(dbg *pendingDebugAction) (tea.Model, tea.Cmd) {
+	if a.k8sClient == nil {
+		a.statusBar.SetError("debug: no k8s client")
+		return a, nil
+	}
+	if dbg.nodeMode {
+		return a, k8s.DebugNodeCmd(a.k8sClient, dbg.nodeName, dbg.image, dbg.command)
+	}
+	return a, k8s.DebugCmd(a.k8sClient, dbg.podName, dbg.containerName, dbg.namespace, dbg.image, dbg.command, dbg.privileged)
 }
 
 func (a App) handleSearchSubmitted(msg msgs.SearchSubmittedMsg) (tea.Model, tea.Cmd) {
@@ -1434,10 +1474,12 @@ func (a App) handlePortForwardRequested(msg msgs.PortForwardRequestedMsg) (tea.M
 	if a.pfRegistry == nil || a.k8sClient == nil {
 		return a, nil
 	}
-	return a, func() tea.Msg {
-		if a.pfRegistry.HasLocalPort(msg.LocalPort) {
+	if a.pfRegistry.HasLocalPort(msg.LocalPort) {
+		return a, func() tea.Msg {
 			return msgs.PortForwardStartedMsg{Err: fmt.Errorf("local port %d already in use by another port-forward", msg.LocalPort)}
 		}
+	}
+	return a, func() tea.Msg {
 		apf, err := k8s.PortForward(a.k8sClient, msg.PodName, msg.PodNamespace, msg.LocalPort, msg.RemotePort)
 		if err != nil {
 			return msgs.PortForwardStartedMsg{Err: err}
@@ -1460,14 +1502,14 @@ func (a App) handlePortForwardRequested(msg msgs.PortForwardRequestedMsg) (tea.M
 	}
 }
 
-func watchPortForwardReady(id string, apf *k8s.ActivePortForward) tea.Cmd {
+func watchPortForwardReady(id string, h msgs.PortForwardHandle) tea.Cmd {
 	return func() tea.Msg {
 		select {
-		case <-apf.Ready:
+		case <-h.Ready():
 			return msgs.PortForwardStatusMsg{ID: id, Status: portforward.StatusReady}
-		case <-apf.Done:
+		case <-h.Done():
 			select {
-			case err := <-apf.ErrCh:
+			case err := <-h.Err():
 				if err != nil {
 					return msgs.PortForwardStatusMsg{ID: id, Status: portforward.StatusError, Err: err}
 				}
@@ -1478,11 +1520,11 @@ func watchPortForwardReady(id string, apf *k8s.ActivePortForward) tea.Cmd {
 	}
 }
 
-func watchPortForwardDone(id string, apf *k8s.ActivePortForward) tea.Cmd {
+func watchPortForwardDone(id string, h msgs.PortForwardHandle) tea.Cmd {
 	return func() tea.Msg {
-		<-apf.Done
+		<-h.Done()
 		select {
-		case err := <-apf.ErrCh:
+		case err := <-h.Err():
 			if err != nil {
 				return msgs.PortForwardStatusMsg{ID: id, Status: portforward.StatusError, Err: err}
 			}
@@ -1498,7 +1540,11 @@ func (a App) handleRunCommand(run *config.RunConfig) (tea.Model, tea.Cmd) {
 		a.statusBar.SetError("run: no resource selected")
 		return a, nil
 	}
-	expanded := a.substituteVars(run.Command)
+	expanded, err := a.substituteVars(run.Command)
+	if err != nil {
+		a.statusBar.SetError(err.Error())
+		return a, nil
+	}
 	if run.Confirm {
 		a.pendingRun = &config.RunConfig{
 			Command:    expanded,
@@ -1536,39 +1582,53 @@ func (a App) executeRunExpanded(expanded string, background bool) (tea.Model, te
 	})
 }
 
-func (a App) substituteVars(cmd string) string {
+// safeValueRe matches values that are safe to interpolate into a shell command.
+var safeValueRe = regexp.MustCompile(`^[a-zA-Z0-9._:/-]*$`)
+
+func (a App) substituteVars(cmd string) (string, error) {
 	focused := a.layout.FocusedSplit()
 	if focused == nil {
-		return cmd
+		return cmd, nil
 	}
 	selected := focused.Selected()
 	if selected == nil {
-		return cmd
+		return cmd, nil
 	}
 	gvr := focused.Plugin().GVR()
 
-	return os.Expand(cmd, func(key string) string {
+	var validationErr error
+	result := os.Expand(cmd, func(key string) string {
+		var val string
 		switch key {
 		case "NAME":
-			return selected.GetName()
+			val = selected.GetName()
 		case "NAMESPACE":
-			return selected.GetNamespace()
+			val = selected.GetNamespace()
 		case "KIND":
-			return gvr.Resource
+			val = gvr.Resource
 		case "APIVERSION":
 			if gvr.Group == "" {
-				return gvr.Version
+				val = gvr.Version
+			} else {
+				val = gvr.Group + "/" + gvr.Version
 			}
-			return gvr.Group + "/" + gvr.Version
 		case "PARENT":
 			if focused.Plugin().Name() == "containers" {
-				return resolvePodName(focused, selected)
+				val = resolvePodName(focused, selected)
 			}
-			return ""
 		default:
 			return "$" + key
 		}
+		if !safeValueRe.MatchString(val) {
+			validationErr = fmt.Errorf("run: unsafe value for $%s: %q", key, val)
+			return ""
+		}
+		return val
 	})
+	if validationErr != nil {
+		return "", validationErr
+	}
+	return result, nil
 }
 
 func (a App) startLogViewForSelected() (tea.Model, tea.Cmd) {

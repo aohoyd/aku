@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -22,7 +24,7 @@ func DefaultKeymap() *Keymap {
 func LoadKeymap(path string) (*Keymap, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return DefaultKeymap(), nil
 		}
 		return nil, err

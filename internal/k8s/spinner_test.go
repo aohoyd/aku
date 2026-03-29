@@ -8,6 +8,46 @@ import (
 	"time"
 )
 
+// safeBuf is a thread-safe wrapper around bytes.Buffer for testing.
+type safeBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *safeBuf) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *safeBuf) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
+
+func (sb *safeBuf) Len() int {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Len()
+}
+
+// waitFor polls condition every 10ms, failing the test if timeout (3s) is reached.
+func waitFor(t *testing.T, desc string, condition func() bool) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		if condition() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for: %s", desc)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
 func TestNewSpinner(t *testing.T) {
 	var buf bytes.Buffer
 	s := newSpinner(&buf, "initializing")
@@ -42,12 +82,14 @@ func TestSpinnerSetStatus(t *testing.T) {
 }
 
 func TestSpinnerStartAndStop(t *testing.T) {
-	var buf bytes.Buffer
-	s := newSpinner(&buf, "working...")
+	buf := &safeBuf{}
+	s := newSpinner(buf, "working...")
 	s.Start()
 
-	// Let the spinner render a few frames.
-	time.Sleep(250 * time.Millisecond)
+	// Poll until the spinner has rendered at least one frame with the status text.
+	waitFor(t, "spinner frame with status text", func() bool {
+		return strings.Contains(buf.String(), "working...")
+	})
 
 	s.Stop("")
 
@@ -71,8 +113,8 @@ func TestSpinnerStartAndStop(t *testing.T) {
 }
 
 func TestSpinnerStopTerminatesGoroutine(t *testing.T) {
-	var buf bytes.Buffer
-	s := newSpinner(&buf, "running")
+	buf := &safeBuf{}
+	s := newSpinner(buf, "running")
 	s.Start()
 
 	// Stop should return (not hang), proving the goroutine exited.
@@ -91,11 +133,15 @@ func TestSpinnerStopTerminatesGoroutine(t *testing.T) {
 }
 
 func TestSpinnerStopWithFinalMsg(t *testing.T) {
-	var buf bytes.Buffer
-	s := newSpinner(&buf, "loading")
+	buf := &safeBuf{}
+	s := newSpinner(buf, "loading")
 	s.Start()
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait until the spinner has rendered at least one frame before stopping.
+	waitFor(t, "spinner renders at least one frame", func() bool {
+		return buf.Len() > 0
+	})
+
 	s.Stop("Done!")
 
 	output := buf.String()
@@ -105,11 +151,15 @@ func TestSpinnerStopWithFinalMsg(t *testing.T) {
 }
 
 func TestSpinnerStopEmptyFinalMsg(t *testing.T) {
-	var buf bytes.Buffer
-	s := newSpinner(&buf, "loading")
+	buf := &safeBuf{}
+	s := newSpinner(buf, "loading")
 	s.Start()
 
-	time.Sleep(100 * time.Millisecond)
+	// Wait until the spinner has rendered at least one frame before stopping.
+	waitFor(t, "spinner renders at least one frame", func() bool {
+		return buf.Len() > 0
+	})
+
 	s.Stop("")
 
 	output := buf.String()
@@ -121,17 +171,15 @@ func TestSpinnerStopEmptyFinalMsg(t *testing.T) {
 }
 
 func TestSpinnerConcurrentSetStatus(t *testing.T) {
-	var buf bytes.Buffer
-	s := newSpinner(&buf, "init")
+	buf := &safeBuf{}
+	s := newSpinner(buf, "init")
 	s.Start()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
+	for range 100 {
+		wg.Go(func() {
 			s.SetStatus("status update")
-		}(i)
+		})
 	}
 	wg.Wait()
 
@@ -140,26 +188,36 @@ func TestSpinnerConcurrentSetStatus(t *testing.T) {
 }
 
 func TestSpinnerDoubleStart(t *testing.T) {
-	var buf bytes.Buffer
-	s := newSpinner(&buf, "test")
+	buf := &safeBuf{}
+	s := newSpinner(buf, "test")
 	s.Start()
 	s.Start() // must not panic or spawn second goroutine
-	time.Sleep(100 * time.Millisecond)
+
+	// Wait until the spinner has rendered at least one frame before stopping.
+	waitFor(t, "spinner renders at least one frame", func() bool {
+		return buf.Len() > 0
+	})
+
 	s.Stop("")
 }
 
 func TestSpinnerDoubleStop(t *testing.T) {
-	var buf bytes.Buffer
-	s := newSpinner(&buf, "test")
+	buf := &safeBuf{}
+	s := newSpinner(buf, "test")
 	s.Start()
-	time.Sleep(100 * time.Millisecond)
+
+	// Wait until the spinner has rendered at least one frame before stopping.
+	waitFor(t, "spinner renders at least one frame", func() bool {
+		return buf.Len() > 0
+	})
+
 	s.Stop("done")
 	s.Stop("done again") // must not panic
 }
 
 func TestSpinnerStopWithoutStart(t *testing.T) {
-	var buf bytes.Buffer
-	s := newSpinner(&buf, "test")
+	buf := &safeBuf{}
+	s := newSpinner(buf, "test")
 	done := make(chan struct{})
 	go func() {
 		s.Stop("")
@@ -173,13 +231,21 @@ func TestSpinnerStopWithoutStart(t *testing.T) {
 }
 
 func TestSpinnerStatusReflectsInOutput(t *testing.T) {
-	var buf bytes.Buffer
-	s := newSpinner(&buf, "phase 1")
+	buf := &safeBuf{}
+	s := newSpinner(buf, "phase 1")
 	s.Start()
 
-	time.Sleep(200 * time.Millisecond)
+	// Wait until "phase 1" appears in the output.
+	waitFor(t, "phase 1 in output", func() bool {
+		return strings.Contains(buf.String(), "phase 1")
+	})
+
 	s.SetStatus("phase 2")
-	time.Sleep(200 * time.Millisecond)
+
+	// Wait until "phase 2" appears in the output.
+	waitFor(t, "phase 2 in output", func() bool {
+		return strings.Contains(buf.String(), "phase 2")
+	})
 
 	s.Stop("")
 

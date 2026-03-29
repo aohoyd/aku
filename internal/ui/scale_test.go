@@ -223,15 +223,51 @@ func TestScaleOverlayButtonNoHotkey(t *testing.T) {
 	}
 }
 
-func TestScaleOverlayHotkeysWorkWhenInputFocused(t *testing.T) {
+func TestScaleOverlayYKeyPassesThroughWhenInputFocused(t *testing.T) {
 	s := NewScaleOverlay(80, 30)
 	s.Open("my-deploy", "default", testGVR, 3)
 	s.overlay.Input(0).SetValue("5")
 
-	// y should submit even when input is focused.
+	// With input focused, "y" should pass through to input, not trigger submit.
+	s, cmd := s.Update(tea.KeyPressMsg{Code: -1, Text: "y"})
+	if !s.Active() {
+		t.Fatal("expected overlay to remain active when y is typed into focused input")
+	}
+	if cmd != nil {
+		// cmd may be non-nil from UpdateInputs, but overlay must stay open.
+		msg := cmd()
+		if _, ok := msg.(msgs.ScaleRequestedMsg); ok {
+			t.Fatal("expected y to NOT trigger ScaleRequestedMsg when input is focused")
+		}
+	}
+}
+
+func TestScaleOverlayNKeyPassesThroughWhenInputFocused(t *testing.T) {
+	s := NewScaleOverlay(80, 30)
+	s.Open("my-deploy", "default", testGVR, 3)
+
+	// With input focused, "n" should pass through to input, not close overlay.
+	s, _ = s.Update(tea.KeyPressMsg{Code: -1, Text: "n"})
+	if !s.Active() {
+		t.Fatal("expected overlay to remain active when n is typed into focused input")
+	}
+}
+
+func TestScaleOverlayYKeySubmitsWhenInputNotFocused(t *testing.T) {
+	s := NewScaleOverlay(80, 30)
+	s.Open("my-deploy", "default", testGVR, 3)
+	s.overlay.Input(0).SetValue("5")
+
+	// Tab to buttons so input is NOT focused.
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if s.InputFocused() {
+		t.Fatal("expected input to not be focused after Tab")
+	}
+
+	// Now "y" should trigger submit.
 	s, cmd := s.Update(tea.KeyPressMsg{Code: -1, Text: "y"})
 	if s.Active() {
-		t.Fatal("expected overlay to close after y hotkey with input focused")
+		t.Fatal("expected overlay to close after y hotkey with buttons focused")
 	}
 	if cmd == nil {
 		t.Fatal("expected a command from y hotkey")
@@ -246,14 +282,20 @@ func TestScaleOverlayHotkeysWorkWhenInputFocused(t *testing.T) {
 	}
 }
 
-func TestScaleOverlayNoHotkeyWorksWhenInputFocused(t *testing.T) {
+func TestScaleOverlayNKeyClosesWhenInputNotFocused(t *testing.T) {
 	s := NewScaleOverlay(80, 30)
 	s.Open("my-deploy", "default", testGVR, 3)
 
-	// n should cancel even when input is focused.
+	// Tab to buttons so input is NOT focused.
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if s.InputFocused() {
+		t.Fatal("expected input to not be focused after Tab")
+	}
+
+	// Now "n" should close the overlay.
 	s, cmd := s.Update(tea.KeyPressMsg{Code: -1, Text: "n"})
 	if s.Active() {
-		t.Fatal("expected overlay to close after n hotkey with input focused")
+		t.Fatal("expected overlay to close after n hotkey with buttons focused")
 	}
 	if cmd != nil {
 		t.Fatal("expected no command from n hotkey (cancel)")

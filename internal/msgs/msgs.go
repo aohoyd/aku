@@ -99,12 +99,21 @@ type PortForwardRequestedMsg struct {
 	Protocol      string
 }
 
+// PortForwardHandle abstracts a running port-forward session so that
+// msgs can reference it without importing the k8s package.
+type PortForwardHandle interface {
+	Stop()
+	Ready() <-chan struct{}
+	Done() <-chan struct{}
+	Err() <-chan error
+}
+
 // PortForwardStartedMsg is the async result after starting a port-forward.
 type PortForwardStartedMsg struct {
 	ID        string
 	LocalPort int
 	Err       error
-	Handle    any // *k8s.ActivePortForward — stored as any to avoid circular import
+	Handle    PortForwardHandle
 }
 
 // PortForwardStoppedMsg is emitted when a port-forward is stopped.
@@ -233,6 +242,12 @@ type LogStreamReadyMsg struct {
 type DescribeDebounceFiredMsg struct {
 	Seq uint64
 }
+
+// StatusBarClearErrorMsg signals the status bar to hide the error message.
+type StatusBarClearErrorMsg struct{}
+
+// StatusBarClearWarningMsg signals the status bar to hide the warning message.
+type StatusBarClearWarningMsg struct{}
 
 // ClusterHealthMsg carries the result of a cluster health check.
 type ClusterHealthMsg struct {

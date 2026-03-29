@@ -396,19 +396,39 @@ func TestOverlayInputWidthConstrainedFixedWidth(t *testing.T) {
 	ti.Focus()
 	o.AddInput(ti)
 
-	// Before View(), width is unconstrained (0)
-	if o.inputs[0].Width() != 0 {
-		t.Fatalf("expected initial width 0, got %d", o.inputs[0].Width())
-	}
-
-	_ = o.View()
-
-	// After View(), width should be contentWidth - promptWidth - 1 (cursor column)
+	// After AddInput(), width should already be set (syncInputWidths called in AddInput)
 	// fixedWidth=40, chrome=6, content=34, prompt="Image: " (7 chars), cursor=1
 	chrome := overlayChrome()
 	expectedInputW := (40 - chrome) - lipgloss.Width("Image: ") - 1
 	if o.inputs[0].Width() != expectedInputW {
 		t.Fatalf("expected input width %d, got %d", expectedInputW, o.inputs[0].Width())
+	}
+}
+
+func TestOverlayInputWidthSetBySetSize(t *testing.T) {
+	o := NewOverlay()
+	o.SetFixedWidth(40)
+
+	ti := textinput.New()
+	ti.Prompt = "Filter: "
+	o.AddInput(ti)
+
+	// Before SetSize, width/height are 0 so inner width is computed but constrained
+	// After SetSize, syncInputWidths should have been called and input width set correctly
+	o.SetSize(80, 24)
+
+	chrome := overlayChrome()
+	expectedInputW := (40 - chrome) - lipgloss.Width("Filter: ") - 1
+	if o.inputs[0].Width() != expectedInputW {
+		t.Fatalf("expected input width %d after SetSize, got %d", expectedInputW, o.inputs[0].Width())
+	}
+
+	// Changing size should update input widths accordingly
+	o.SetFixedWidth(50)
+	o.SetSize(100, 30)
+	expectedInputW = (50 - chrome) - lipgloss.Width("Filter: ") - 1
+	if o.inputs[0].Width() != expectedInputW {
+		t.Fatalf("expected input width %d after second SetSize, got %d", expectedInputW, o.inputs[0].Width())
 	}
 }
 
@@ -423,8 +443,7 @@ func TestOverlayInputWidthConstrainedAutoWidth(t *testing.T) {
 	ti.Focus()
 	o.AddInput(ti)
 
-	_ = o.View()
-
+	// Width should be set by AddInput (which calls syncInputWidths), no need for View()
 	w := o.inputs[0].Width()
 	if w <= 0 {
 		t.Fatalf("expected positive input width, got %d", w)
@@ -445,9 +464,7 @@ func TestOverlayInputWidthMinimumGuard(t *testing.T) {
 	ti.Focus()
 	o.AddInput(ti)
 
-	// Should not panic
-	_ = o.View()
-
+	// Width should be set by AddInput, minimum guard should apply
 	w := o.inputs[0].Width()
 	if w < 1 {
 		t.Fatalf("expected minimum width of 1, got %d", w)

@@ -10,10 +10,11 @@ import (
 )
 
 // ActivePortForward represents a running port-forward session.
+// It implements msgs.PortForwardHandle.
 type ActivePortForward struct {
-	Ready <-chan struct{}
-	Done  <-chan struct{}
-	ErrCh <-chan error
+	ready <-chan struct{}
+	done  <-chan struct{}
+	errCh <-chan error
 	stop  chan struct{}
 }
 
@@ -25,8 +26,17 @@ func (a *ActivePortForward) Stop() {
 	default:
 		close(a.stop)
 	}
-	<-a.Done
+	<-a.done
 }
+
+// Ready returns a channel that is closed when the port-forward is ready.
+func (a *ActivePortForward) Ready() <-chan struct{} { return a.ready }
+
+// Done returns a channel that is closed when the port-forward has terminated.
+func (a *ActivePortForward) Done() <-chan struct{} { return a.done }
+
+// Err returns a channel that receives an error if the port-forward fails.
+func (a *ActivePortForward) Err() <-chan error { return a.errCh }
 
 // PortForward starts a native port-forward to the given pod using SPDY.
 func PortForward(client *Client, podName, namespace string, localPort, remotePort int) (*ActivePortForward, error) {
@@ -65,9 +75,9 @@ func PortForward(client *Client, podName, namespace string, localPort, remotePor
 	}()
 
 	return &ActivePortForward{
-		Ready: readyCh,
-		Done:  doneCh,
-		ErrCh: errCh,
+		ready: readyCh,
+		done:  doneCh,
+		errCh: errCh,
 		stop:  stopCh,
 	}, nil
 }

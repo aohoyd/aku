@@ -48,8 +48,9 @@ type LogView struct {
 	defaultSinceSeconds int64
 
 	// Virtual scroll
-	scrollOffset    int   // top-of-viewport line index in display list
-	filteredIndices []int // when filter active, logical buffer indices of matching lines
+	scrollOffset        int   // top-of-viewport line index in display list
+	filteredIndices     []int // when filter active, absolute buffer indices of matching lines
+	filteredIndexOffset int   // number of evictions; subtract from filteredIndices entries to get logical buffer index
 
 	// Custom viewport for non-wrap rendering
 	logVP                  logViewport
@@ -160,8 +161,9 @@ func (lv *LogView) updateViewport() {
 	var widths []int
 	if lv.filterState.Active() {
 		for _, idx := range lv.filteredIndices[start:end] {
-			window = append(window, lv.buffer.ColoredGet(idx))
-			widths = append(widths, lv.buffer.WidthGet(idx))
+			bufIdx := idx - lv.filteredIndexOffset
+			window = append(window, lv.buffer.ColoredGet(bufIdx))
+			widths = append(widths, lv.buffer.WidthGet(bufIdx))
 		}
 	} else {
 		window = lv.buffer.ColoredSlice(start, end)
@@ -212,61 +214,58 @@ func (lv *LogView) updateViewport() {
 	lv.logVP.SetLines(window, widths)
 }
 
-// updateViewportWrapped computes the visible window of wrapped lines and feeds
-// them to logVP. Instead of delegating scrolling to the bubbles viewport, it
-// tracks visual row offsets (wrapYOffset / totalWrappedRows) so that the bubbles
-// viewport is no longer needed for wrap-mode rendering.
-func (lv *LogView) updateViewportWrapped() {
-	vpWidth := lv.logVP.width
-	vpHeight := lv.viewportHeight()
-
-	// Build full list of colored lines and widths
-	var allLines []string
-	var allWidths []int
-	if lv.filterState.Active() {
-		for _, idx := range lv.filteredIndices {
-			allLines = append(allLines, lv.buffer.ColoredGet(idx))
-			allWidths = append(allWidths, lv.buffer.WidthGet(idx))
-		}
-	} else {
-		allLines = lv.buffer.ColoredAll()
-		allWidths = lv.buffer.WidthSlice(0, lv.buffer.Len())
-	}
-
-	// Prepend indicator if applicable
-	if lv.buffer.Dropped() > 0 {
-		indicator := fmt.Sprintf("~%d lines dropped", lv.buffer.Dropped())
-		allLines = append([]string{indicator}, allLines...)
-		allWidths = append([]int{len(indicator)}, allWidths...)
-	}
-
-	// Bake search highlights
-	if lv.searchState.Active() && len(lv.matchPositions) > 0 {
-		selectedInWindow := -1
-		if lv.matchIndex >= 0 && lv.matchIndex < len(lv.matchPositions) {
-			selectedInWindow = lv.matchIndex
-		}
-		joined := strings.Join(allLines, "\n")
-		highlighted := buildHighlightedDisplay(
-			joined, lv.matchPositions, selectedInWindow,
-			lv.highlightStyle, lv.selectedHighlightStyle,
-		)
-		allLines = strings.Split(highlighted, "\n")
-	}
-
-	// Compute wrapped heights and total
+// wrapHeight returns the number of visual rows a line of the given display
+// width occupies when soft-wrapped to vpWidth columns.
+func wrapHeight(displayWidth, vpWidth int) int {
 	if vpWidth <= 0 {
 		vpWidth = 1
 	}
-	lv.totalWrappedRows = 0
-	wrappedHeights := make([]int, len(allLines))
-	for i, w := range allWidths {
-		if w <= vpWidth {
-			wrappedHeights[i] = 1
-		} else {
-			wrappedHeights[i] = (w + vpWidth - 1) / vpWidth // ceiling division
+	if displayWidth <= vpWidth {
+		return 1
+	}
+	return (displayWidth + vpWidth - 1) / vpWidth // ceiling division
+}
+
+// recomputeTotalWrappedRows recalculates totalWrappedRows from scratch.
+// Called after resize, toggle wrap, filter change, or any bulk mutation —
+// NOT on every AppendLine (that path uses incremental updates).
+func (lv *LogView) recomputeTotalWrappedRows() {
+	vpWidth := lv.logVP.width
+	total := 0
+	if lv.filterState.Active() {
+		for _, idx := range lv.filteredIndices {
+			total += wrapHeight(lv.buffer.WidthGet(idx-lv.filteredIndexOffset), vpWidth)
 		}
-		lv.totalWrappedRows += wrappedHeights[i]
+	} else {
+		for i := range lv.buffer.Len() {
+			total += wrapHeight(lv.buffer.WidthGet(i), vpWidth)
+		}
+	}
+	if lv.buffer.Dropped() > 0 {
+		total++ // indicator row
+	}
+	lv.totalWrappedRows = total
+}
+
+// updateViewportWrapped computes the visible window of wrapped lines and feeds
+// them to logVP. Instead of copying the entire buffer, it uses the
+// incrementally maintained totalWrappedRows for scroll math and only fetches
+// the lines visible in the current viewport.
+func (lv *LogView) updateViewportWrapped() {
+	vpWidth := lv.logVP.width
+	vpHeight := lv.viewportHeight()
+	if vpWidth <= 0 {
+		vpWidth = 1
+	}
+
+	hasIndicator := lv.buffer.Dropped() > 0
+
+	// Determine the logical line count (filtered or full buffer).
+	var lineCount int
+	if lv.filterState.Active() {
+		lineCount = len(lv.filteredIndices)
+	} else {
+		lineCount = lv.buffer.Len()
 	}
 
 	// Clamp wrapYOffset
@@ -286,38 +285,108 @@ func (lv *LogView) updateViewportWrapped() {
 		lv.wrapYOffset = maxOffset
 	}
 
-	// Find the first visible logical line
+	// --- Find the first visible logical line ---
+	// We need to walk wrapped heights to find which logical line corresponds
+	// to wrapYOffset.  The "display list" has an optional indicator at index 0
+	// followed by lineCount buffer lines.  We track a running visual-row counter.
 	row := 0
-	firstLine := 0
-	vOffset := 0
-	for i, h := range wrappedHeights {
+	firstDisplayIdx := 0  // index into the display list (0 may be indicator)
+	vOffset := 0          // visual rows to skip inside the first visible line
+	displayCount := lineCount
+	if hasIndicator {
+		displayCount++
+	}
+
+	for di := 0; di < displayCount; di++ {
+		var h int
+		if hasIndicator && di == 0 {
+			h = 1 // indicator is always 1 row
+		} else {
+			bufIdx := di
+			if hasIndicator {
+				bufIdx = di - 1
+			}
+			var w int
+			if lv.filterState.Active() {
+				w = lv.buffer.WidthGet(lv.filteredIndices[bufIdx] - lv.filteredIndexOffset)
+			} else {
+				w = lv.buffer.WidthGet(bufIdx)
+			}
+			h = wrapHeight(w, vpWidth)
+		}
 		if row+h > lv.wrapYOffset {
-			firstLine = i
+			firstDisplayIdx = di
 			vOffset = lv.wrapYOffset - row
 			break
 		}
 		row += h
-		if i == len(wrappedHeights)-1 {
-			firstLine = i
+		if di == displayCount-1 {
+			firstDisplayIdx = di
 			vOffset = 0
 		}
 	}
 
-	// Build visual rows for the visible window
+	// --- Build visual rows for the visible window ---
+	// We only fetch lines from firstDisplayIdx onward, enough to fill the
+	// viewport plus vOffset rows that we'll trim.
 	var visRows []string
 	var visWidths []int
-	for i := firstLine; i < len(allLines) && len(visRows) < vpHeight+vOffset; i++ {
-		line := allLines[i]
-		w := 0
-		if i < len(allWidths) {
-			w = allWidths[i]
+
+	for di := firstDisplayIdx; di < displayCount && len(visRows) < vpHeight+vOffset; di++ {
+		var line string
+		var w int
+		if hasIndicator && di == 0 {
+			line = fmt.Sprintf("~%d lines dropped", lv.buffer.Dropped())
+			w = len(line) // plain ASCII
+		} else {
+			bufIdx := di
+			if hasIndicator {
+				bufIdx = di - 1
+			}
+			if lv.filterState.Active() {
+				idx := lv.filteredIndices[bufIdx] - lv.filteredIndexOffset
+				line = lv.buffer.ColoredGet(idx)
+				w = lv.buffer.WidthGet(idx)
+			} else {
+				line = lv.buffer.ColoredGet(bufIdx)
+				w = lv.buffer.WidthGet(bufIdx)
+			}
 		}
+
+		// Bake search highlights for this single line if search is active.
+		if lv.searchState.Active() && len(lv.matchPositions) > 0 {
+			var linePositions []matchPosition
+			for _, pos := range lv.matchPositions {
+				if pos.line == di {
+					shifted := pos
+					shifted.line = 0
+					linePositions = append(linePositions, shifted)
+				}
+			}
+			if len(linePositions) > 0 {
+				selectedInLine := -1
+				if lv.matchIndex >= 0 && lv.matchIndex < len(lv.matchPositions) {
+					sel := lv.matchPositions[lv.matchIndex]
+					if sel.line == di {
+						for i, lp := range linePositions {
+							if lp.colStart == sel.colStart && lp.colEnd == sel.colEnd {
+								selectedInLine = i
+								break
+							}
+						}
+					}
+				}
+				line = buildHighlightedDisplay(
+					line, linePositions, selectedInLine,
+					lv.highlightStyle, lv.selectedHighlightStyle,
+				)
+			}
+		}
+
 		if w <= vpWidth {
-			// Line fits in one row
 			visRows = append(visRows, line)
 			visWidths = append(visWidths, w)
 		} else {
-			// Wrap: use ansi.Cut to split into vpWidth-wide segments
 			offset := 0
 			for offset < w {
 				end := offset + vpWidth
@@ -350,26 +419,54 @@ func (lv *LogView) updateViewportWrapped() {
 func (lv *LogView) AppendLine(line string) {
 	droppedBefore := lv.buffer.Dropped()
 	colored := lv.pipeline.Highlight(line)
-	lv.buffer.Append(line, colored, ansi.StringWidth(colored))
+	coloredWidth := ansi.StringWidth(colored)
+
+	// Before the buffer mutates, capture the evicted line's width for
+	// incremental totalWrappedRows bookkeeping (wrap mode only).
+	var evictedWidth int
+	willEvict := lv.buffer.Len() == lv.buffer.Cap()
+	if willEvict && lv.softWrap {
+		evictedWidth = lv.buffer.WidthGet(0) // logical index 0 = oldest
+	}
+
+	lv.buffer.Append(line, colored, coloredWidth)
+	evicted := lv.buffer.Dropped() > droppedBefore
+
+	// Incremental totalWrappedRows update (wrap mode, no filter).
+	if lv.softWrap && !lv.filterState.Active() {
+		vpWidth := lv.logVP.width
+		// Add the new line's wrapped height.
+		lv.totalWrappedRows += wrapHeight(coloredWidth, vpWidth)
+		if evicted {
+			// Subtract the evicted line's wrapped height.
+			lv.totalWrappedRows -= wrapHeight(evictedWidth, vpWidth)
+		}
+		// Account for the indicator row appearing for the first time.
+		if evicted && droppedBefore == 0 {
+			lv.totalWrappedRows++ // indicator row now present
+		}
+	}
 
 	if lv.filterState.Active() {
-		evicted := lv.buffer.Dropped() > droppedBefore
-		// On eviction, decrement existing indices first since logical index 0 shifted
-		if evicted && len(lv.filteredIndices) > 0 {
-			for i := range lv.filteredIndices {
-				lv.filteredIndices[i]--
-			}
-			for len(lv.filteredIndices) > 0 && lv.filteredIndices[0] < 0 {
+		// On eviction, increment offset instead of decrementing all indices (O(1) vs O(K))
+		if evicted {
+			lv.filteredIndexOffset++
+			// Trim entries that refer to the evicted line
+			for len(lv.filteredIndices) > 0 && lv.filteredIndices[0] < lv.filteredIndexOffset {
 				lv.filteredIndices = lv.filteredIndices[1:]
 			}
 		}
-		// Then add the new line if it matches
+		// Then add the new line if it matches (store absolute index = offset + logical)
 		matched := lv.filterState.Re.MatchString(line)
 		if matched {
-			lv.filteredIndices = append(lv.filteredIndices, lv.buffer.Len()-1)
+			lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+lv.buffer.Len()-1)
 		}
 		if !matched && !evicted {
 			return // no viewport change needed
+		}
+		// Recompute totalWrappedRows for the filtered set.
+		if lv.softWrap {
+			lv.recomputeTotalWrappedRows()
 		}
 	}
 
@@ -383,37 +480,24 @@ func (lv *LogView) AppendLine(line string) {
 // rebuildViewportContent recomputes search match positions and updates the viewport.
 // Called on search/filter activation (user action), not on every append.
 func (lv *LogView) rebuildViewportContent() {
-	coloredLines := lv.buffer.ColoredAll()
-
-	var displayLines []string
-	if lv.filterState.Active() {
-		for _, idx := range lv.filteredIndices {
-			if idx >= 0 && idx < len(coloredLines) {
-				displayLines = append(displayLines, coloredLines[idx])
-			}
-		}
-	} else {
-		displayLines = coloredLines
-	}
-
 	hasIndicator := lv.buffer.Dropped() > 0
-	if hasIndicator {
-		displayLines = append([]string{fmt.Sprintf("~%d lines dropped", lv.buffer.Dropped())}, displayLines...)
-	}
 
 	lv.matchPositions = nil
 	lv.matchIndex = -1
 
 	if lv.searchState.Active() {
-		searchLines := displayLines
-		if hasIndicator {
-			searchLines = displayLines[1:]
+		var rawLines []string
+		if lv.filterState.Active() {
+			for _, idx := range lv.filteredIndices {
+				bufIdx := idx - lv.filteredIndexOffset
+				if bufIdx >= 0 && bufIdx < lv.buffer.Len() {
+					rawLines = append(rawLines, lv.buffer.RawGet(bufIdx))
+				}
+			}
+		} else {
+			rawLines = lv.buffer.RawAll()
 		}
-		strippedLines := make([]string, len(searchLines))
-		for i, hl := range searchLines {
-			strippedLines[i] = ansi.Strip(hl)
-		}
-		strippedContent := strings.Join(strippedLines, "\n")
+		strippedContent := strings.Join(rawLines, "\n")
 
 		rawMatches := lv.searchState.Re.FindAllStringIndex(strippedContent, -1)
 		positions := computeMatchPositions(strippedContent, rawMatches)
@@ -430,6 +514,9 @@ func (lv *LogView) rebuildViewportContent() {
 		}
 	}
 
+	if lv.softWrap {
+		lv.recomputeTotalWrappedRows()
+	}
 	lv.updateViewport()
 }
 
@@ -485,11 +572,11 @@ func (lv *LogView) ApplySearch(pattern string, mode msgs.SearchMode) error {
 		if err := lv.filterState.Compile(pattern, mode); err != nil {
 			return err
 		}
-		// Rebuild filtered indices
+		// Rebuild filtered indices with current offset
 		lv.filteredIndices = nil
 		for i := range lv.buffer.Len() {
 			if lv.filterState.Re.MatchString(lv.buffer.RawGet(i)) {
-				lv.filteredIndices = append(lv.filteredIndices, i)
+				lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+i)
 			}
 		}
 	} else {
@@ -513,6 +600,10 @@ func (lv *LogView) ClearSearch() {
 func (lv *LogView) ClearFilter() {
 	lv.filterState.Clear()
 	lv.filteredIndices = nil
+	lv.filteredIndexOffset = 0
+	if lv.softWrap {
+		lv.recomputeTotalWrappedRows()
+	}
 	lv.updateViewport()
 }
 
@@ -558,7 +649,7 @@ func (lv *LogView) ensureMatchVisible() {
 		for i := 0; i < total && i < bufferLine; i++ {
 			var w int
 			if lv.filterState.Active() {
-				w = lv.buffer.WidthGet(lv.filteredIndices[i])
+				w = lv.buffer.WidthGet(lv.filteredIndices[i] - lv.filteredIndexOffset)
 			} else {
 				w = lv.buffer.WidthGet(i)
 			}
@@ -621,6 +712,9 @@ func (lv *LogView) SetSize(w, h int) {
 	} else {
 		lv.logVP.SetSize(w-2, h-2)
 	}
+	if lv.softWrap {
+		lv.recomputeTotalWrappedRows()
+	}
 	lv.updateViewport()
 }
 
@@ -664,8 +758,16 @@ func (lv *LogView) ToggleSyntax() {
 		lv.pipeline = highlight.DefaultPipeline()
 	}
 	for i := range lv.buffer.Len() {
-		colored := lv.pipeline.Highlight(lv.buffer.RawGet(i))
+		var colored string
+		if lv.pipeline != nil {
+			colored = lv.pipeline.Highlight(lv.buffer.RawGet(i))
+		} else {
+			colored = lv.buffer.RawGet(i)
+		}
 		lv.buffer.SetColored(i, colored, ansi.StringWidth(colored))
+	}
+	if lv.softWrap {
+		lv.recomputeTotalWrappedRows()
 	}
 	if lv.searchState.Active() {
 		lv.rebuildViewportContent()
@@ -696,9 +798,16 @@ func (lv *LogView) ToggleAutoscroll() {
 func (lv *LogView) InsertMarker() {
 	raw := fmt.Sprintf("--- %s ---", time.Now().Format("15:04:05"))
 	styled := lipgloss.NewStyle().Foreground(theme.Muted).Faint(true).Render(raw)
-	lv.buffer.Append(raw, styled, ansi.StringWidth(raw))
-	if lv.filterState.Active() {
-		lv.filteredIndices = append(lv.filteredIndices, lv.buffer.Len()-1)
+	rawWidth := ansi.StringWidth(raw)
+	lv.buffer.Append(raw, styled, rawWidth)
+	if lv.softWrap && !lv.filterState.Active() {
+		lv.totalWrappedRows += wrapHeight(rawWidth, lv.logVP.width)
+	}
+	if lv.filterState.Active() && lv.filterState.Re.MatchString(raw) {
+		lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+lv.buffer.Len()-1)
+		if lv.softWrap {
+			lv.recomputeTotalWrappedRows()
+		}
 	}
 	if lv.autoscroll && !lv.softWrap {
 		lv.scrollOffset = lv.totalDisplayLines() - lv.viewportHeight()
@@ -861,6 +970,7 @@ func (lv *LogView) ToggleWrap() {
 	if lv.softWrap {
 		lv.logVP.xOffset = 0
 		lv.wrapYOffset = 0 // reset wrap scroll
+		lv.recomputeTotalWrappedRows()
 	} else if lv.autoscroll {
 		lv.scrollOffset = lv.totalDisplayLines() - lv.viewportHeight()
 	}
@@ -908,6 +1018,7 @@ func (lv *LogView) ClearAndRestart() {
 	lv.wrapYOffset = 0
 	lv.totalWrappedRows = 0
 	lv.filteredIndices = nil
+	lv.filteredIndexOffset = 0
 	lv.autoscroll = true
 	lv.timeRangeLabel = lv.defaultTimeRange
 	lv.filterState.Clear()

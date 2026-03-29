@@ -49,22 +49,18 @@ func buildEphemeralContainer(name, image string, command []string, targetContain
 			Stdin:   true,
 			TTY:     true,
 		},
-	}
-	if targetContainer != "" {
-		ec.TargetContainerName = targetContainer
+		TargetContainerName: targetContainer,
 	}
 	if privileged {
-		p := true
-		ec.SecurityContext = &corev1.SecurityContext{Privileged: &p}
+		ec.SecurityContext = &corev1.SecurityContext{Privileged: new(true)}
 	}
 	return ec
 }
 
 // buildDebugNodePod creates a Pod spec for node-level debugging.
-func buildDebugNodePod(name, nodeName, image string, command []string) *corev1.Pod {
-	privileged := true
+func buildDebugNodePod(name, nodeName, image string, command []string, privileged bool) *corev1.Pod {
 	hostPathType := corev1.HostPathDirectory
-	return &corev1.Pod{
+	p := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},
@@ -95,9 +91,6 @@ func buildDebugNodePod(name, nodeName, image string, command []string) *corev1.P
 					Command: command,
 					Stdin:   true,
 					TTY:     true,
-					SecurityContext: &corev1.SecurityContext{
-						Privileged: &privileged,
-					},
 					VolumeMounts: []corev1.VolumeMount{
 						{
 							Name:      "host-root",
@@ -108,6 +101,12 @@ func buildDebugNodePod(name, nodeName, image string, command []string) *corev1.P
 			},
 		},
 	}
+
+	if privileged {
+		p.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: new(true)}
+	}
+
+	return &p
 }
 
 // debugCommand implements tea.ExecCommand for attaching to debug containers.
@@ -190,7 +189,7 @@ func (d *debugCommand) runNodeDebug(ctx context.Context) error {
 		prefix = prefix[:57]
 	}
 	debugName := generateDebugName(prefix)
-	pod := buildDebugNodePod(debugName, d.nodeName, d.image, d.command)
+	pod := buildDebugNodePod(debugName, d.nodeName, d.image, d.command, d.privileged)
 
 	ns := d.client.Namespace
 
@@ -203,10 +202,9 @@ func (d *debugCommand) runNodeDebug(ctx context.Context) error {
 	// Clean up the debug pod in the background to avoid blocking TUI resume.
 	defer func() {
 		go func() {
-			grace := int64(0)
 			_ = d.client.Typed.CoreV1().Pods(ns).Delete(
 				context.Background(), created.Name,
-				metav1.DeleteOptions{GracePeriodSeconds: &grace},
+				metav1.DeleteOptions{GracePeriodSeconds: new(int64)},
 			)
 		}()
 	}()

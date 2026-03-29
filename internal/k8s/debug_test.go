@@ -45,7 +45,7 @@ func TestBuildEphemeralContainerPrivileged(t *testing.T) {
 }
 
 func TestBuildDebugNodePod(t *testing.T) {
-	pod := buildDebugNodePod("debugger-node1-abc12", "mynode", "busybox:latest", []string{"sh"})
+	pod := buildDebugNodePod("debugger-node1-abc12", "mynode", "busybox:latest", []string{"sh"}, true)
 	if pod.Spec.NodeName != "mynode" {
 		t.Fatal("wrong node")
 	}
@@ -78,7 +78,7 @@ func TestBuildEphemeralContainerCustomCommand(t *testing.T) {
 }
 
 func TestBuildDebugNodePodCustomCommand(t *testing.T) {
-	pod := buildDebugNodePod("debug-node1", "mynode", "busybox:latest", []string{"bash", "-l"})
+	pod := buildDebugNodePod("debug-node1", "mynode", "busybox:latest", []string{"bash", "-l"}, true)
 	cmd := pod.Spec.Containers[0].Command
 	if len(cmd) != 2 || cmd[0] != "bash" || cmd[1] != "-l" {
 		t.Fatalf("wrong command: %v", cmd)
@@ -99,7 +99,7 @@ func TestGenerateDebugName(t *testing.T) {
 
 func TestRunPodDebugSpinnerOnGetPodError(t *testing.T) {
 	// Use an empty fake clientset — no pods exist, so Get will fail.
-	fakeClient := fake.NewSimpleClientset()
+	fakeClient := fake.NewClientset()
 	var buf bytes.Buffer
 
 	d := &debugCommand{
@@ -142,7 +142,7 @@ func TestRunPodDebugSpinnerStatusProgression(t *testing.T) {
 			},
 		},
 	}
-	fakeClient := fake.NewSimpleClientset(existingPod)
+	fakeClient := fake.NewClientset(existingPod)
 	var buf bytes.Buffer
 
 	d := &debugCommand{
@@ -176,7 +176,7 @@ func TestRunPodDebugSpinnerStatusProgression(t *testing.T) {
 }
 
 func TestRunNodeDebugSpinnerOnCreateError(t *testing.T) {
-	fakeClient := fake.NewSimpleClientset()
+	fakeClient := fake.NewClientset()
 	fakeClient.PrependReactor("create", "pods", func(_ k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("simulated create failure")
 	})
@@ -208,17 +208,18 @@ func TestRunNodeDebugSpinnerOnCreateError(t *testing.T) {
 }
 
 func TestRunNodeDebugSpinnerStatusProgression(t *testing.T) {
-	fakeClient := fake.NewSimpleClientset()
+	fakeClient := fake.NewClientset()
 	var buf bytes.Buffer
 
 	d := &debugCommand{
-		stdout:   &buf,
-		stderr:   &buf,
-		client:   &Client{Typed: fakeClient, Namespace: "default"},
-		nodeMode: true,
-		nodeName: "mynode",
-		image:    "busybox:latest",
-		command:  []string{"sh"},
+		stdout:     &buf,
+		stderr:     &buf,
+		client:     &Client{Typed: fakeClient, Namespace: "default"},
+		nodeMode:   true,
+		nodeName:   "mynode",
+		image:      "busybox:latest",
+		command:    []string{"sh"},
+		privileged: true,
 	}
 
 	// Cancel context after enough time for spinner to render both statuses.
@@ -242,7 +243,7 @@ func TestRunNodeDebugSpinnerStatusProgression(t *testing.T) {
 }
 
 func TestWaitForContainerRunningCancelledContext(t *testing.T) {
-	fakeClient := fake.NewSimpleClientset()
+	fakeClient := fake.NewClientset()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately

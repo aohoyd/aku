@@ -1,7 +1,12 @@
 package k8s
 
 import (
+	"context"
+	"fmt"
+	"runtime"
+	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -193,5 +198,94 @@ func TestStoreDeepCopy(t *testing.T) {
 	labels := items[0].GetLabels()
 	if labels["app"] != "test" {
 		t.Fatalf("expected cached label 'test', got '%s'", labels["app"])
+	}
+}
+
+func TestStoreConcurrentCacheOperations(t *testing.T) {
+	s := NewStore(nil, func(msg tea.Msg) {})
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+	const goroutines = 20
+	const opsPerGoroutine = 100
+
+	var wg sync.WaitGroup
+
+	// Spawn goroutines that perform concurrent CacheUpsert
+	for i := range goroutines {
+		wg.Go(func() {
+			for j := range opsPerGoroutine {
+				obj := &unstructured.Unstructured{}
+				obj.SetName(fmt.Sprintf("pod-%d-%d", i, j))
+				obj.SetNamespace("default")
+				s.CacheUpsert(gvr, "default", obj)
+			}
+		})
+	}
+
+	// Spawn goroutines that perform concurrent List
+	for range goroutines {
+		wg.Go(func() {
+			for range opsPerGoroutine {
+				_ = s.List(gvr, "default")
+			}
+		})
+	}
+
+	// Spawn goroutines that perform concurrent CacheDelete
+	for i := range goroutines {
+		wg.Go(func() {
+			for j := range opsPerGoroutine {
+				obj := &unstructured.Unstructured{}
+				obj.SetName(fmt.Sprintf("pod-%d-%d", i, j))
+				obj.SetNamespace("default")
+				s.CacheDelete(gvr, "default", obj)
+			}
+		})
+	}
+
+	wg.Wait()
+
+	// Verify the store is still consistent: List should not panic
+	items := s.List(gvr, "default")
+	t.Logf("items remaining after concurrent ops: %d", len(items))
+}
+
+func TestStoreSubscribeUnsubscribeNoLeak(t *testing.T) {
+	// NewStore with nil client: Subscribe will launch runInformer which will
+	// panic or fail on nil client. We manually insert a cancel entry to
+	// simulate the subscribe path without needing a real client.
+	// Instead, we directly test Subscribe+Unsubscribe on cache-only paths.
+	s := NewStore(nil, func(msg tea.Msg) {})
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+	// Force GC and stabilize goroutine count
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	const iterations = 50
+	for range iterations {
+		// Manually set up a cache bucket and informer cancel entry
+		// to mimic Subscribe without starting a real informer (no k8s client).
+		key := watchKey{GVR: gvr, Namespace: "default"}
+		s.mu.Lock()
+		if s.cache[key] == nil {
+			s.cache[key] = make(map[string]*unstructured.Unstructured)
+		}
+		_, cancel := context.WithCancel(context.Background())
+		s.informers[key] = cancel
+		s.mu.Unlock()
+
+		s.Unsubscribe(gvr, "default")
+	}
+
+	// Allow goroutines to settle
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
+	after := runtime.NumGoroutine()
+
+	// Allow a small margin for runtime goroutines
+	if after > before+5 {
+		t.Fatalf("possible goroutine leak: before=%d, after=%d", before, after)
 	}
 }

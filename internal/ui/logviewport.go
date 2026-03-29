@@ -52,7 +52,7 @@ func (v *logViewport) View() string {
 
 	outputs := make([]string, v.height)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		line := v.lines[i]
 		rw := 0
 		if i < len(v.rawWidths) {

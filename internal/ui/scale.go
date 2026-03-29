@@ -147,14 +147,14 @@ func (s ScaleOverlay) Update(msg tea.Msg) (ScaleOverlay, tea.Cmd) {
 		return s, nil
 
 	default:
-		switch km.String() {
-		case "y", "Y":
-			return s.handleSubmit()
-		case "n", "N":
-			s.Close()
-			return s, nil
-		}
 		if !s.inputFocused {
+			switch km.String() {
+			case "y", "Y":
+				return s.handleSubmit()
+			case "n", "N":
+				s.Close()
+				return s, nil
+			}
 			return s, nil
 		}
 		cmd := s.overlay.UpdateInputs(km)

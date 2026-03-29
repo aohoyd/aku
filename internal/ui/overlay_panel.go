@@ -89,7 +89,11 @@ func (o *Overlay) SetFooter(f string) { o.footer = f }
 func (o *Overlay) SetFixedWidth(w int) { o.fixedWidth = w }
 
 // SetSize updates the terminal dimensions available to the overlay.
-func (o *Overlay) SetSize(w, h int) { o.width = w; o.height = h }
+func (o *Overlay) SetSize(w, h int) {
+	o.width = w
+	o.height = h
+	o.syncInputWidths(o.computeInnerWidth())
+}
 
 // SetMaxVisible sets the maximum number of visible items in the list.
 func (o *Overlay) SetMaxVisible(n int) { o.maxVisible = n }
@@ -194,6 +198,7 @@ func (o *Overlay) AddInput(ti textinput.Model) int {
 		ti.SetStyles(styles)
 	}
 	o.inputs = append(o.inputs, ti)
+	o.syncInputWidths(o.computeInnerWidth())
 	return len(o.inputs) - 1
 }
 
@@ -302,9 +307,8 @@ func (o Overlay) View() string {
 		return ""
 	}
 
-	// Compute inner width first so we can constrain input widths.
+	// Compute inner width for the overlay box.
 	innerWidth := o.computeInnerWidth()
-	o.syncInputWidths(innerWidth)
 
 	var lines []string
 
@@ -320,7 +324,7 @@ func (o Overlay) View() string {
 		preEnd = o.postListInputIdx
 	}
 	if preEnd > 0 {
-		for i := 0; i < preEnd; i++ {
+		for i := range preEnd {
 			lines = append(lines, o.inputs[i].View())
 		}
 		lines = append(lines, "")

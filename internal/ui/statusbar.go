@@ -8,22 +8,23 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/aohoyd/aku/internal/config"
+	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/theme"
 	"github.com/charmbracelet/x/ansi"
 )
 
 // StatusBar displays context-sensitive key help at the bottom.
 type StatusBar struct {
-	hints       []config.KeyHint
-	indicator   string
-	error_      string
-	errorTime   time.Time
-	warning     string
-	warningTime time.Time
-	width       int
-	spinner     spinner.Model
-	online      bool
-	inflight    int
+	hints          []config.KeyHint
+	indicator      string
+	errText         string
+	errorVisible   bool
+	warning        string
+	warningVisible bool
+	width          int
+	spinner        spinner.Model
+	online         bool
+	inflight       int
 }
 
 func NewStatusBar(width int) StatusBar {
@@ -40,14 +41,28 @@ func (s *StatusBar) ClearHints() {
 	s.hints = nil
 }
 
-func (s *StatusBar) SetError(err string) {
-	s.error_ = err
-	s.errorTime = time.Now()
+func (s *StatusBar) SetError(err string) tea.Cmd {
+	s.errText = err
+	if err == "" {
+		s.errorVisible = false
+		return nil
+	}
+	s.errorVisible = true
+	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return msgs.StatusBarClearErrorMsg{}
+	})
 }
 
-func (s *StatusBar) SetWarning(w string) {
+func (s *StatusBar) SetWarning(w string) tea.Cmd {
 	s.warning = w
-	s.warningTime = time.Now()
+	if w == "" {
+		s.warningVisible = false
+		return nil
+	}
+	s.warningVisible = true
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+		return msgs.StatusBarClearWarningMsg{}
+	})
 }
 
 func (s *StatusBar) SetIndicator(ind string) {
@@ -85,6 +100,15 @@ func (s *StatusBar) Busy() bool {
 	return s.inflight > 0
 }
 
+func (s *StatusBar) Update(msg tea.Msg) {
+	switch msg.(type) {
+	case msgs.StatusBarClearErrorMsg:
+		s.errorVisible = false
+	case msgs.StatusBarClearWarningMsg:
+		s.warningVisible = false
+	}
+}
+
 func (s *StatusBar) UpdateSpinner(msg tea.Msg) tea.Cmd {
 	if s.inflight <= 0 {
 		return nil
@@ -116,17 +140,17 @@ func (s StatusBar) View() string {
 		line += s.indicator
 	}
 
-	// Show error if recent (< 3 seconds)
-	if s.error_ != "" && time.Since(s.errorTime) < 3*time.Second {
+	// Show error if visible
+	if s.errText != "" && s.errorVisible {
 		if line != "" {
 			line += " "
 		}
-		line += StatusErrorStyle.Render(s.error_)
+		line += StatusErrorStyle.Render(s.errText)
 		return StatusBarStyle.Width(s.width).Render(line)
 	}
 
-	// Show warning if recent (< 5 seconds)
-	if s.warning != "" && time.Since(s.warningTime) < 5*time.Second {
+	// Show warning if visible
+	if s.warning != "" && s.warningVisible {
 		if line != "" {
 			line += " "
 		}

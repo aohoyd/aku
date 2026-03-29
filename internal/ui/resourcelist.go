@@ -18,24 +18,27 @@ import (
 
 // ResourceList wraps bubbles/table with plugin-driven columns.
 type ResourceList struct {
-	plugin         plugin.ResourcePlugin
-	table          table.Model
-	styles         table.Styles
-	allObjects     []*unstructured.Unstructured
-	displayObjects []*unstructured.Unstructured
-	filterState    SearchState
-	searchState    SearchState
-	sortState      SortState
-	namespace      string
-	focused        bool
-	width          int
-	height         int
-	contentWidth   int
-	xOffset        int
-	navStack       NavStack
-	inlineSearch     string
-	lastSearchCursor int
-	selected         map[types.UID]struct{} // multi-select set
+	plugin             plugin.ResourcePlugin
+	table              table.Model
+	styles             table.Styles
+	allObjects         []*unstructured.Unstructured
+	displayObjects     []*unstructured.Unstructured
+	filterState        SearchState
+	searchState        SearchState
+	sortState          SortState
+	namespace          string
+	focused            bool
+	width              int
+	height             int
+	contentWidth       int
+	xOffset            int
+	navStack           NavStack
+	inlineSearch       string
+	lastSearchCursor   int
+	selected           map[types.UID]struct{} // multi-select set
+	cachedColumnWidths []table.Column
+	cachedContentWidth int
+	cachedRowCount     int
 }
 
 // SetInlineSearch sets the inline search input text for rendering in the title.
@@ -226,6 +229,9 @@ func (r *ResourceList) SetPlugin(p plugin.ResourcePlugin) {
 	r.displayObjects = nil
 	r.xOffset = 0
 	r.table.SetXOffset(0)
+	r.cachedColumnWidths = nil
+	r.cachedRowCount = 0
+	r.cachedContentWidth = 0
 	cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.width-2, r.sortState, nil)
 	r.contentWidth = cw
 	r.table.SetColumnsAndRows(cols, nil)
@@ -280,6 +286,9 @@ func (r *ResourceList) SetSize(w, h int) {
 	r.height = h
 	r.xOffset = 0
 	r.table.SetXOffset(0)
+	r.cachedColumnWidths = nil
+	r.cachedRowCount = 0
+	r.cachedContentWidth = 0
 	cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), w-2, r.sortState, r.table.Rows())
 	r.contentWidth = cw
 	r.table.SetLayout(cols, w-2, h-3)
@@ -740,10 +749,19 @@ func (r *ResourceList) renderRows(re *regexp.Regexp) {
 		rows[i] = row
 	}
 
-	cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.width-2, r.sortState, rows)
-	r.contentWidth = cw
-	r.table.SetColumnsAndRows(cols, rows)
-	r.table.SetContentWidth(r.contentWidth)
+	if len(rows) == r.cachedRowCount && r.cachedColumnWidths != nil {
+		r.contentWidth = r.cachedContentWidth
+		r.table.SetColumnsAndRows(r.cachedColumnWidths, rows)
+		r.table.SetContentWidth(r.contentWidth)
+	} else {
+		cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.width-2, r.sortState, rows)
+		r.cachedColumnWidths = cols
+		r.cachedContentWidth = cw
+		r.cachedRowCount = len(rows)
+		r.contentWidth = cw
+		r.table.SetColumnsAndRows(cols, rows)
+		r.table.SetContentWidth(r.contentWidth)
+	}
 }
 
 // refreshSearchHighlights updates only the old and new cursor rows when

@@ -10,8 +10,8 @@ import (
 )
 
 func makeEvent(kind, name, namespace, eventType, reason, message, source, ts string) *unstructured.Unstructured {
-	return &unstructured.Unstructured{Object: map[string]interface{}{
-		"involvedObject": map[string]interface{}{
+	return &unstructured.Unstructured{Object: map[string]any{
+		"involvedObject": map[string]any{
 			"kind":      kind,
 			"name":      name,
 			"namespace": namespace,
@@ -20,7 +20,7 @@ func makeEvent(kind, name, namespace, eventType, reason, message, source, ts str
 		"reason":        reason,
 		"message":       message,
 		"lastTimestamp":  ts,
-		"source":        map[string]interface{}{"component": source},
+		"source":        map[string]any{"component": source},
 	}}
 }
 
