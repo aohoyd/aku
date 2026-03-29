@@ -160,12 +160,12 @@ type mockDescribePlugin struct {
 	clusterScoped bool
 }
 
-func (m *mockDescribePlugin) Name() string                                               { return m.pluginName }
-func (m *mockDescribePlugin) ShortName() string                                          { return "mk" }
-func (m *mockDescribePlugin) GVR() schema.GroupVersionResource                           { return m.pluginGVR }
-func (m *mockDescribePlugin) IsClusterScoped() bool                                      { return m.clusterScoped }
-func (m *mockDescribePlugin) Columns() []plugin.Column                                   { return nil }
-func (m *mockDescribePlugin) Row(_ *unstructured.Unstructured) []string                  { return nil }
+func (m *mockDescribePlugin) Name() string                              { return m.pluginName }
+func (m *mockDescribePlugin) ShortName() string                         { return "mk" }
+func (m *mockDescribePlugin) GVR() schema.GroupVersionResource          { return m.pluginGVR }
+func (m *mockDescribePlugin) IsClusterScoped() bool                     { return m.clusterScoped }
+func (m *mockDescribePlugin) Columns() []plugin.Column                  { return nil }
+func (m *mockDescribePlugin) Row(_ *unstructured.Unstructured) []string { return nil }
 func (m *mockDescribePlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) {
 	return render.Content{}, nil
 }

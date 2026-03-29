@@ -23,9 +23,9 @@ func (m *mockPlugin) ShortName() string { return m.name[:2] }
 func (m *mockPlugin) GVR() schema.GroupVersionResource {
 	return schema.GroupVersionResource{}
 }
-func (m *mockPlugin) IsClusterScoped() bool                                      { return false }
-func (m *mockPlugin) Columns() []plugin.Column                                   { return nil }
-func (m *mockPlugin) Row(_ *unstructured.Unstructured) []string                  { return nil }
+func (m *mockPlugin) IsClusterScoped() bool                     { return false }
+func (m *mockPlugin) Columns() []plugin.Column                  { return nil }
+func (m *mockPlugin) Row(_ *unstructured.Unstructured) []string { return nil }
 func (m *mockPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) {
 	return render.Content{}, nil
 }
@@ -80,7 +80,7 @@ func TestJobPluginDescribe(t *testing.T) {
 				"name":              "my-job",
 				"namespace":         "default",
 				"creationTimestamp": "2026-02-24T10:00:00Z",
-				"labels":           map[string]any{"app": "batch"},
+				"labels":            map[string]any{"app": "batch"},
 			},
 			"spec": map[string]any{
 				"completions":  int64(3),

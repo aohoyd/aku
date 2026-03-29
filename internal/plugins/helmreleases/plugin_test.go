@@ -33,11 +33,11 @@ func (m *mockClient) GetRelease(name, namespace string) (*helm.ReleaseInfo, erro
 	}
 	return nil, nil
 }
-func (m *mockClient) GetValues(_, _ string) (map[string]any, error)   { return nil, nil }
+func (m *mockClient) GetValues(_, _ string) (map[string]any, error)    { return nil, nil }
 func (m *mockClient) History(_, _ string) ([]helm.RevisionInfo, error) { return nil, nil }
-func (m *mockClient) Upgrade(_, _ string, _ map[string]any) error     { return nil }
-func (m *mockClient) Rollback(_, _ string, _ int) error               { return nil }
-func (m *mockClient) Uninstall(_, _ string) error                     { return nil }
+func (m *mockClient) Upgrade(_, _ string, _ map[string]any) error      { return nil }
+func (m *mockClient) Rollback(_, _ string, _ int) error                { return nil }
+func (m *mockClient) Uninstall(_, _ string) error                      { return nil }
 
 func testRelease() helm.ReleaseInfo {
 	return helm.ReleaseInfo{

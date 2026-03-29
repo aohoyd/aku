@@ -26,10 +26,10 @@ func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
 	return &Plugin{store: store}
 }
 
-func (p *Plugin) Name() string                            { return "replicasets" }
-func (p *Plugin) ShortName() string                       { return "rs" }
-func (p *Plugin) GVR() schema.GroupVersionResource        { return gvr }
-func (p *Plugin) IsClusterScoped() bool                   { return false }
+func (p *Plugin) Name() string                     { return "replicasets" }
+func (p *Plugin) ShortName() string                { return "rs" }
+func (p *Plugin) GVR() schema.GroupVersionResource { return gvr }
+func (p *Plugin) IsClusterScoped() bool            { return false }
 
 func (p *Plugin) Columns() []plugin.Column {
 	return []plugin.Column{
@@ -93,8 +93,6 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 
 	return b.Build(), nil
 }
-
-
 
 // DrillDown implements plugin.DrillDowner.
 func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {

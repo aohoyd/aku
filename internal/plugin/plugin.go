@@ -90,4 +90,3 @@ type Column struct {
 	Width int
 	Flex  bool
 }
-

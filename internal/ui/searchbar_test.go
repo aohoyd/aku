@@ -3,8 +3,8 @@ package ui
 import (
 	"testing"
 
-	"github.com/aohoyd/aku/internal/msgs"
 	tea "charm.land/bubbletea/v2"
+	"github.com/aohoyd/aku/internal/msgs"
 )
 
 func TestSearchBarInitiallyInactive(t *testing.T) {

@@ -25,7 +25,9 @@ func (m *mockPlugin) Columns() []plugin.Column {
 func (m *mockPlugin) Row(obj *unstructured.Unstructured) []string {
 	return []string{obj.GetName(), "ok"}
 }
-func (m *mockPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) { return render.Content{}, nil }
+func (m *mockPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) {
+	return render.Content{}, nil
+}
 func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (render.Content, error) {
 	return render.Content{}, nil
 }
@@ -281,9 +283,9 @@ func TestLayoutZoomDetailView(t *testing.T) {
 }
 
 func TestLayoutZoomFollowsFocus(t *testing.T) {
-	l := New(80, 26, 1000, "15m", 900) // height = 25
-	l.AddSplit(podsPlugin(), "default")  // idx 0
-	l.AddSplit(svcsPlugin(), "default")  // idx 1 (focused)
+	l := New(80, 26, 1000, "15m", 900)  // height = 25
+	l.AddSplit(podsPlugin(), "default") // idx 0
+	l.AddSplit(svcsPlugin(), "default") // idx 1 (focused)
 
 	l.ToggleZoomSplit()
 

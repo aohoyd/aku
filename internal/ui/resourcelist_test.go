@@ -46,7 +46,9 @@ func (p *testPlugin) Columns() []plugin.Column {
 func (p *testPlugin) Row(obj *unstructured.Unstructured) []string {
 	return []string{obj.GetName(), "Running"}
 }
-func (p *testPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error)   { return render.Content{}, nil }
+func (p *testPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) {
+	return render.Content{}, nil
+}
 func (p *testPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (render.Content, error) {
 	return render.Content{}, nil
 }
@@ -1043,4 +1045,3 @@ func TestColumnWidthsRecomputedWhenRowCountChanges(t *testing.T) {
 		t.Fatal("expected cachedColumnWidths to be recomputed when row count changes")
 	}
 }
-

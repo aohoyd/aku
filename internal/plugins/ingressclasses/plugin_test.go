@@ -54,8 +54,8 @@ func TestIngressClassPluginDescribe(t *testing.T) {
 			"metadata": map[string]any{
 				"name":              "nginx",
 				"creationTimestamp": "2026-02-24T10:00:00Z",
-				"labels":           map[string]any{"app": "nginx"},
-				"annotations":      map[string]any{"ingressclass.kubernetes.io/is-default-class": "true"},
+				"labels":            map[string]any{"app": "nginx"},
+				"annotations":       map[string]any{"ingressclass.kubernetes.io/is-default-class": "true"},
 			},
 			"spec": map[string]any{
 				"controller": "k8s.io/ingress-nginx",

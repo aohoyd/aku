@@ -27,10 +27,10 @@ func New(registry *portforward.Registry) *Plugin {
 	return &Plugin{registry: registry}
 }
 
-func (p *Plugin) Name() string                            { return "portforwards" }
-func (p *Plugin) ShortName() string                       { return "pf" }
-func (p *Plugin) GVR() schema.GroupVersionResource        { return syntheticGVR }
-func (p *Plugin) IsClusterScoped() bool                   { return true }
+func (p *Plugin) Name() string                     { return "portforwards" }
+func (p *Plugin) ShortName() string                { return "pf" }
+func (p *Plugin) GVR() schema.GroupVersionResource { return syntheticGVR }
+func (p *Plugin) IsClusterScoped() bool            { return true }
 
 func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 	return plugin.MarshalYAML(obj)

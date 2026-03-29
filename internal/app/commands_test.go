@@ -35,10 +35,10 @@ func (m *mockPlugin) ShortName() string {
 	}
 	return m.name[:2]
 }
-func (m *mockPlugin) GVR() schema.GroupVersionResource                           { return m.gvr }
-func (m *mockPlugin) IsClusterScoped() bool                                      { return false }
-func (m *mockPlugin) Columns() []plugin.Column                                   { return nil }
-func (m *mockPlugin) Row(_ *unstructured.Unstructured) []string                  { return nil }
+func (m *mockPlugin) GVR() schema.GroupVersionResource          { return m.gvr }
+func (m *mockPlugin) IsClusterScoped() bool                     { return false }
+func (m *mockPlugin) Columns() []plugin.Column                  { return nil }
+func (m *mockPlugin) Row(_ *unstructured.Unstructured) []string { return nil }
 func (m *mockPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) {
 	s := "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test-pod\n"
 	return render.Content{Raw: s, Display: s}, nil

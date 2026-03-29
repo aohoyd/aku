@@ -34,10 +34,10 @@ func New(client *k8s.Client, store *k8s.Store, resolver helm.ChartResolver) *Plu
 	return p
 }
 
-func (p *Plugin) Name() string                            { return "helmreleases" }
-func (p *Plugin) ShortName() string                       { return "release" }
-func (p *Plugin) GVR() schema.GroupVersionResource        { return syntheticGVR }
-func (p *Plugin) IsClusterScoped() bool                   { return false }
+func (p *Plugin) Name() string                     { return "helmreleases" }
+func (p *Plugin) ShortName() string                { return "release" }
+func (p *Plugin) GVR() schema.GroupVersionResource { return syntheticGVR }
+func (p *Plugin) IsClusterScoped() bool            { return false }
 
 func (p *Plugin) Columns() []plugin.Column {
 	return []plugin.Column{
@@ -83,8 +83,6 @@ func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (re
 	b.KV(render.LEVEL_0, "Updated", updated)
 	return b.Build(), nil
 }
-
-
 
 func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
 	manifest, _, _ := unstructured.NestedString(obj.Object, "_manifest")

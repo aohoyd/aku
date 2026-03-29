@@ -27,11 +27,11 @@ func DefaultPipeline() *Pipeline {
 		)).
 		// 2. Log levels
 		Add(NewLogLevelHighlighter(
-			BoldFgPainter(theme.Error),      // ERROR, ERR, FATAL
-			FgPainter(theme.Warning),        // WARN, WARNING
-			FgPainter(theme.SyntaxValue),    // INFO
-			FgPainter(theme.StatusRunning),  // DEBUG, DBG
-			FaintFgPainter(theme.Muted),     // TRACE
+			BoldFgPainter(theme.Error),     // ERROR, ERR, FATAL
+			FgPainter(theme.Warning),       // WARN, WARNING
+			FgPainter(theme.SyntaxValue),   // INFO
+			FgPainter(theme.StatusRunning), // DEBUG, DBG
+			FaintFgPainter(theme.Muted),    // TRACE
 		)).
 		// 3. Timestamps
 		Add(NewTimestampHighlighter(

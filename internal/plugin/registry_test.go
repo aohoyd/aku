@@ -15,11 +15,11 @@ type mockPlugin struct {
 	gvr  schema.GroupVersionResource
 }
 
-func (m *mockPlugin) Name() string                    { return m.name }
-func (m *mockPlugin) ShortName() string               { return m.name[:2] }
+func (m *mockPlugin) Name() string                     { return m.name }
+func (m *mockPlugin) ShortName() string                { return m.name[:2] }
 func (m *mockPlugin) GVR() schema.GroupVersionResource { return m.gvr }
 func (m *mockPlugin) IsClusterScoped() bool            { return false }
-func (m *mockPlugin) Columns() []Column               { return nil }
+func (m *mockPlugin) Columns() []Column                { return nil }
 func (m *mockPlugin) Row(_ *unstructured.Unstructured) []string {
 	return nil
 }
@@ -29,6 +29,7 @@ func (m *mockPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) 
 func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (render.Content, error) {
 	return render.Content{}, nil
 }
+
 // mockPluginExplicitShort allows explicit control over the short name.
 type mockPluginExplicitShort struct {
 	mockPlugin

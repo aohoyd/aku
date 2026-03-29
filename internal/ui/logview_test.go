@@ -370,10 +370,10 @@ func TestLogView_BuiltinTimestampVariants(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	variants := []string{
-		"2024-03-22T14:30:00Z message",        // Z timezone
-		"2024-03-22T14:30:00+05:30 message",   // offset timezone
-		"2024-03-22 14:30:00.123456 message",   // space separator, microseconds
-		"2024-03-22T14:30:00 message",          // no fractional, no tz
+		"2024-03-22T14:30:00Z message",       // Z timezone
+		"2024-03-22T14:30:00+05:30 message",  // offset timezone
+		"2024-03-22 14:30:00.123456 message", // space separator, microseconds
+		"2024-03-22T14:30:00 message",        // no fractional, no tz
 	}
 	for _, line := range variants {
 		result := lv.pipeline.Highlight(line)

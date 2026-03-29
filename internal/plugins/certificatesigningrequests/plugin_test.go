@@ -66,7 +66,7 @@ func TestCSRPluginDescribe(t *testing.T) {
 			"metadata": map[string]any{
 				"name":              "test-csr",
 				"creationTimestamp": "2026-02-24T10:00:00Z",
-				"labels":           map[string]any{"app": "test"},
+				"labels":            map[string]any{"app": "test"},
 			},
 			"spec": map[string]any{
 				"signerName":        "kubernetes.io/kube-apiserver-client",

@@ -20,6 +20,6 @@ func TestActivePortForwardStopIdempotent(t *testing.T) {
 		stop:  stop,
 	}
 
-	apf.Stop()  // First call should work
-	apf.Stop()  // Second call should not panic
+	apf.Stop() // First call should work
+	apf.Stop() // Second call should not panic
 }

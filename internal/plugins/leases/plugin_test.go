@@ -76,7 +76,7 @@ func TestLeasePluginDescribe(t *testing.T) {
 				"name":              "test-lease",
 				"namespace":         "kube-system",
 				"creationTimestamp": "2026-02-24T10:00:00Z",
-				"labels":           map[string]any{"app": "controller"},
+				"labels":            map[string]any{"app": "controller"},
 			},
 			"spec": map[string]any{
 				"holderIdentity":       "node-1",

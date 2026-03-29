@@ -7,8 +7,8 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
-	"github.com/aohoyd/aku/internal/render"
 	"github.com/aohoyd/aku/internal/plugins/workload"
+	"github.com/aohoyd/aku/internal/render"
 	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -24,9 +24,9 @@ func (m *mockPlugin) ShortName() string { return m.name[:2] }
 func (m *mockPlugin) GVR() schema.GroupVersionResource {
 	return schema.GroupVersionResource{}
 }
-func (m *mockPlugin) IsClusterScoped() bool                                      { return false }
-func (m *mockPlugin) Columns() []plugin.Column                                   { return nil }
-func (m *mockPlugin) Row(_ *unstructured.Unstructured) []string                  { return nil }
+func (m *mockPlugin) IsClusterScoped() bool                     { return false }
+func (m *mockPlugin) Columns() []plugin.Column                  { return nil }
+func (m *mockPlugin) Row(_ *unstructured.Unstructured) []string { return nil }
 func (m *mockPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) {
 	return render.Content{}, nil
 }
@@ -100,7 +100,7 @@ func TestNodePluginDescribe(t *testing.T) {
 			"metadata": map[string]any{
 				"name":              "node-1",
 				"creationTimestamp": "2024-01-01T00:00:00Z",
-				"labels":           map[string]any{"beta.kubernetes.io/os": "linux"},
+				"labels":            map[string]any{"beta.kubernetes.io/os": "linux"},
 			},
 			"status": map[string]any{
 				"conditions": []any{

@@ -19,7 +19,7 @@ func makeEvent(kind, name, namespace, eventType, reason, message, source, ts str
 		"type":          eventType,
 		"reason":        reason,
 		"message":       message,
-		"lastTimestamp":  ts,
+		"lastTimestamp": ts,
 		"source":        map[string]any{"component": source},
 	}}
 }

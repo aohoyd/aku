@@ -22,11 +22,11 @@ type mockPlugin struct {
 	gvr       schema.GroupVersionResource
 }
 
-func (m *mockPlugin) Name() string                          { return m.name }
-func (m *mockPlugin) ShortName() string                     { return m.shortName }
-func (m *mockPlugin) GVR() schema.GroupVersionResource      { return m.gvr }
-func (m *mockPlugin) IsClusterScoped() bool                 { return false }
-func (m *mockPlugin) Columns() []plugin.Column              { return nil }
+func (m *mockPlugin) Name() string                              { return m.name }
+func (m *mockPlugin) ShortName() string                         { return m.shortName }
+func (m *mockPlugin) GVR() schema.GroupVersionResource          { return m.gvr }
+func (m *mockPlugin) IsClusterScoped() bool                     { return false }
+func (m *mockPlugin) Columns() []plugin.Column                  { return nil }
 func (m *mockPlugin) Row(_ *unstructured.Unstructured) []string { return nil }
 func (m *mockPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) {
 	return render.Content{}, nil
@@ -214,10 +214,10 @@ func TestCompleteResources(t *testing.T) {
 	// Each plugin should produce a short-name completion (with description) and a full-name completion
 	// when short name != full name.
 	expectedShort := map[string]bool{
-		"po\tpods":           true,
+		"po\tpods":            true,
 		"deploy\tdeployments": true,
-		"sec\tsecrets":       true,
-		"svc\tservices":      true,
+		"sec\tsecrets":        true,
+		"svc\tservices":       true,
 	}
 	expectedFull := map[string]bool{
 		"pods":        true,

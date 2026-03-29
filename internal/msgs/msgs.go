@@ -10,7 +10,7 @@ import (
 type DetailMode int
 
 const (
-	DetailYAML     DetailMode = iota
+	DetailYAML DetailMode = iota
 	DetailDescribe
 	DetailLogs
 )
@@ -253,4 +253,3 @@ type StatusBarClearWarningMsg struct{}
 type ClusterHealthMsg struct {
 	Online bool
 }
-

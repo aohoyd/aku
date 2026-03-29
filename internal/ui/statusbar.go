@@ -17,7 +17,7 @@ import (
 type StatusBar struct {
 	hints          []config.KeyHint
 	indicator      string
-	errText         string
+	errText        string
 	errorVisible   bool
 	warning        string
 	warningVisible bool

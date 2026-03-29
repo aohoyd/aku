@@ -130,4 +130,3 @@ func TestReadyCountNoStatus(t *testing.T) {
 		t.Fatalf("expected (0, 2), got (%d, %d)", ready, total)
 	}
 }
-

@@ -90,7 +90,7 @@ func makeGatewayClass(name, controller, acceptedStatus, condReason, condMessage 
 			"metadata": map[string]any{
 				"name":              name,
 				"creationTimestamp": "2024-01-01T00:00:00Z",
-				"labels":           map[string]any{"app": "gateway"},
+				"labels":            map[string]any{"app": "gateway"},
 			},
 			"spec": map[string]any{
 				"controllerName": controller,

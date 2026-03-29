@@ -6,9 +6,9 @@ import (
 
 const (
 	httpMethodANSI = "\x1b[48;5;4;38;5;15m" // bg blue + fg white
-	boolTrueANSI  = "\x1b[38;5;2m"          // green
-	boolFalseANSI = "\x1b[38;5;1m"          // red
-	nullANSI      = "\x1b[38;5;8m"          // grey
+	boolTrueANSI   = "\x1b[38;5;2m"         // green
+	boolFalseANSI  = "\x1b[38;5;1m"         // red
+	nullANSI       = "\x1b[38;5;8m"         // grey
 )
 
 func newTestKeywordHighlighter() *KeywordHighlighter {

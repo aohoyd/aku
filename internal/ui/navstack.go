@@ -8,13 +8,13 @@ import (
 
 // NavSnapshot captures the full restorable state of a ResourceList pane.
 type NavSnapshot struct {
-	Plugin      plugin.ResourcePlugin
-	Namespace   string
-	Objects     []*unstructured.Unstructured
-	Cursor      int
-	SortState   SortState
-	FilterState SearchState
-	SearchState SearchState
+	Plugin           plugin.ResourcePlugin
+	Namespace        string
+	Objects          []*unstructured.Unstructured
+	Cursor           int
+	SortState        SortState
+	FilterState      SearchState
+	SearchState      SearchState
 	ParentUID        string // UID of the parent resource that produced this drilled view
 	ParentName       string // Name of the parent resource for breadcrumb display
 	ParentAPIVersion string // API version of the parent resource for kind disambiguation

@@ -27,11 +27,10 @@ func New() *Plugin {
 	return &Plugin{}
 }
 
-func (p *Plugin) Name() string                            { return "api-resources" }
-func (p *Plugin) ShortName() string                       { return "api" }
-func (p *Plugin) GVR() schema.GroupVersionResource        { return syntheticGVR }
-func (p *Plugin) IsClusterScoped() bool                   { return true }
-
+func (p *Plugin) Name() string                     { return "api-resources" }
+func (p *Plugin) ShortName() string                { return "api" }
+func (p *Plugin) GVR() schema.GroupVersionResource { return syntheticGVR }
+func (p *Plugin) IsClusterScoped() bool            { return true }
 
 func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 	return plugin.MarshalYAML(obj)

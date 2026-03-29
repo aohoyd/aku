@@ -21,7 +21,9 @@ func (s *stubPlugin) GVR() schema.GroupVersionResource {
 func (s *stubPlugin) IsClusterScoped() bool                     { return false }
 func (s *stubPlugin) Columns() []plugin.Column                  { return nil }
 func (s *stubPlugin) Row(_ *unstructured.Unstructured) []string { return nil }
-func (s *stubPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) { return render.Content{}, nil }
+func (s *stubPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) {
+	return render.Content{}, nil
+}
 func (s *stubPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (render.Content, error) {
 	return render.Content{}, nil
 }

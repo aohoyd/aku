@@ -29,10 +29,10 @@ func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
 	return &Plugin{store: store}
 }
 
-func (p *Plugin) Name() string                            { return "containers" }
-func (p *Plugin) ShortName() string                       { return "co" }
-func (p *Plugin) GVR() schema.GroupVersionResource        { return sentinelGVR }
-func (p *Plugin) IsClusterScoped() bool                   { return false }
+func (p *Plugin) Name() string                     { return "containers" }
+func (p *Plugin) ShortName() string                { return "co" }
+func (p *Plugin) GVR() schema.GroupVersionResource { return sentinelGVR }
+func (p *Plugin) IsClusterScoped() bool            { return false }
 
 func (p *Plugin) Columns() []plugin.Column {
 	return []plugin.Column{
@@ -86,8 +86,6 @@ func (p *Plugin) DescribeUncovered(ctx context.Context, obj *unstructured.Unstru
 	p.store.Subscribe(secretsGVR, ns)
 	return p.renderDescribe(obj, pod, p.store.List(configMapsGVR, ns), p.store.List(secretsGVR, ns))
 }
-
-
 
 // SortValue implements plugin.Sortable.
 func (p *Plugin) SortValue(obj *unstructured.Unstructured, column string) string {

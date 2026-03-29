@@ -37,10 +37,10 @@ type helmmanifest struct {
 	children         []*unstructured.Unstructured
 }
 
-func (p *helmmanifest) Name() string                                               { return "helmmanifest" }
-func (p *helmmanifest) ShortName() string                                          { return "hm" }
-func (p *helmmanifest) GVR() schema.GroupVersionResource                           { return manifestGVR }
-func (p *helmmanifest) IsClusterScoped() bool                                      { return false }
+func (p *helmmanifest) Name() string                     { return "helmmanifest" }
+func (p *helmmanifest) ShortName() string                { return "hm" }
+func (p *helmmanifest) GVR() schema.GroupVersionResource { return manifestGVR }
+func (p *helmmanifest) IsClusterScoped() bool            { return false }
 
 func (p *helmmanifest) Objects() []*unstructured.Unstructured {
 	p.mu.RLock()

@@ -22,10 +22,10 @@ func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
 	return &Plugin{}
 }
 
-func (p *Plugin) Name() string                            { return "customresourcedefinitions" }
-func (p *Plugin) ShortName() string                       { return "crd" }
-func (p *Plugin) GVR() schema.GroupVersionResource        { return gvr }
-func (p *Plugin) IsClusterScoped() bool                   { return true }
+func (p *Plugin) Name() string                     { return "customresourcedefinitions" }
+func (p *Plugin) ShortName() string                { return "crd" }
+func (p *Plugin) GVR() schema.GroupVersionResource { return gvr }
+func (p *Plugin) IsClusterScoped() bool            { return true }
 
 func (p *Plugin) Columns() []plugin.Column {
 	return []plugin.Column{
@@ -40,7 +40,9 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	return []string{name, age}
 }
 
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) { return plugin.MarshalYAML(obj) }
+func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
+	return plugin.MarshalYAML(obj)
+}
 
 func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (render.Content, error) {
 	b := render.NewBuilder()
@@ -115,4 +117,3 @@ func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (re
 
 	return b.Build(), nil
 }
-

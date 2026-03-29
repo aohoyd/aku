@@ -62,9 +62,9 @@ var (
 // Log colors — log viewer timestamp and IP highlighting.
 var (
 	LogTimestamp Color = "#FFA066" // SurimiOrange — timestamp date part
-	LogTime     Color = "#7E9CD8" // CrystalBlue — timestamp time part
-	LogTimezone Color = "#727169" // FujiGrey — timestamp timezone part
-	LogIP       Color = "#7FB4CA" // WaveBlue — IP addresses
+	LogTime      Color = "#7E9CD8" // CrystalBlue — timestamp time part
+	LogTimezone  Color = "#727169" // FujiGrey — timestamp timezone part
+	LogIP        Color = "#7FB4CA" // WaveBlue — IP addresses
 )
 
 func init() {

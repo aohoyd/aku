@@ -38,4 +38,3 @@ func readyCount(obj *unstructured.Unstructured) (int, int) {
 	}
 	return ready, total
 }
-

@@ -290,8 +290,8 @@ func (lv *LogView) updateViewportWrapped() {
 	// to wrapYOffset.  The "display list" has an optional indicator at index 0
 	// followed by lineCount buffer lines.  We track a running visual-row counter.
 	row := 0
-	firstDisplayIdx := 0  // index into the display list (0 may be indicator)
-	vOffset := 0          // visual rows to skip inside the first visible line
+	firstDisplayIdx := 0 // index into the display list (0 may be indicator)
+	vOffset := 0         // visual rows to skip inside the first visible line
 	displayCount := lineCount
 	if hasIndicator {
 		displayCount++
@@ -475,7 +475,6 @@ func (lv *LogView) AppendLine(line string) {
 	}
 	lv.updateViewport()
 }
-
 
 // rebuildViewportContent recomputes search match positions and updates the viewport.
 // Called on search/filter activation (user action), not on every append.
@@ -701,7 +700,6 @@ func (lv *LogView) SearchPrev() {
 	lv.ensureMatchVisible()
 	lv.updateViewport()
 }
-
 
 // SetSize updates the dimensions of the log view.
 func (lv *LogView) SetSize(w, h int) {

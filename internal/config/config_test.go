@@ -11,8 +11,8 @@ func TestChartRefLookup(t *testing.T) {
 	cfg := &Config{
 		Charts: map[string]map[string]string{
 			"production": {
-				"my-app":  "oci://ghcr.io/org/my-app",
-				"legacy":  "/home/user/charts/legacy",
+				"my-app": "oci://ghcr.io/org/my-app",
+				"legacy": "/home/user/charts/legacy",
 			},
 		},
 	}

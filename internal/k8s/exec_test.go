@@ -18,7 +18,7 @@ func TestContextPropagationSignatures(t *testing.T) {
 	// context parameter, this test will fail to compile.
 	var (
 		_ func(context.Context, io.Reader, io.Writer, io.Writer, *rest.Config, kubernetes.Interface, string, string, string, []string) error = execContainer
-		_ func(context.Context, io.Reader, io.Writer, io.Writer, *rest.Config, kubernetes.Interface, string, string, string) error            = attachContainer
+		_ func(context.Context, io.Reader, io.Writer, io.Writer, *rest.Config, kubernetes.Interface, string, string, string) error           = attachContainer
 		_ func(context.Context, io.Reader, io.Writer, *rest.Config, *url.URL) error                                                          = spdyStream
 	)
 }
