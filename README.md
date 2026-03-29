@@ -16,6 +16,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 
 **Resource browsing**
 - Automatic discovery of any CRD or API resource not covered by built-in plugins
+- Disambiguation of same-name resources across API groups (e.g. `certificates [cert-manager.io/v1]`)
 - Helm release management with values editing, rollback, and chart switching
 - Drill-down navigation between related resources (deployment → replicaset → pods → containers)
 
@@ -23,6 +24,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - YAML view with syntax highlighting (managedFields stripped)
 - Describe view with events and environment variable resolution
 - Live log streaming with time range presets, container selection, and autoscroll
+- Log syntax highlighting (JSON, log levels, IPs, URLs, UUIDs, timestamps, paths, key=value)
 - Split panes with independent namespace, filter, and cursor per pane
 - Zoom to full-screen any split or detail panel
 
@@ -32,6 +34,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Ephemeral debug containers (pods and nodes, with optional privileged mode)
 - Port forwarding with live status tracking
 - Update container images across workloads
+- Scale deployments, statefulsets, and replicasets
 - Rollout restart for deployments and pods
 - Multi-select resources for bulk delete
 - Helm values editing, rollback to any revision, and chart reference updates
@@ -66,8 +69,22 @@ make build
 ## Usage
 
 ```bash
-aku
+aku                                    # default kubeconfig and context
+aku --context staging                  # specific context
+aku -n kube-system                     # specific namespace
+aku -r pods,deploy                     # open with specific resources
+aku -r pods -d logs                    # open pods with log panel
+aku -r certificates.cert-manager.io/v1 # qualified resource (when names collide)
+aku --kubeconfig /path/to/kubeconfig   # custom kubeconfig path
 ```
+
+| Flag | Short | Description |
+|------|-------|-------------|
+| `--kubeconfig` | | Path to kubeconfig file |
+| `--context` | | Kubeconfig context to use |
+| `--namespace` | `-n` | Kubernetes namespace |
+| `--resource` | `-r` | Resources to display (repeatable) |
+| `--details` | `-d` | Open detail panel (`y`/yaml, `d`/describe, `l`/logs) |
 
 aku reads your kubeconfig from `$KUBECONFIG` or `~/.kube/config`.
 
@@ -208,6 +225,7 @@ syntax:
 | Key | Resource | Action |
 |-----|----------|--------|
 | `l` | Pods, Containers | View logs |
+| `s` | Deployments, StatefulSets, ReplicaSets | Scale replicas |
 | `i` | Pods, Deployments, StatefulSets, DaemonSets | Set image |
 | `R` | Deployments, Pods | Rollout restart |
 | `R` | Helm releases | Rollback |

@@ -3161,3 +3161,177 @@ func TestHandlePortForwardRequested_DuplicateLocalPortRejectedSynchronously(t *t
 		t.Fatalf("expected empty ID for rejected port-forward, got %q", started.ID)
 	}
 }
+
+func TestGotoQualifiedName(t *testing.T) {
+	app := newTestApp()
+
+	// Register two plugins with the same resource name but different groups.
+	certManagerCerts := &mockPlugin{
+		name: "certificates",
+		gvr:  schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+	}
+	k8sCerts := &mockPlugin{
+		name: "certificates",
+		gvr:  schema.GroupVersionResource{Group: "certificates.k8s.io", Version: "v1", Resource: "certificates"},
+	}
+
+	plugin.Register(certManagerCerts)
+	plugin.Register(k8sCerts) // overwrites byName["certificates"]
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	plugin.Register(podsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	// Use qualified name to navigate to cert-manager certificates specifically.
+	model, _ := app.handleGoto("certificates.cert-manager.io/v1", "")
+	app = model.(App)
+
+	focused := app.layout.FocusedSplit()
+	if focused == nil {
+		t.Fatal("expected a focused split")
+	}
+	if focused.Plugin().GVR() != certManagerCerts.GVR() {
+		t.Fatalf("expected cert-manager.io GVR, got %v", focused.Plugin().GVR())
+	}
+}
+
+func TestGotoBareName(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	deploymentsPlugin := &mockPlugin{
+		name: "deployments",
+		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+
+	plugin.Register(podsPlugin)
+	plugin.Register(deploymentsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	// Bare name should still work (backward compat).
+	model, _ := app.handleGoto("deployments", "")
+	app = model.(App)
+
+	focused := app.layout.FocusedSplit()
+	if focused == nil {
+		t.Fatal("expected a focused split")
+	}
+	if focused.Plugin().Name() != "deployments" {
+		t.Fatalf("expected 'deployments', got %q", focused.Plugin().Name())
+	}
+}
+
+func TestHandleGotoGVR(t *testing.T) {
+	app := newTestApp()
+
+	certManagerCerts := &mockPlugin{
+		name: "certificates",
+		gvr:  schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+	}
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	plugin.Register(certManagerCerts)
+	plugin.Register(podsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	// Navigate using GVR string.
+	model, _ := app.handleGotoGVR("cert-manager.io/v1/certificates")
+	app = model.(App)
+
+	focused := app.layout.FocusedSplit()
+	if focused == nil {
+		t.Fatal("expected a focused split")
+	}
+	if focused.Plugin().GVR() != certManagerCerts.GVR() {
+		t.Fatalf("expected cert-manager.io GVR, got %v", focused.Plugin().GVR())
+	}
+}
+
+func TestHandleGotoGVR_CoreGroup(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	plugin.Register(podsPlugin)
+
+	deploymentsPlugin := &mockPlugin{
+		name: "deployments",
+		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+	plugin.Register(deploymentsPlugin)
+	app.layout.AddSplit(deploymentsPlugin, "default")
+
+	// Navigate using core group GVR (no group prefix).
+	model, _ := app.handleGotoGVR("v1/pods")
+	app = model.(App)
+
+	focused := app.layout.FocusedSplit()
+	if focused == nil {
+		t.Fatal("expected a focused split")
+	}
+	if focused.Plugin().GVR() != podsPlugin.GVR() {
+		t.Fatalf("expected core pods GVR, got %v", focused.Plugin().GVR())
+	}
+}
+
+func TestResourcePickerGotoGVR(t *testing.T) {
+	app := newTestApp()
+
+	certManagerCerts := &mockPlugin{
+		name: "certificates",
+		gvr:  schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+	}
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	plugin.Register(certManagerCerts)
+	plugin.Register(podsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	// Use resource picker command to navigate via GVR.
+	model, _ := app.handleResourcePickerCommand("goto-gvr cert-manager.io/v1/certificates")
+	app = model.(App)
+
+	focused := app.layout.FocusedSplit()
+	if focused == nil {
+		t.Fatal("expected a focused split")
+	}
+	if focused.Plugin().GVR() != certManagerCerts.GVR() {
+		t.Fatalf("expected cert-manager.io GVR, got %v", focused.Plugin().GVR())
+	}
+}
+
+func TestHandleGotoGVR_InvalidFormat(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	plugin.Register(podsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	// Single segment — invalid.
+	model, _ := app.handleGotoGVR("pods")
+	app = model.(App)
+
+	// Should still be on pods (navigation didn't happen).
+	focused := app.layout.FocusedSplit()
+	if focused == nil {
+		t.Fatal("expected a focused split")
+	}
+	if focused.Plugin().Name() != "pods" {
+		t.Fatalf("expected 'pods' (unchanged), got %q", focused.Plugin().Name())
+	}
+}

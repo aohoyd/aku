@@ -201,12 +201,29 @@ func completeNamespaces(kubeconfigFlag, contextFlag string) ([]string, cobra.She
 // for shell completion.
 func completeResources() ([]string, cobra.ShellCompDirective) {
 	var completions []string
-	for _, p := range plugin.All() {
+	allPlugins := plugin.All()
+	for _, p := range allPlugins {
 		completions = append(completions, fmt.Sprintf("%s\t%s", p.ShortName(), p.Name()))
 		if p.Name() != p.ShortName() {
 			completions = append(completions, p.Name())
 		}
 	}
+
+	// For colliding names, add qualified completions.
+	seen := make(map[string]bool)
+	for _, p := range allPlugins {
+		name := p.Name()
+		if seen[name] || !plugin.HasNameCollision(name) {
+			continue
+		}
+		seen[name] = true
+		for _, pp := range plugin.AllByName(name) {
+			gvr := pp.GVR()
+			qualified := gvr.Resource + "." + gvr.Group + "/" + gvr.Version
+			completions = append(completions, qualified)
+		}
+	}
+
 	return completions, cobra.ShellCompDirectiveNoFileComp
 }
 
@@ -228,13 +245,31 @@ func parseResourceSpecs(rawSpecs []string) ([]app.ResourceSpec, error) {
 	var specs []app.ResourceSpec
 	for _, raw := range rawSpecs {
 		var ns, name string
+
+		// Detect qualified names (e.g. "certificates.cert-manager.io/v1"):
+		// if the part before the first "/" contains a ".", it's a qualified name.
+		// Otherwise "namespace/resource" is a namespaced bare name.
 		if idx := strings.IndexByte(raw, '/'); idx >= 0 {
-			ns = raw[:idx]
-			name = raw[idx+1:]
+			left := raw[:idx]
+			if strings.ContainsRune(left, '.') {
+				// Qualified name — use the whole string.
+				name = raw
+			} else {
+				ns = left
+				name = raw[idx+1:]
+			}
 		} else {
 			name = raw
 		}
-		p, ok := plugin.ByName(name)
+
+		var p plugin.ResourcePlugin
+		var ok bool
+		if strings.Contains(name, "/") {
+			p, ok = plugin.ByQualifiedName(name)
+		}
+		if !ok {
+			p, ok = plugin.ByName(name)
+		}
 		if !ok {
 			return nil, fmt.Errorf("unknown resource %q", name)
 		}

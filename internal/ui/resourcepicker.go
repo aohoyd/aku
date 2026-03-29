@@ -19,15 +19,23 @@ func NewResourcePicker(width, height int) ResourcePicker {
 		NoItemsMsg: "(no matches)",
 		MaxVisible: maxDropdownItems,
 		Display: func(e PluginEntry) string {
+			s := e.Name
 			if e.ShortName != "" && e.ShortName != e.Name {
-				return e.Name + " (" + e.ShortName + ")"
+				s = e.Name + " (" + e.ShortName + ")"
 			}
-			return e.Name
+			if e.Qualified {
+				s += " [" + e.GVR.Group + "/" + e.GVR.Version + "]"
+			}
+			return s
 		},
 		Filter: FilterPlugins,
 		OnSelect: func(e PluginEntry) tea.Cmd {
 			return func() tea.Msg {
-				return msgs.ResourcePickedMsg{Command: "goto " + e.Name}
+				cmd := "goto " + e.Name
+				if e.Qualified {
+					cmd = "goto-gvr " + e.GVR.Group + "/" + e.GVR.Version + "/" + e.GVR.Resource
+				}
+				return msgs.ResourcePickedMsg{Command: cmd}
 			}
 		},
 	}, width, height)}

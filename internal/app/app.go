@@ -152,12 +152,7 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 	}
 
 	// Populate fuzzy picker with all registered plugins
-	allPlugins := plugin.All()
-	entries := make([]ui.PluginEntry, len(allPlugins))
-	for i, p := range allPlugins {
-		entries[i] = ui.PluginEntry{Name: p.Name(), ShortName: p.ShortName()}
-	}
-	a.resourcePicker.SetPlugins(entries)
+	a.resourcePicker.SetPlugins(buildPickerEntries())
 
 	// Determine the default namespace
 	defaultNs := "default"
@@ -1089,12 +1084,7 @@ func (a App) handleAPIResourcesDiscovered(msg k8s.APIResourcesDiscoveredMsg) (te
 	}
 
 	// Refresh resource picker entries with all plugins (including newly discovered)
-	allPlugins := plugin.All()
-	entries := make([]ui.PluginEntry, len(allPlugins))
-	for i, p := range allPlugins {
-		entries[i] = ui.PluginEntry{Name: p.Name(), ShortName: p.ShortName()}
-	}
-	a.resourcePicker.SetPlugins(entries)
+	a.resourcePicker.SetPlugins(buildPickerEntries())
 
 	// If any split is currently showing api-resources, update its objects
 	for i := range a.layout.SplitCount() {

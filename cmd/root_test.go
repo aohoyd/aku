@@ -253,6 +253,125 @@ func TestCompleteResources_EmptyRegistry(t *testing.T) {
 	}
 }
 
+func TestParseResourceSpecs_QualifiedName(t *testing.T) {
+	plugin.Reset()
+	// Register two plugins with the same name but different groups.
+	plugin.Register(&mockPlugin{
+		name:      "certificates",
+		shortName: "cert",
+		gvr:       schema.GroupVersionResource{Group: "certificates.k8s.io", Version: "v1", Resource: "certificates"},
+	})
+	plugin.Register(&mockPlugin{
+		name:      "certificates",
+		shortName: "cert",
+		gvr:       schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+	})
+
+	// Use qualified name to select the cert-manager.io variant.
+	specs, err := parseResourceSpecs([]string{"certificates.cert-manager.io/v1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 spec, got %d", len(specs))
+	}
+	got := specs[0].Plugin.GVR()
+	if got.Group != "cert-manager.io" {
+		t.Errorf("expected group 'cert-manager.io', got %q", got.Group)
+	}
+	if got.Version != "v1" {
+		t.Errorf("expected version 'v1', got %q", got.Version)
+	}
+	if got.Resource != "certificates" {
+		t.Errorf("expected resource 'certificates', got %q", got.Resource)
+	}
+	if specs[0].Namespace != "" {
+		t.Errorf("expected empty namespace, got %q", specs[0].Namespace)
+	}
+}
+
+func TestParseResourceSpecs_BareNameBackwardCompat(t *testing.T) {
+	registerTestPlugins()
+
+	// Bare name still works.
+	specs, err := parseResourceSpecs([]string{"pods"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 spec, got %d", len(specs))
+	}
+	if specs[0].Plugin.Name() != "pods" {
+		t.Errorf("expected plugin name 'pods', got %q", specs[0].Plugin.Name())
+	}
+
+	// Short name still works.
+	specs, err = parseResourceSpecs([]string{"deploy"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 spec, got %d", len(specs))
+	}
+	if specs[0].Plugin.Name() != "deployments" {
+		t.Errorf("expected plugin name 'deployments', got %q", specs[0].Plugin.Name())
+	}
+
+	// Namespace/name still works.
+	specs, err = parseResourceSpecs([]string{"kube-system/pods"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 spec, got %d", len(specs))
+	}
+	if specs[0].Namespace != "kube-system" {
+		t.Errorf("expected namespace 'kube-system', got %q", specs[0].Namespace)
+	}
+	if specs[0].Plugin.Name() != "pods" {
+		t.Errorf("expected plugin name 'pods', got %q", specs[0].Plugin.Name())
+	}
+}
+
+func TestCompleteResources_QualifiedNamesOnCollision(t *testing.T) {
+	plugin.Reset()
+	// Register two plugins with the same name but different groups.
+	plugin.Register(&mockPlugin{
+		name:      "certificates",
+		shortName: "cert",
+		gvr:       schema.GroupVersionResource{Group: "certificates.k8s.io", Version: "v1", Resource: "certificates"},
+	})
+	plugin.Register(&mockPlugin{
+		name:      "certificates",
+		shortName: "cert",
+		gvr:       schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+	})
+
+	completions, directive := completeResources()
+	if directive != cobra.ShellCompDirectiveNoFileComp {
+		t.Errorf("expected ShellCompDirectiveNoFileComp, got %v", directive)
+	}
+
+	// Should contain qualified names for both colliding resources.
+	qualified1 := "certificates.certificates.k8s.io/v1"
+	qualified2 := "certificates.cert-manager.io/v1"
+	var found1, found2 bool
+	for _, c := range completions {
+		if c == qualified1 {
+			found1 = true
+		}
+		if c == qualified2 {
+			found2 = true
+		}
+	}
+	if !found1 {
+		t.Errorf("expected qualified completion %q, not found in %v", qualified1, completions)
+	}
+	if !found2 {
+		t.Errorf("expected qualified completion %q, not found in %v", qualified2, completions)
+	}
+}
+
 func TestParseDetailMode_ValidModes(t *testing.T) {
 	tests := []struct {
 		input string

@@ -762,12 +762,22 @@ func (a App) closeRightPanel() App {
 }
 
 func (a App) handleGoto(resourceName string, targetNs string) (tea.Model, tea.Cmd) {
-	p, ok := plugin.ByName(resourceName)
+	var p plugin.ResourcePlugin
+	var ok bool
+	if strings.Contains(resourceName, "/") {
+		p, ok = plugin.ByQualifiedName(resourceName)
+	}
+	if !ok {
+		p, ok = plugin.ByName(resourceName)
+	}
 	if !ok {
 		cmd := a.statusBar.SetError(fmt.Sprintf("unknown resource: %s", resourceName))
 		return a, cmd
 	}
+	return a.handleGotoPlugin(p, targetNs)
+}
 
+func (a App) handleGotoPlugin(p plugin.ResourcePlugin, targetNs string) (tea.Model, tea.Cmd) {
 	if a.layout.AnyZoomed() {
 		a.layout.UnzoomAll()
 		a = a.syncIndicators()
@@ -802,6 +812,28 @@ func (a App) handleGoto(resourceName string, targetNs string) (tea.Model, tea.Cm
 	a, cmd = a.syncLogPanel()
 	a.statusBar.SetHints(a.currentHints())
 	return a, tea.Batch(populateCmd, descCmd, cmd)
+}
+
+func (a App) handleGotoGVR(gvrStr string) (tea.Model, tea.Cmd) {
+	parts := strings.Split(gvrStr, "/")
+	var gvr schema.GroupVersionResource
+	switch len(parts) {
+	case 3:
+		// group/version/resource
+		gvr = schema.GroupVersionResource{Group: parts[0], Version: parts[1], Resource: parts[2]}
+	case 2:
+		// version/resource (core group, group="")
+		gvr = schema.GroupVersionResource{Version: parts[0], Resource: parts[1]}
+	default:
+		cmd := a.statusBar.SetError(fmt.Sprintf("invalid GVR format: %s (expected group/version/resource or version/resource)", gvrStr))
+		return a, cmd
+	}
+	p, ok := plugin.ByGVR(gvr)
+	if !ok {
+		cmd := a.statusBar.SetError(fmt.Sprintf("unknown GVR: %s", gvrStr))
+		return a, cmd
+	}
+	return a.handleGotoPlugin(p, "")
 }
 
 func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
@@ -930,6 +962,12 @@ func (a App) handleResourcePickerCommand(input string) (tea.Model, tea.Cmd) {
 			return a.handleGoto(parts[1], "")
 		}
 		cmd := a.statusBar.SetError("usage: goto <resource>")
+		return a, cmd
+	case "goto-gvr":
+		if len(parts) >= 2 {
+			return a.handleGotoGVR(parts[1])
+		}
+		cmd := a.statusBar.SetError("usage: goto-gvr <group/version/resource>")
 		return a, cmd
 	default:
 		return a.handleGoto(parts[0], "")

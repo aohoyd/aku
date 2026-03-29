@@ -1,6 +1,10 @@
 package ui
 
-import "testing"
+import (
+	"testing"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
 
 func TestScoreExactMatch(t *testing.T) {
 	if s := scoreCandidate("pods", "pods"); s != 1000 {
@@ -165,5 +169,161 @@ func TestMatchAbbreviationNonASCII(t *testing.T) {
 	}
 	if !matchAbbreviation("日本", "日xx本yy") {
 		t.Fatal("expected '日本' to match '日xx本yy'")
+	}
+}
+
+func TestFuzzyMatchGroupQualifier(t *testing.T) {
+	entries := []PluginEntry{
+		{
+			Name:      "certificates",
+			ShortName: "cert",
+			GVR:       schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+			Qualified: true,
+		},
+	}
+	results := FuzzyMatchPlugins("cert-manager", entries)
+	if len(results) == 0 {
+		t.Fatal("expected match for 'cert-manager' via group name")
+	}
+	if results[0].Name != "certificates" {
+		t.Fatalf("expected 'certificates', got %q", results[0].Name)
+	}
+}
+
+func TestFuzzyMatchNoQualifierWithoutCollision(t *testing.T) {
+	entries := []PluginEntry{
+		{
+			Name:      "pods",
+			ShortName: "po",
+			GVR:       schema.GroupVersionResource{Group: "", Version: "v1", Resource: "pods"},
+			Qualified: false,
+		},
+	}
+	results := FuzzyMatchPlugins("", entries)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Display != "pods (po)" {
+		t.Fatalf("expected 'pods (po)' without qualifier, got %q", results[0].Display)
+	}
+}
+
+func TestFuzzyMatchQualifiedDisplayFormat(t *testing.T) {
+	entries := []PluginEntry{
+		{
+			Name:      "certificates",
+			ShortName: "cert",
+			GVR:       schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+			Qualified: true,
+		},
+		{
+			Name:      "certificates",
+			ShortName: "",
+			GVR:       schema.GroupVersionResource{Group: "acme.cert-manager.io", Version: "v1", Resource: "certificates"},
+			Qualified: true,
+		},
+	}
+	results := FuzzyMatchPlugins("", entries)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	// Entry with shortname distinct from name
+	found := false
+	for _, r := range results {
+		if r.Display == "certificates (cert) [cert-manager.io/v1]" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected display 'certificates (cert) [cert-manager.io/v1]' in results: %v", results)
+	}
+	// Entry without shortname
+	found = false
+	for _, r := range results {
+		if r.Display == "certificates [acme.cert-manager.io/v1]" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected display 'certificates [acme.cert-manager.io/v1]' in results: %v", results)
+	}
+}
+
+func TestScoreExactNameMatchBeatsGroupMatch(t *testing.T) {
+	// An entry whose name exactly matches should score higher than
+	// one that only matches via its GVR group.
+	nameEntry := PluginEntry{
+		Name:      "cert-manager",
+		ShortName: "",
+		GVR:       schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "cert-manager"},
+	}
+	groupEntry := PluginEntry{
+		Name:      "certificates",
+		ShortName: "cert",
+		GVR:       schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+		Qualified: true,
+	}
+	nameScore := scoreEntry("cert-manager", nameEntry)
+	groupScore := scoreEntry("cert-manager", groupEntry)
+	if nameScore <= groupScore {
+		t.Fatalf("exact name match should score higher than group match: name=%d, group=%d", nameScore, groupScore)
+	}
+}
+
+func TestFilterPluginsWithDuplicateNames(t *testing.T) {
+	entries := []PluginEntry{
+		{
+			Name:      "certificates",
+			ShortName: "cert",
+			GVR:       schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+			Qualified: true,
+		},
+		{
+			Name:      "certificates",
+			ShortName: "",
+			GVR:       schema.GroupVersionResource{Group: "acme.cert-manager.io", Version: "v1", Resource: "certificates"},
+			Qualified: true,
+		},
+		{
+			Name:      "pods",
+			ShortName: "po",
+		},
+	}
+	result := FilterPlugins("cert", entries)
+	if len(result) < 2 {
+		t.Fatalf("expected at least 2 results for 'cert', got %d", len(result))
+	}
+	// Both certificate entries should be present
+	groups := make(map[string]bool)
+	for _, e := range result {
+		if e.Name == "certificates" {
+			groups[e.GVR.Group] = true
+		}
+	}
+	if !groups["cert-manager.io"] {
+		t.Fatal("expected cert-manager.io group in results")
+	}
+	if !groups["acme.cert-manager.io"] {
+		t.Fatal("expected acme.cert-manager.io group in results")
+	}
+}
+
+func TestFuzzyMatchGroupVersionQuery(t *testing.T) {
+	entries := []PluginEntry{
+		{
+			Name:      "certificates",
+			ShortName: "cert",
+			GVR:       schema.GroupVersionResource{Group: "cert-manager.io", Version: "v1", Resource: "certificates"},
+			Qualified: true,
+		},
+	}
+	results := FuzzyMatchPlugins("cert-manager.io/v1", entries)
+	if len(results) == 0 {
+		t.Fatal("expected match for 'cert-manager.io/v1' via group/version")
+	}
+	if results[0].Name != "certificates" {
+		t.Fatalf("expected 'certificates', got %q", results[0].Name)
 	}
 }
