@@ -52,6 +52,14 @@ func (s *ScaleOverlay) Open(resourceName, namespace string, gvr schema.GroupVers
 
 	ti := textinput.New()
 	ti.Prompt = "Replicas: "
+	ti.Validate = func(s string) error {
+		for _, r := range s {
+			if r < '0' || r > '9' {
+				return fmt.Errorf("digits only")
+			}
+		}
+		return nil
+	}
 	ti.SetValue(fmt.Sprintf("%d", replicas))
 	s.overlay.AddInput(ti)
 	s.overlay.FocusInput(0)
@@ -147,18 +155,25 @@ func (s ScaleOverlay) Update(msg tea.Msg) (ScaleOverlay, tea.Cmd) {
 		return s, nil
 
 	default:
-		if !s.inputFocused {
-			switch km.String() {
-			case "y", "Y":
-				return s.handleSubmit()
-			case "n", "N":
-				s.Close()
-				return s, nil
-			}
+		switch km.String() {
+		case "y", "Y":
+			return s.handleSubmit()
+		case "n", "N":
+			s.Close()
 			return s, nil
 		}
-		cmd := s.overlay.UpdateInputs(km)
-		return s, cmd
+		if s.inputFocused {
+			// Reject non-digit character input (Bubbles v2 Validate only
+			// sets Err but still accepts the keystroke).
+			for _, r := range km.Text {
+				if r < '0' || r > '9' {
+					return s, nil
+				}
+			}
+			cmd := s.overlay.UpdateInputs(km)
+			return s, cmd
+		}
+		return s, nil
 	}
 }
 

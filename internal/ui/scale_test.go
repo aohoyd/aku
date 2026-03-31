@@ -223,33 +223,40 @@ func TestScaleOverlayButtonNoHotkey(t *testing.T) {
 	}
 }
 
-func TestScaleOverlayYKeyPassesThroughWhenInputFocused(t *testing.T) {
+func TestScaleOverlayYKeySubmitsWhenInputFocused(t *testing.T) {
 	s := NewScaleOverlay(80, 30)
 	s.Open("my-deploy", "default", testGVR, 3)
 	s.overlay.Input(0).SetValue("5")
 
-	// With input focused, "y" should pass through to input, not trigger submit.
+	// With input focused, "y" should still trigger submit.
 	s, cmd := s.Update(tea.KeyPressMsg{Code: -1, Text: "y"})
-	if !s.Active() {
-		t.Fatal("expected overlay to remain active when y is typed into focused input")
+	if s.Active() {
+		t.Fatal("expected overlay to close after y hotkey while input focused")
 	}
-	if cmd != nil {
-		// cmd may be non-nil from UpdateInputs, but overlay must stay open.
-		msg := cmd()
-		if _, ok := msg.(msgs.ScaleRequestedMsg); ok {
-			t.Fatal("expected y to NOT trigger ScaleRequestedMsg when input is focused")
-		}
+	if cmd == nil {
+		t.Fatal("expected a command from y hotkey")
+	}
+	msg := cmd()
+	scaleMsg, ok := msg.(msgs.ScaleRequestedMsg)
+	if !ok {
+		t.Fatalf("expected ScaleRequestedMsg, got %T", msg)
+	}
+	if scaleMsg.Replicas != 5 {
+		t.Fatalf("expected 5 replicas, got %d", scaleMsg.Replicas)
 	}
 }
 
-func TestScaleOverlayNKeyPassesThroughWhenInputFocused(t *testing.T) {
+func TestScaleOverlayNKeyClosesWhenInputFocused(t *testing.T) {
 	s := NewScaleOverlay(80, 30)
 	s.Open("my-deploy", "default", testGVR, 3)
 
-	// With input focused, "n" should pass through to input, not close overlay.
-	s, _ = s.Update(tea.KeyPressMsg{Code: -1, Text: "n"})
-	if !s.Active() {
-		t.Fatal("expected overlay to remain active when n is typed into focused input")
+	// With input focused, "n" should still close the overlay.
+	s, cmd := s.Update(tea.KeyPressMsg{Code: -1, Text: "n"})
+	if s.Active() {
+		t.Fatal("expected overlay to close after n hotkey while input focused")
+	}
+	if cmd != nil {
+		t.Fatal("expected no command from n hotkey (cancel)")
 	}
 }
 
@@ -338,6 +345,32 @@ func TestScaleOverlayEnterOnNoButton(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Fatal("expected no command from No button")
+	}
+}
+
+// ── Digit-only validation tests ──
+
+func TestScaleOverlayRejectsLetterKeystrokes(t *testing.T) {
+	s := NewScaleOverlay(80, 30)
+	s.Open("my-deploy", "default", testGVR, 3)
+
+	// Send a letter keystroke while the input is focused.
+	s, _ = s.Update(tea.KeyPressMsg{Code: -1, Text: "a"})
+
+	if s.overlay.InputValue(0) != "3" {
+		t.Fatalf("expected input value '3' unchanged after letter key, got %q", s.overlay.InputValue(0))
+	}
+}
+
+func TestScaleOverlayAcceptsDigitKeystrokes(t *testing.T) {
+	s := NewScaleOverlay(80, 30)
+	s.Open("my-deploy", "default", testGVR, 3)
+
+	// Send a digit keystroke while the input is focused.
+	s, _ = s.Update(tea.KeyPressMsg{Code: -1, Text: "5"})
+
+	if s.overlay.InputValue(0) != "35" {
+		t.Fatalf("expected input value '35' after digit key, got %q", s.overlay.InputValue(0))
 	}
 }
 
