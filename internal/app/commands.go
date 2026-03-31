@@ -692,6 +692,11 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			a.layout.ActiveDetailPanel().ToggleWrap()
 		}
 		return a, nil
+	case command == "toggle-header":
+		if a.layout.RightPanelVisible() {
+			a.layout.ActiveDetailPanel().ToggleHeader()
+		}
+		return a, nil
 	case command == "page-down":
 		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
 			a.layout.ActiveDetailPanel().PageDown()

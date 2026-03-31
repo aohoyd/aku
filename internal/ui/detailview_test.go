@@ -610,3 +610,114 @@ func TestDetailViewSetObjectFilterCompatibility(t *testing.T) {
 		t.Fatal("filtered view should not contain non-matching lines")
 	}
 }
+
+func TestDetailViewShowHeaderDefault(t *testing.T) {
+	dv := NewDetailView(80, 20)
+	if !dv.ShowHeader() {
+		t.Fatal("ShowHeader should default to true")
+	}
+}
+
+func TestDetailViewHeaderShownInBorderlessMode(t *testing.T) {
+	dv := NewDetailView(80, 20)
+	dv.SetMode(msgs.DetailYAML)
+	dv.SetBorderless(true)
+	dv.SetSize(80, 20)
+	s := "apiVersion: v1\nkind: Pod"
+	dv.SetContent(render.Content{Raw: s, Display: s}, true)
+
+	view := dv.View()
+	stripped := ansi.Strip(view)
+	if !strings.Contains(stripped, "YAML") {
+		t.Fatal("borderless view with showHeader=true should contain the mode name in the header")
+	}
+	if !strings.Contains(stripped, "apiVersion") {
+		t.Fatal("borderless view with showHeader=true should still contain content")
+	}
+}
+
+func TestDetailViewHeaderHiddenWhenToggledOff(t *testing.T) {
+	dv := NewDetailView(80, 20)
+	dv.SetMode(msgs.DetailYAML)
+	dv.SetBorderless(true)
+	dv.SetSize(80, 20)
+	s := "apiVersion: v1\nkind: Pod"
+	dv.SetContent(render.Content{Raw: s, Display: s}, true)
+
+	dv.ToggleHeader()
+	if dv.ShowHeader() {
+		t.Fatal("ShowHeader should be false after ToggleHeader")
+	}
+
+	view := dv.View()
+	stripped := ansi.Strip(view)
+	// The mode name should NOT appear when header is off in borderless mode
+	lines := strings.Split(stripped, "\n")
+	if len(lines) > 0 && strings.Contains(lines[0], "YAML") {
+		t.Fatal("borderless view with showHeader=false should not have a header line with mode name")
+	}
+	if !strings.Contains(stripped, "apiVersion") {
+		t.Fatal("borderless view with showHeader=false should still contain content")
+	}
+}
+
+func TestDetailViewSetSizeViewportHeightWithHeader(t *testing.T) {
+	dv := NewDetailView(80, 20)
+	dv.SetBorderless(true)
+	dv.SetMode(msgs.DetailYAML)
+
+	// With header (default), viewport height should be h-1
+	dv.SetSize(80, 20)
+	// Build enough content to verify viewport height matters
+	lines := make([]string, 30)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	content := strings.Join(lines, "\n")
+	dv.SetContent(render.Content{Raw: content, Display: content}, true)
+
+	viewWithHeader := dv.View()
+	strippedWithHeader := ansi.Strip(viewWithHeader)
+
+	// Count content lines (lines containing "line NN" pattern)
+	contentLinesWithHeader := 0
+	for _, l := range strings.Split(strippedWithHeader, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "line ") {
+			contentLinesWithHeader++
+		}
+	}
+
+	// Toggle header off, viewport height should be h (one more row for content)
+	dv.ToggleHeader()
+	dv.SetContent(render.Content{Raw: content, Display: content}, true)
+	viewNoHeader := dv.View()
+	strippedNoHeader := ansi.Strip(viewNoHeader)
+
+	contentLinesNoHeader := 0
+	for _, l := range strings.Split(strippedNoHeader, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "line ") {
+			contentLinesNoHeader++
+		}
+	}
+
+	// Without header should show one more content line than with header
+	if contentLinesNoHeader != contentLinesWithHeader+1 {
+		t.Fatalf("no-header view should show 1 more content line: got %d (no header) vs %d (with header)\nwith header:\n%s\nno header:\n%s",
+			contentLinesNoHeader, contentLinesWithHeader, strippedWithHeader, strippedNoHeader)
+	}
+}
+
+func TestDetailViewToggleHeaderDoubleToggle(t *testing.T) {
+	dv := NewDetailView(80, 20)
+	if !dv.ShowHeader() {
+		t.Fatal("initial ShowHeader should be true")
+	}
+	dv.ToggleHeader()
+	if dv.ShowHeader() {
+		t.Fatal("ShowHeader should be false after first toggle")
+	}
+	dv.ToggleHeader()
+	if !dv.ShowHeader() {
+		t.Fatal("ShowHeader should be true after second toggle")
+	}
+}

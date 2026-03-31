@@ -52,6 +52,9 @@ type LogView struct {
 	filteredIndices     []int // when filter active, absolute buffer indices of matching lines
 	filteredIndexOffset int   // number of evictions; subtract from filteredIndices entries to get logical buffer index
 
+	// Header toggle (borderless title bar)
+	showHeader bool
+
 	// Custom viewport for non-wrap rendering
 	logVP                  logViewport
 	highlightStyle         lipgloss.Style
@@ -73,6 +76,7 @@ func NewLogView(width, height, bufCapacity int, defaultTimeRange string, default
 		width:                  width,
 		height:                 height,
 		autoscroll:             true,
+		showHeader:             true,
 		pipeline:               highlight.DefaultPipeline(),
 		timeRangeLabel:         defaultTimeRange,
 		defaultTimeRange:       defaultTimeRange,
@@ -86,6 +90,9 @@ func NewLogView(width, height, bufCapacity int, defaultTimeRange string, default
 // viewportHeight returns the number of visible lines in the viewport.
 func (lv *LogView) viewportHeight() int {
 	if lv.borderless {
+		if lv.showHeader {
+			return lv.height - 1
+		}
 		return lv.height
 	}
 	return lv.height - 2
@@ -509,6 +516,13 @@ func (lv *LogView) rebuildViewportContent() {
 
 // View renders the log view with border and title.
 func (lv LogView) View() string {
+	if lv.borderless && lv.showHeader {
+		baseTitle := lv.buildTitle()
+		titleRendered := BuildPanelTitle(baseTitle, lv.filterState.DisplayPattern(),
+			lv.searchState.DisplayPattern(), lv.width, lv.inlineSearch)
+		headerLine := DetailHeaderStyle.Width(lv.width).Render(titleRendered)
+		return lipgloss.JoinVertical(lipgloss.Left, headerLine, lv.logVP.View())
+	}
 	if lv.borderless {
 		return lv.logVP.View()
 	}
@@ -561,9 +575,11 @@ func (lv *LogView) ApplySearch(pattern string, mode msgs.SearchMode) error {
 		}
 		// Rebuild filtered indices with current offset
 		lv.filteredIndices = nil
-		for i := range lv.buffer.Len() {
-			if lv.filterState.Re.MatchString(lv.buffer.RawGet(i)) {
-				lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+i)
+		if lv.filterState.Active() {
+			for i := range lv.buffer.Len() {
+				if lv.filterState.Re.MatchString(lv.buffer.RawGet(i)) {
+					lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+i)
+				}
 			}
 		}
 	} else {
@@ -694,7 +710,11 @@ func (lv *LogView) SetSize(w, h int) {
 	lv.width = w
 	lv.height = h
 	if lv.borderless {
-		lv.logVP.SetSize(w, h)
+		vpH := h
+		if lv.showHeader {
+			vpH = h - 1
+		}
+		lv.logVP.SetSize(w, vpH)
 	} else {
 		lv.logVP.SetSize(w-2, h-2)
 	}
@@ -708,6 +728,15 @@ func (lv *LogView) SetSize(w, h int) {
 func (lv *LogView) SetBorderless(b bool) {
 	lv.borderless = b
 }
+
+// ToggleHeader flips the header visibility and recalculates the viewport size.
+func (lv *LogView) ToggleHeader() {
+	lv.showHeader = !lv.showHeader
+	lv.SetSize(lv.width, lv.height)
+}
+
+// ShowHeader reports whether the header bar is visible.
+func (lv LogView) ShowHeader() bool { return lv.showHeader }
 
 // Focus marks this log view as focused.
 func (lv *LogView) Focus() { lv.focused = true }

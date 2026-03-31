@@ -32,6 +32,7 @@ type DetailView struct {
 	loadErr        string
 	focused        bool
 	borderless     bool
+	showHeader     bool
 	width          int
 	height         int
 	filterState    SearchState
@@ -82,10 +83,11 @@ func NewDetailView(width, height int) DetailView {
 	vp.SelectedHighlightStyle = lipgloss.NewStyle().Background(theme.SearchSelected).Foreground(theme.SearchFg).Bold(true)
 	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
 	return DetailView{
-		viewport: vp,
-		spinner:  sp,
-		width:    width,
-		height:   height,
+		viewport:   vp,
+		spinner:    sp,
+		showHeader: true,
+		width:      width,
+		height:     height,
 	}
 }
 
@@ -178,6 +180,15 @@ func (d *DetailView) ToggleWrap() {
 	}
 }
 
+// ToggleHeader flips the header visibility and recalculates the viewport size.
+func (d *DetailView) ToggleHeader() {
+	d.showHeader = !d.showHeader
+	d.SetSize(d.width, d.height)
+}
+
+// ShowHeader reports whether the header bar is visible.
+func (d DetailView) ShowHeader() bool { return d.showHeader }
+
 // Mode returns the current detail mode.
 func (d *DetailView) Mode() msgs.DetailMode {
 	return d.mode
@@ -205,8 +216,12 @@ func (d *DetailView) SetSize(w, h int) {
 	d.width = w
 	d.height = h
 	if d.borderless {
+		vpH := h
+		if d.showHeader {
+			vpH = h - 1
+		}
 		d.viewport.SetWidth(w)
-		d.viewport.SetHeight(h)
+		d.viewport.SetHeight(vpH)
 	} else {
 		d.viewport.SetWidth(w - 2)
 		d.viewport.SetHeight(h - 2)
@@ -243,6 +258,16 @@ func (d DetailView) modeName() string {
 
 // View renders the detail view with mode label in the border.
 func (d DetailView) View() string {
+	if d.borderless && d.showHeader {
+		baseTitle := d.modeName()
+		if d.loading {
+			baseTitle += " " + d.spinner.View()
+		}
+		titleRendered := BuildPanelTitle(baseTitle, d.filterState.DisplayPattern(),
+			d.searchState.DisplayPattern(), d.width, d.inlineSearch)
+		headerLine := DetailHeaderStyle.Width(d.width).Render(titleRendered)
+		return lipgloss.JoinVertical(lipgloss.Left, headerLine, d.viewport.View())
+	}
 	if d.borderless {
 		return d.viewport.View()
 	}

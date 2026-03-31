@@ -32,6 +32,8 @@ type DetailPanel interface {
 	GotoTop()
 	GotoBottom()
 	ToggleWrap()
+	ToggleHeader()
+	ShowHeader() bool
 	Focus()
 	Blur()
 	SetSize(w, h int)

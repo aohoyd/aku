@@ -89,6 +89,7 @@ func DefaultBindings() []Binding {
 		{Key: "ctrl+f", Help: "page down", Command: "page-down", Scope: "details"},
 		{Key: "ctrl+b", Help: "page up", Command: "page-up", Scope: "details"},
 		{Key: "w", Help: "wrap", Command: "toggle-wrap", Scope: "details", Visible: true},
+		{Key: "alt+e", Help: "header", Command: "toggle-header", Scope: "details", Visible: true},
 		{Key: "r", Help: "refresh", Command: "refresh-detail", Scope: "details"},
 		{Key: "left", Help: "back", Command: "exit-detail", Scope: "details"},
 		{Key: "h", Help: "back", Command: "exit-detail", Scope: "details"},

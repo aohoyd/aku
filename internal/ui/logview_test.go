@@ -1361,3 +1361,134 @@ func TestLogView_FilterEvictionOffsetBased(t *testing.T) {
 		t.Fatalf("after re-apply: expected %d filtered indices, got %d", len(expectedMatches), len(lv.filteredIndices))
 	}
 }
+
+func TestLogView_ShowHeaderDefaultTrue(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	if !lv.ShowHeader() {
+		t.Fatal("expected ShowHeader to be true by default")
+	}
+}
+
+func TestLogView_ToggleHeaderFlips(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.SetBorderless(true)
+	lv.SetSize(80, 24)
+
+	if !lv.ShowHeader() {
+		t.Fatal("expected ShowHeader true initially")
+	}
+
+	lv.ToggleHeader()
+	if lv.ShowHeader() {
+		t.Fatal("expected ShowHeader false after first toggle")
+	}
+
+	lv.ToggleHeader()
+	if !lv.ShowHeader() {
+		t.Fatal("expected ShowHeader true after second toggle")
+	}
+}
+
+func TestLogView_HeaderShownInBorderlessMode(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.SetBorderless(true)
+	lv.SetSize(80, 24)
+	lv.AppendLine("hello world")
+
+	view := lv.View()
+	// The header should contain the title from buildTitle()
+	if !strings.Contains(view, "Logs") {
+		t.Fatal("expected header with 'Logs' title in borderless mode with showHeader")
+	}
+}
+
+func TestLogView_HeaderHiddenWhenToggledOff(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.SetBorderless(true)
+	lv.SetSize(80, 24)
+	lv.AppendLine("hello world")
+
+	lv.ToggleHeader()
+	view := lv.View()
+
+	// In borderless mode with header off, View should just return logVP.View()
+	// which should not contain a styled title line
+	expected := lv.logVP.View()
+	if view != expected {
+		t.Fatalf("expected View() to equal logVP.View() when header is off, got diff")
+	}
+}
+
+func TestLogView_SetSizeViewportHeightWithHeader(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.SetBorderless(true)
+	lv.SetSize(80, 20)
+
+	// With showHeader=true and borderless, logVP height should be h-1
+	if lv.logVP.height != 19 {
+		t.Fatalf("expected logVP height 19 (20-1 for header), got %d", lv.logVP.height)
+	}
+
+	// Toggle header off — logVP height should be full h
+	lv.ToggleHeader()
+	if lv.logVP.height != 20 {
+		t.Fatalf("expected logVP height 20 (no header), got %d", lv.logVP.height)
+	}
+
+	// Toggle header back on — logVP height should be h-1 again
+	lv.ToggleHeader()
+	if lv.logVP.height != 19 {
+		t.Fatalf("expected logVP height 19 (header back on), got %d", lv.logVP.height)
+	}
+}
+
+func TestLogView_ViewportHeightAccountsForHeader(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+
+	// Non-borderless: viewportHeight = height - 2 (borders)
+	if lv.viewportHeight() != 22 {
+		t.Fatalf("expected viewportHeight 22 in bordered mode, got %d", lv.viewportHeight())
+	}
+
+	lv.SetBorderless(true)
+	lv.SetSize(80, 24)
+
+	// Borderless with header: viewportHeight = height - 1
+	if lv.viewportHeight() != 23 {
+		t.Fatalf("expected viewportHeight 23 in borderless+header mode, got %d", lv.viewportHeight())
+	}
+
+	lv.ToggleHeader()
+	// Borderless without header: viewportHeight = height
+	if lv.viewportHeight() != 24 {
+		t.Fatalf("expected viewportHeight 24 in borderless no-header mode, got %d", lv.viewportHeight())
+	}
+}
+
+func TestLogView_HeaderNotShownInBorderedMode(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	// Not borderless — header should not appear even though showHeader is true
+	lv.AppendLine("hello world")
+	view := lv.View()
+
+	// In bordered mode, the title is injected into the border, not as a header line
+	// The view should use injectBorderTitle, not JoinVertical with header
+	if !strings.Contains(view, "Logs") {
+		t.Fatal("expected border title with 'Logs' in bordered mode")
+	}
+}
+
+func TestLogView_ApplySearchEmptyFilterNoPanic(t *testing.T) {
+	lv := NewLogView(80, 20, 100, "15m", 900)
+	lv.AppendLine("line one")
+	lv.AppendLine("line two")
+
+	// Empty pattern in filter mode should not panic (was nil deref on filterState.Re)
+	err := lv.ApplySearch("", msgs.SearchModeFilter)
+	if err != nil {
+		t.Fatalf("ApplySearch with empty filter should not error: %v", err)
+	}
+	if lv.FilterActive() {
+		t.Fatal("filter should not be active after empty pattern")
+	}
+}
