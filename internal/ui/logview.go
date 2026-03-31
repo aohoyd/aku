@@ -480,18 +480,24 @@ func (lv *LogView) rebuildViewportContent() {
 	lv.matchIndex = -1
 
 	if lv.searchState.Active() {
-		var rawLines []string
+		// Use stripped colored lines (not raw lines) so that search match
+		// positions correspond to the display columns that lipgloss.StyleRanges
+		// will operate on. The JSON highlighter reformats compact JSON by adding
+		// spaces, making ansi.Strip(colored) != raw.
+		var visibleLines []string
 		if lv.filterState.Active() {
 			for _, idx := range lv.filteredIndices {
 				bufIdx := idx - lv.filteredIndexOffset
 				if bufIdx >= 0 && bufIdx < lv.buffer.Len() {
-					rawLines = append(rawLines, lv.buffer.RawGet(bufIdx))
+					visibleLines = append(visibleLines, ansi.Strip(lv.buffer.ColoredGet(bufIdx)))
 				}
 			}
 		} else {
-			rawLines = lv.buffer.RawAll()
+			for i := range lv.buffer.Len() {
+				visibleLines = append(visibleLines, ansi.Strip(lv.buffer.ColoredGet(i)))
+			}
 		}
-		strippedContent := strings.Join(rawLines, "\n")
+		strippedContent := strings.Join(visibleLines, "\n")
 
 		rawMatches := lv.searchState.Re.FindAllStringIndex(strippedContent, -1)
 		positions := computeMatchPositions(strippedContent, rawMatches)

@@ -1141,10 +1141,9 @@ func TestLogView_WrapModeSearchHighlightsOnlyVisibleLines(t *testing.T) {
 	}
 }
 
-func TestLogView_SearchUsesRawLinesNotANSIStrip(t *testing.T) {
-	// Verify that search matching uses raw (pre-stripped) lines from the
-	// DualRingBuffer rather than stripping ANSI from colored lines.
-	// This tests the optimization in rebuildViewportContent.
+func TestLogView_SearchUsesStrippedColoredLines(t *testing.T) {
+	// Verify that search matching uses stripped colored lines (visible text)
+	// so that match positions correspond to display columns.
 	lv := NewLogView(80, 24, 100, "15m", 900)
 
 	// Append lines that will be syntax-highlighted (contain log levels,
@@ -1160,11 +1159,6 @@ func TestLogView_SearchUsesRawLinesNotANSIStrip(t *testing.T) {
 		if raw == colored {
 			t.Fatalf("line %d: expected colored != raw (syntax highlighting should be active)", i)
 		}
-		// Raw line stripped content should equal the raw line itself.
-		stripped := ansi.Strip(colored)
-		if stripped != raw {
-			t.Fatalf("line %d: raw and stripped-colored mismatch\n  raw:     %q\n  stripped: %q", i, raw, stripped)
-		}
 	}
 
 	// Search for a term that spans highlighted regions.
@@ -1175,10 +1169,10 @@ func TestLogView_SearchUsesRawLinesNotANSIStrip(t *testing.T) {
 		t.Fatalf("expected 1 match for 'connection', got %d", len(lv.matchPositions))
 	}
 
-	// Verify match position is correct (should be on the raw text, not offset by ANSI codes).
+	// Verify match position corresponds to the visible (stripped colored) text.
 	pos := lv.matchPositions[0]
-	raw0 := lv.buffer.RawGet(0)
-	matched := raw0[pos.colStart:pos.colEnd]
+	visible := ansi.Strip(lv.buffer.ColoredGet(0))
+	matched := visible[pos.colStart:pos.colEnd]
 	if matched != "connection" {
 		t.Fatalf("expected matched text 'connection', got %q (colStart=%d, colEnd=%d)",
 			matched, pos.colStart, pos.colEnd)
@@ -1197,6 +1191,39 @@ func TestLogView_SearchUsesRawLinesNotANSIStrip(t *testing.T) {
 		if p.line != i {
 			t.Errorf("match %d: expected line %d, got %d", i, i, p.line)
 		}
+	}
+}
+
+func TestLogView_SearchHighlightsCorrectlyInJSON(t *testing.T) {
+	// Regression test: when log lines contain compact JSON, the JSON highlighter
+	// reformats them (adds spaces), making the display text longer than the raw
+	// text. Search positions must match display columns, not raw byte offsets.
+	lv := NewLogView(120, 24, 100, "15m", 900)
+
+	// Compact JSON line — the JSON highlighter will add spaces.
+	lv.AppendLine(`{"level":"debug","code":200,"headers":{"Accept":"application/json"}}`)
+
+	// Confirm the JSON highlighter expanded the visible text.
+	raw := lv.buffer.RawGet(0)
+	visible := ansi.Strip(lv.buffer.ColoredGet(0))
+	if raw == visible {
+		t.Fatal("expected JSON highlighter to reformat compact JSON (visible != raw)")
+	}
+
+	// Case-insensitive search for "accept".
+	if err := lv.ApplySearch("accept", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match for 'accept', got %d", len(lv.matchPositions))
+	}
+
+	// The match position must point to "Accept" in the visible (display) text.
+	pos := lv.matchPositions[0]
+	matched := visible[pos.colStart:pos.colEnd]
+	if !strings.EqualFold(matched, "accept") {
+		t.Fatalf("expected highlight on 'Accept', got %q at cols [%d:%d]\n  visible: %q",
+			matched, pos.colStart, pos.colEnd, visible)
 	}
 }
 
