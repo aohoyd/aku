@@ -45,8 +45,8 @@ func (e *editValuesCommand) Run() error {
 	if err != nil {
 		return fmt.Errorf("marshal values: %w", err)
 	}
-	original := string(yamlBytes)
-	originalHash := sha256.Sum256([]byte(original))
+	baseContent := string(yamlBytes)
+	baseHash := sha256.Sum256([]byte(baseContent))
 
 	tmpFile, err := os.CreateTemp("", "ktui-helm-values-*.yaml")
 	if err != nil {
@@ -55,7 +55,7 @@ func (e *editValuesCommand) Run() error {
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	if _, err := tmpFile.WriteString(original); err != nil {
+	if _, err := tmpFile.WriteString(baseContent); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("write: %w", err)
 	}
@@ -83,13 +83,14 @@ func (e *editValuesCommand) Run() error {
 			return nil // cancelled
 		}
 		cleanedHash := sha256.Sum256([]byte(cleaned))
-		if cleanedHash == originalHash {
+		if cleanedHash == baseHash {
 			return nil // unchanged
 		}
 
 		var newValues map[string]any
 		if err := sigsyaml.Unmarshal([]byte(cleaned), &newValues); err != nil {
-			content := editor.FormatErrComment(err) + "\n" + cleaned
+			// Parse error: re-open with base content
+			content := editor.FormatErrComment(err) + "\n" + baseContent
 			if writeErr := os.WriteFile(tmpPath, []byte(content), 0600); writeErr != nil {
 				return fmt.Errorf("write retry: %w", writeErr)
 			}
@@ -97,7 +98,15 @@ func (e *editValuesCommand) Run() error {
 		}
 
 		if err := e.helmClient.Upgrade(e.releaseName, e.namespace, newValues); err != nil {
-			content := editor.FormatErrComment(err) + "\n" + cleaned
+			// Re-fetch latest values from the server.
+			freshValues, getErr := e.helmClient.GetValues(e.releaseName, e.namespace)
+			if getErr == nil {
+				if freshYAML, marshalErr := marshalValues(freshValues); marshalErr == nil {
+					baseContent = string(freshYAML)
+					baseHash = sha256.Sum256([]byte(baseContent))
+				}
+			}
+			content := editor.FormatErrComment(err) + "\n" + baseContent
 			if writeErr := os.WriteFile(tmpPath, []byte(content), 0600); writeErr != nil {
 				return fmt.Errorf("write retry: %w", writeErr)
 			}

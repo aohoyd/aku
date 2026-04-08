@@ -243,6 +243,15 @@ type DescribeDebounceFiredMsg struct {
 	Seq uint64
 }
 
+// SearchDebounceFiredMsg is sent after the debounce interval elapses
+// following a search input change. Seq is compared against the app's
+// counter to discard stale fires.
+type SearchDebounceFiredMsg struct {
+	Seq     uint64
+	Pattern string
+	Mode    SearchMode
+}
+
 // StatusBarClearErrorMsg signals the status bar to hide the error message.
 type StatusBarClearErrorMsg struct{}
 

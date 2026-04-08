@@ -6,6 +6,7 @@ package ui
 type DualRingBuffer struct {
 	raw      []string
 	colored  []string
+	stripped []string
 	widths   []int
 	head     int // next write position
 	count    int // current number of valid lines
@@ -21,19 +22,21 @@ func NewDualRingBuffer(capacity int) *DualRingBuffer {
 	return &DualRingBuffer{
 		raw:      make([]string, capacity),
 		colored:  make([]string, capacity),
+		stripped: make([]string, capacity),
 		widths:   make([]int, capacity),
 		capacity: capacity,
 	}
 }
 
-// Append adds a raw and colored line pair with a pre-computed display width.
-// If at capacity, the oldest pair is evicted.
-func (d *DualRingBuffer) Append(raw, colored string, rawWidth int) {
+// Append adds a raw, colored, and stripped line triple with a pre-computed display width.
+// If at capacity, the oldest entry is evicted.
+func (d *DualRingBuffer) Append(raw, colored, stripped string, rawWidth int) {
 	if d.count == d.capacity {
 		d.dropped++
 	}
 	d.raw[d.head] = raw
 	d.colored[d.head] = colored
+	d.stripped[d.head] = stripped
 	d.widths[d.head] = rawWidth
 	d.head = (d.head + 1) % d.capacity
 	if d.count < d.capacity {
@@ -66,6 +69,14 @@ func (d *DualRingBuffer) ColoredGet(i int) string {
 	return d.colored[d.physIdx(i)]
 }
 
+// StrippedGet returns the ANSI-stripped line at logical index i (0 = oldest).
+func (d *DualRingBuffer) StrippedGet(i int) string {
+	if i < 0 || i >= d.count {
+		return ""
+	}
+	return d.stripped[d.physIdx(i)]
+}
+
 // WidthGet returns the pre-computed display width at logical index i (0 = oldest).
 // Returns 0 for out-of-bounds indices.
 func (d *DualRingBuffer) WidthGet(i int) int {
@@ -90,6 +101,14 @@ func (d *DualRingBuffer) SetColored(i int, s string, width int) {
 	d.widths[idx] = width
 }
 
+// SetStripped overwrites the stripped line at logical index i.
+func (d *DualRingBuffer) SetStripped(i int, s string) {
+	if i < 0 || i >= d.count {
+		return
+	}
+	d.stripped[d.physIdx(i)] = s
+}
+
 // RawAll returns all raw lines in order (oldest to newest) using bulk copy.
 func (d *DualRingBuffer) RawAll() []string { return d.copySlice(d.raw, 0, d.count) }
 
@@ -104,10 +123,16 @@ func (d *DualRingBuffer) ColoredSlice(start, end int) []string {
 	return d.copySlice(d.colored, start, end)
 }
 
+// StrippedSlice returns a copy of stripped lines[start:end] in logical order.
+func (d *DualRingBuffer) StrippedSlice(start, end int) []string {
+	return d.copySlice(d.stripped, start, end)
+}
+
 // Reset clears all state without reallocating.
 func (d *DualRingBuffer) Reset() {
 	clear(d.raw)
 	clear(d.colored)
+	clear(d.stripped)
 	clear(d.widths)
 	d.head = 0
 	d.count = 0

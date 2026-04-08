@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -182,13 +183,18 @@ func (lv *LogView) updateViewport() {
 	if lv.searchState.Active() && len(lv.matchPositions) > 0 {
 		windowStart := lv.scrollOffset
 		windowEnd := lv.scrollOffset + len(window)
+		startIdx := sort.Search(len(lv.matchPositions), func(i int) bool {
+			return lv.matchPositions[i].line >= windowStart
+		})
 		var windowPositions []matchPosition
-		for _, pos := range lv.matchPositions {
-			if pos.line >= windowStart && pos.line < windowEnd {
-				shifted := pos
-				shifted.line -= windowStart
-				windowPositions = append(windowPositions, shifted)
+		for i := startIdx; i < len(lv.matchPositions); i++ {
+			pos := lv.matchPositions[i]
+			if pos.line >= windowEnd {
+				break
 			}
+			shifted := pos
+			shifted.line -= windowStart
+			windowPositions = append(windowPositions, shifted)
 		}
 		if len(windowPositions) > 0 {
 			selectedInWindow := -1
@@ -353,13 +359,18 @@ func (lv *LogView) updateViewportWrapped() {
 
 		// Bake search highlights for this single line if search is active.
 		if lv.searchState.Active() && len(lv.matchPositions) > 0 {
+			startIdx := sort.Search(len(lv.matchPositions), func(i int) bool {
+				return lv.matchPositions[i].line >= di
+			})
 			var linePositions []matchPosition
-			for _, pos := range lv.matchPositions {
-				if pos.line == di {
-					shifted := pos
-					shifted.line = 0
-					linePositions = append(linePositions, shifted)
+			for i := startIdx; i < len(lv.matchPositions); i++ {
+				pos := lv.matchPositions[i]
+				if pos.line > di {
+					break
 				}
+				shifted := pos
+				shifted.line = 0
+				linePositions = append(linePositions, shifted)
 			}
 			if len(linePositions) > 0 {
 				selectedInLine := -1
@@ -424,7 +435,7 @@ func (lv *LogView) AppendLine(line string) {
 		evictedWidth = lv.buffer.WidthGet(0) // logical index 0 = oldest
 	}
 
-	lv.buffer.Append(line, colored, coloredWidth)
+	lv.buffer.Append(line, colored, ansi.Strip(colored), coloredWidth)
 	evicted := lv.buffer.Dropped() > droppedBefore
 
 	// Incremental totalWrappedRows update (wrap mode, no filter).
@@ -489,12 +500,12 @@ func (lv *LogView) rebuildViewportContent() {
 			for _, idx := range lv.filteredIndices {
 				bufIdx := idx - lv.filteredIndexOffset
 				if bufIdx >= 0 && bufIdx < lv.buffer.Len() {
-					visibleLines = append(visibleLines, ansi.Strip(lv.buffer.ColoredGet(bufIdx)))
+					visibleLines = append(visibleLines, lv.buffer.StrippedGet(bufIdx))
 				}
 			}
 		} else {
 			for i := range lv.buffer.Len() {
-				visibleLines = append(visibleLines, ansi.Strip(lv.buffer.ColoredGet(i)))
+				visibleLines = append(visibleLines, lv.buffer.StrippedGet(i))
 			}
 		}
 		strippedContent := strings.Join(visibleLines, "\n")
@@ -786,6 +797,7 @@ func (lv *LogView) ToggleSyntax() {
 			colored = lv.buffer.RawGet(i)
 		}
 		lv.buffer.SetColored(i, colored, ansi.StringWidth(colored))
+		lv.buffer.SetStripped(i, ansi.Strip(colored))
 	}
 	if lv.softWrap {
 		lv.recomputeTotalWrappedRows()
@@ -817,7 +829,7 @@ func (lv *LogView) InsertMarker() {
 	raw := fmt.Sprintf("--- %s ---", time.Now().Format("15:04:05"))
 	styled := lipgloss.NewStyle().Foreground(theme.Muted).Faint(true).Render(raw)
 	rawWidth := ansi.StringWidth(raw)
-	lv.buffer.Append(raw, styled, rawWidth)
+	lv.buffer.Append(raw, styled, raw, rawWidth)
 	if lv.softWrap && !lv.filterState.Active() {
 		lv.totalWrappedRows += wrapHeight(rawWidth, lv.logVP.width)
 	}

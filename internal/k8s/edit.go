@@ -12,6 +12,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/aohoyd/aku/internal/editor"
 	"github.com/aohoyd/aku/internal/msgs"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -52,8 +53,8 @@ func (e *editCommand) Run() error {
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	original := string(yamlBytes)
-	originalHash := sha256.Sum256([]byte(original))
+	baseContent := string(yamlBytes)
+	baseHash := sha256.Sum256([]byte(baseContent))
 
 	tmpFile, err := os.CreateTemp("", "ktui-edit-*.yaml")
 	if err != nil {
@@ -62,11 +63,19 @@ func (e *editCommand) Run() error {
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	if _, err := tmpFile.WriteString(original); err != nil {
+	if _, err := tmpFile.WriteString(baseContent); err != nil {
 		tmpFile.Close()
 		return fmt.Errorf("write: %w", err)
 	}
 	tmpFile.Close()
+
+	// Build resource interface for re-fetching on conflict.
+	var fetchRes dynamic.ResourceInterface
+	if e.clusterScoped {
+		fetchRes = e.dynClient.Resource(e.gvr)
+	} else {
+		fetchRes = e.dynClient.Resource(e.gvr).Namespace(e.obj.GetNamespace())
+	}
 
 	for {
 		// Open editor
@@ -93,15 +102,15 @@ func (e *editCommand) Run() error {
 			return nil // cancelled: empty
 		}
 		cleanedHash := sha256.Sum256([]byte(cleaned))
-		if cleanedHash == originalHash {
-			return nil // cancelled: unchanged
+		if cleanedHash == baseHash {
+			return nil // cancelled: unchanged from base
 		}
 
 		// Parse YAML
 		var newObj unstructured.Unstructured
 		if err := sigsyaml.Unmarshal([]byte(cleaned), &newObj.Object); err != nil {
-			// Parse error: prepend error and re-open
-			content := editor.FormatErrComment(err) + "\n" + cleaned
+			// Parse error: prepend error and re-open with base content
+			content := editor.FormatErrComment(err) + "\n" + baseContent
 			if writeErr := os.WriteFile(tmpPath, []byte(content), 0600); writeErr != nil {
 				return fmt.Errorf("write retry: %w", writeErr)
 			}
@@ -121,8 +130,18 @@ func (e *editCommand) Run() error {
 		}
 
 		if _, err := res.Update(context.Background(), &newObj, metav1.UpdateOptions{}); err != nil {
-			// API error: prepend error and re-open
-			content := editor.FormatErrComment(err) + "\n" + cleaned
+			// On conflict, re-fetch the latest version from the server.
+			if apierrors.IsConflict(err) {
+				latest, getErr := fetchRes.Get(context.Background(), e.obj.GetName(), metav1.GetOptions{})
+				if getErr == nil {
+					if freshYAML, marshalErr := marshalForEdit(latest); marshalErr == nil {
+						baseContent = string(freshYAML)
+						baseHash = sha256.Sum256([]byte(baseContent))
+					}
+				}
+			}
+			// API error: prepend error and re-open with base content
+			content := editor.FormatErrComment(err) + "\n" + baseContent
 			if writeErr := os.WriteFile(tmpPath, []byte(content), 0600); writeErr != nil {
 				return fmt.Errorf("write retry: %w", writeErr)
 			}

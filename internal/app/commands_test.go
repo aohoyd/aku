@@ -3984,3 +3984,74 @@ func TestYAMLReloadFiresForMatchingGVR(t *testing.T) {
 		t.Fatal("expected lastDetailKey to be set after matching GVR reload in YAML mode")
 	}
 }
+
+func TestSearchDebounceStaleFire(t *testing.T) {
+	app := newTestApp()
+	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	plugin.Register(p)
+	app.layout.AddSplit(p, "default")
+	split := app.layout.FocusedSplit()
+	obj := &unstructured.Unstructured{}
+	obj.SetName("pod-1")
+	obj.SetNamespace("default")
+	split.SetObjects([]*unstructured.Unstructured{obj})
+
+	app.searchDebounceSeq = 5
+
+	// Fire a stale debounce (seq=3, current=5)
+	model, cmd := app.update(msgs.SearchDebounceFiredMsg{Seq: 3, Pattern: "foo", Mode: msgs.SearchModeSearch})
+	if cmd != nil {
+		t.Fatal("stale search debounce should return nil cmd")
+	}
+	app = model.(App)
+	// searchDebounceSeq should be unchanged
+	if app.searchDebounceSeq != 5 {
+		t.Fatalf("expected searchDebounceSeq=5, got %d", app.searchDebounceSeq)
+	}
+}
+
+func TestSearchChangedEmptyPatternClearsImmediately(t *testing.T) {
+	app := newTestApp()
+	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	plugin.Register(p)
+	app.layout.AddSplit(p, "default")
+	split := app.layout.FocusedSplit()
+	obj := &unstructured.Unstructured{}
+	obj.SetName("pod-1")
+	obj.SetNamespace("default")
+	split.SetObjects([]*unstructured.Unstructured{obj})
+
+	// First apply a search pattern so we can verify it gets cleared
+	split.ApplySearch("test", msgs.SearchModeSearch)
+	if !split.SearchActive() {
+		t.Fatal("expected search to be active after ApplySearch")
+	}
+
+	// Send empty pattern — should clear immediately, no debounce cmd
+	model, cmd := app.update(msgs.SearchChangedMsg{Pattern: "", Mode: msgs.SearchModeSearch})
+	if cmd != nil {
+		t.Fatal("empty pattern should not return a debounce cmd")
+	}
+	app = model.(App)
+
+	// Search should be cleared
+	if split.SearchActive() {
+		t.Fatal("expected search to be cleared after empty pattern")
+	}
+
+	// Now test filter mode
+	split.ApplySearch("test", msgs.SearchModeFilter)
+	if !split.FilterActive() {
+		t.Fatal("expected filter to be active after ApplySearch")
+	}
+
+	model, cmd = app.update(msgs.SearchChangedMsg{Pattern: "", Mode: msgs.SearchModeFilter})
+	if cmd != nil {
+		t.Fatal("empty filter pattern should not return a debounce cmd")
+	}
+	app = model.(App)
+
+	if split.FilterActive() {
+		t.Fatal("expected filter to be cleared after empty pattern")
+	}
+}

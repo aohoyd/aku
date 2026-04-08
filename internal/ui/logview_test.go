@@ -1505,6 +1505,330 @@ func TestLogView_HeaderNotShownInBorderedMode(t *testing.T) {
 	}
 }
 
+func TestLogView_SearchUsesCachedStrippedLines(t *testing.T) {
+	// Verify that rebuildViewportContent uses the cached stripped lines
+	// (StrippedGet) rather than calling ansi.Strip at search time.
+	// The cached stripped value should equal ansi.Strip(colored) and
+	// produce correct match positions.
+	lv := NewLogView(120, 24, 100, "15m", 900)
+
+	// Append lines with syntax highlighting active (JSON, log levels, timestamps).
+	lv.AppendLine(`2024-01-01T00:00:00Z ERROR {"msg":"connection refused","host":"10.0.0.1"}`)
+	lv.AppendLine("2024-01-01T00:00:01Z INFO request processed successfully")
+	lv.AppendLine(`2024-01-01T00:00:02Z WARN {"latency":500,"unit":"ms"}`)
+
+	// Verify that cached stripped lines equal ansi.Strip(colored).
+	for i := range lv.buffer.Len() {
+		cached := lv.buffer.StrippedGet(i)
+		expected := ansi.Strip(lv.buffer.ColoredGet(i))
+		if cached != expected {
+			t.Fatalf("line %d: StrippedGet=%q != ansi.Strip(colored)=%q", i, cached, expected)
+		}
+	}
+
+	// Search and verify match positions are correct using cached stripped lines.
+	if err := lv.ApplySearch("connection", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(lv.matchPositions))
+	}
+	pos := lv.matchPositions[0]
+	visible := lv.buffer.StrippedGet(0)
+	if visible[pos.colStart:pos.colEnd] != "connection" {
+		t.Fatalf("expected 'connection' at [%d:%d], got %q", pos.colStart, pos.colEnd, visible[pos.colStart:pos.colEnd])
+	}
+}
+
+func TestLogView_ToggleSyntaxUpdatesCachedStrippedLines(t *testing.T) {
+	// After ToggleSyntax, the stripped cache must be updated so that
+	// subsequent searches use the correct (post-toggle) stripped text.
+	lv := NewLogView(120, 24, 100, "15m", 900)
+
+	// Append a line with JSON (the JSON highlighter reformats compact JSON).
+	lv.AppendLine(`{"level":"error","msg":"connection failed","code":500}`)
+
+	// With syntax ON, stripped text includes reformatted JSON (spaces added).
+	strippedOn := lv.buffer.StrippedGet(0)
+	if strippedOn == lv.buffer.RawGet(0) {
+		t.Fatal("with syntax ON, stripped should differ from raw (JSON reformat adds spaces)")
+	}
+
+	// Toggle syntax OFF.
+	lv.ToggleSyntax()
+
+	// With syntax OFF, colored == raw, so stripped should == raw.
+	strippedOff := lv.buffer.StrippedGet(0)
+	raw := lv.buffer.RawGet(0)
+	if strippedOff != raw {
+		t.Fatalf("with syntax OFF, StrippedGet should equal raw.\n  stripped=%q\n  raw=%q", strippedOff, raw)
+	}
+
+	// Search should find matches using the updated stripped cache.
+	if err := lv.ApplySearch("connection", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(lv.matchPositions))
+	}
+	pos := lv.matchPositions[0]
+	matched := strippedOff[pos.colStart:pos.colEnd]
+	if matched != "connection" {
+		t.Fatalf("expected 'connection' at [%d:%d], got %q", pos.colStart, pos.colEnd, matched)
+	}
+
+	// Toggle syntax back ON and verify stripped cache is updated again.
+	lv.ToggleSyntax()
+	strippedOnAgain := lv.buffer.StrippedGet(0)
+	if strippedOnAgain != strippedOn {
+		t.Fatalf("after toggling syntax back ON, stripped should match original.\n  got=%q\n  want=%q", strippedOnAgain, strippedOn)
+	}
+
+	// Search again — positions should correspond to the reformatted text.
+	if err := lv.ApplySearch("connection", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match after toggle back on, got %d", len(lv.matchPositions))
+	}
+	pos = lv.matchPositions[0]
+	matched = strippedOnAgain[pos.colStart:pos.colEnd]
+	if matched != "connection" {
+		t.Fatalf("expected 'connection' at [%d:%d] after toggle on, got %q", pos.colStart, pos.colEnd, matched)
+	}
+}
+
+func TestLogView_SearchWithFilterUsesCachedStrippedLines(t *testing.T) {
+	// Verify that the filtered search path also uses cached stripped lines.
+	lv := NewLogView(80, 24, 100, "15m", 900)
+
+	lv.AppendLine("ERROR: first failure")
+	lv.AppendLine("INFO: all good")
+	lv.AppendLine("ERROR: second failure")
+
+	// Apply filter for ERROR lines.
+	if err := lv.ApplySearch("ERROR", msgs.SearchModeFilter); err != nil {
+		t.Fatalf("ApplySearch filter: %v", err)
+	}
+	if len(lv.filteredIndices) != 2 {
+		t.Fatalf("expected 2 filtered lines, got %d", len(lv.filteredIndices))
+	}
+
+	// Verify cached stripped lines match ansi.Strip(colored) for filtered lines.
+	for _, idx := range lv.filteredIndices {
+		bufIdx := idx - lv.filteredIndexOffset
+		cached := lv.buffer.StrippedGet(bufIdx)
+		expected := ansi.Strip(lv.buffer.ColoredGet(bufIdx))
+		if cached != expected {
+			t.Fatalf("bufIdx %d: StrippedGet=%q != ansi.Strip(colored)=%q", bufIdx, cached, expected)
+		}
+	}
+
+	// Search within filtered lines.
+	if err := lv.ApplySearch("failure", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch search: %v", err)
+	}
+	if len(lv.matchPositions) != 2 {
+		t.Fatalf("expected 2 matches for 'failure', got %d", len(lv.matchPositions))
+	}
+}
+
+func TestLogView_BinarySearchMatchWindow_NoMatchesInWindow(t *testing.T) {
+	// All matches are outside the visible window.
+	lv := NewLogView(80, 7, 100, "15m", 900) // viewport height = 5
+	lv.ToggleSyntax()                         // disable syntax highlighting for predictable text
+
+	// Add 20 lines; matches on lines 0, 1, 2 only.
+	for i := range 20 {
+		if i < 3 {
+			lv.AppendLine(fmt.Sprintf("line %02d needle", i))
+		} else {
+			lv.AppendLine(fmt.Sprintf("line %02d other", i))
+		}
+	}
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 3 {
+		t.Fatalf("expected 3 matches, got %d", len(lv.matchPositions))
+	}
+
+	// Scroll to the bottom where no matches exist (lines 15-19 visible).
+	lv.autoscroll = false
+	lv.scrollOffset = 15
+	lv.updateViewport()
+
+	// The viewport should render correctly without any highlighted matches.
+	view := ansi.Strip(lv.logVP.View())
+	if strings.Contains(view, "needle") {
+		t.Fatal("no match lines should be visible when scrolled past them")
+	}
+	if !strings.Contains(view, "line 15") {
+		t.Fatal("expected line 15 to be visible")
+	}
+}
+
+func TestLogView_BinarySearchMatchWindow_AllMatchesInWindow(t *testing.T) {
+	// All matches fall within the visible window.
+	lv := NewLogView(80, 7, 100, "15m", 900) // viewport height = 5
+	lv.ToggleSyntax()
+
+	for i := range 5 {
+		lv.AppendLine(fmt.Sprintf("line %d needle", i))
+	}
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 5 {
+		t.Fatalf("expected 5 matches, got %d", len(lv.matchPositions))
+	}
+
+	// Scroll to top; all 5 lines fit in the viewport.
+	lv.autoscroll = false
+	lv.scrollOffset = 0
+	lv.updateViewport()
+
+	view := ansi.Strip(lv.logVP.View())
+	for i := range 5 {
+		needle := fmt.Sprintf("line %d", i)
+		if !strings.Contains(view, needle) {
+			t.Fatalf("expected %q to be visible", needle)
+		}
+	}
+}
+
+func TestLogView_BinarySearchMatchWindow_SpanningBoundary(t *testing.T) {
+	// Matches span the window boundary: some inside, some outside.
+	lv := NewLogView(80, 7, 100, "15m", 900) // viewport height = 5
+	lv.ToggleSyntax()
+
+	// 10 lines, every other line has a match.
+	for i := range 10 {
+		if i%2 == 0 {
+			lv.AppendLine(fmt.Sprintf("line %02d needle", i))
+		} else {
+			lv.AppendLine(fmt.Sprintf("line %02d other", i))
+		}
+	}
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	// Matches on lines 0, 2, 4, 6, 8.
+	if len(lv.matchPositions) != 5 {
+		t.Fatalf("expected 5 matches, got %d", len(lv.matchPositions))
+	}
+
+	// Window shows lines 3..7 (scrollOffset=3, height=5).
+	// Matches inside window: line 4 and line 6.
+	lv.autoscroll = false
+	lv.scrollOffset = 3
+	lv.updateViewport()
+
+	view := ansi.Strip(lv.logVP.View())
+	// Lines 3..7 should be visible.
+	if !strings.Contains(view, "line 03") {
+		t.Fatal("expected line 03 to be visible")
+	}
+	if !strings.Contains(view, "line 07") {
+		t.Fatal("expected line 07 to be visible")
+	}
+	// Matches outside window should not be present.
+	if strings.Contains(view, "line 00") {
+		t.Fatal("line 00 should not be visible")
+	}
+	if strings.Contains(view, "line 08") {
+		t.Fatal("line 08 should not be visible")
+	}
+}
+
+func TestLogView_BinarySearchMatchWindow_SingleMatchAtEdge(t *testing.T) {
+	// A single match at the very first and very last position of the window.
+	lv := NewLogView(80, 7, 100, "15m", 900) // viewport height = 5
+	lv.ToggleSyntax()
+
+	for i := range 10 {
+		lv.AppendLine(fmt.Sprintf("line %02d other", i))
+	}
+
+	// Overwrite buffer entry at line 3 and 7 to contain "needle".
+	// Instead, let's just set up a scenario with matches at window edges.
+	lv2 := NewLogView(80, 7, 100, "15m", 900)
+	lv2.ToggleSyntax()
+
+	// 10 lines; matches only on lines 3 (first in window) and 7 (last in window).
+	for i := range 10 {
+		if i == 3 || i == 7 {
+			lv2.AppendLine(fmt.Sprintf("line %02d needle", i))
+		} else {
+			lv2.AppendLine(fmt.Sprintf("line %02d other", i))
+		}
+	}
+
+	if err := lv2.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv2.matchPositions) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(lv2.matchPositions))
+	}
+
+	// Window shows lines 3..7 (scrollOffset=3, height=5).
+	// Match at line 3 = first line of window.
+	// Match at line 7 = last line of window.
+	lv2.autoscroll = false
+	lv2.scrollOffset = 3
+	lv2.updateViewport()
+
+	view := ansi.Strip(lv2.logVP.View())
+	if !strings.Contains(view, "line 03 needle") {
+		t.Fatal("expected match at first window edge (line 03) to be visible")
+	}
+	if !strings.Contains(view, "line 07 needle") {
+		t.Fatal("expected match at last window edge (line 07) to be visible")
+	}
+}
+
+func TestLogView_BinarySearchMatchWindow_WrappedMode(t *testing.T) {
+	// Verify binary search works correctly in wrapped mode too.
+	lv := NewLogView(42, 7, 100, "15m", 900) // viewport width=40, height=5
+	lv.softWrap = true
+	lv.ToggleSyntax()
+
+	// 20 lines; every 5th has "needle".
+	for i := range 20 {
+		if i%5 == 0 {
+			lv.AppendLine(fmt.Sprintf("line %02d needle", i))
+		} else {
+			lv.AppendLine(fmt.Sprintf("line %02d other text", i))
+		}
+	}
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	// Matches on lines 0, 5, 10, 15.
+	if len(lv.matchPositions) != 4 {
+		t.Fatalf("expected 4 matches, got %d", len(lv.matchPositions))
+	}
+
+	// Scroll to top.
+	lv.autoscroll = false
+	lv.wrapYOffset = 0
+	lv.updateViewport()
+
+	view := ansi.Strip(lv.logVP.View())
+	// Line 0 should be visible and contain "needle".
+	if !strings.Contains(view, "line 00 needle") {
+		t.Fatal("expected line 00 with needle at top of wrapped viewport")
+	}
+	// Lines beyond the viewport (e.g., 15) should not be visible.
+	if strings.Contains(view, "line 15") {
+		t.Fatal("line 15 should not be visible when scrolled to top")
+	}
+}
+
 func TestLogView_ApplySearchEmptyFilterNoPanic(t *testing.T) {
 	lv := NewLogView(80, 20, 100, "15m", 900)
 	lv.AppendLine("line one")

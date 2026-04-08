@@ -1373,17 +1373,26 @@ func (a App) handleSearchChanged(msg msgs.SearchChangedMsg) (tea.Model, tea.Cmd)
 	if target == nil {
 		return a, nil
 	}
-	if err := target.ApplySearch(msg.Pattern, msg.Mode); err != nil {
-		a.searchBar.SetError(err.Error())
-	} else {
+	// Empty pattern: clear immediately without debounce.
+	// Bump seq to invalidate any pending debounce from a previous non-empty pattern.
+	if msg.Pattern == "" {
+		a.searchDebounceSeq++
+		if msg.Mode == msgs.SearchModeFilter {
+			target.ClearFilter()
+		} else {
+			target.ClearSearch()
+		}
 		a.searchBar.SetError("")
 		if a.layout.FocusedResources() {
 			var descCmd tea.Cmd
 			a, descCmd = a.refreshDetailPanel()
 			return a, descCmd
 		}
+		return a, nil
 	}
-	return a, nil
+	// Non-empty pattern: debounce
+	a.searchDebounceSeq++
+	return a, a.searchDebounceCmd(msg.Pattern, msg.Mode)
 }
 
 func (a App) handleSearchCleared(msg msgs.SearchClearedMsg) (tea.Model, tea.Cmd) {
