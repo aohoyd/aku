@@ -1843,3 +1843,72 @@ func TestLogView_ApplySearchEmptyFilterNoPanic(t *testing.T) {
 		t.Fatal("filter should not be active after empty pattern")
 	}
 }
+
+func TestLogView_WrappedVOffsetSkipFirstLine(t *testing.T) {
+	// A long line (500 ASCII chars) at vpWidth=10 produces 50 wrapped rows.
+	// Scroll to the middle (wrapYOffset=25) and verify the visible segments
+	// show the correct content starting from the 26th row (0-indexed row 25).
+	const vpWidth = 10
+	// LogView border takes 2 from each dimension, so inner width = vpWidth.
+	lv := NewLogView(vpWidth+2, 12, 100, "15m", 900) // inner: 10 wide, 10 tall
+	lv.softWrap = true
+	lv.autoscroll = false
+	lv.ToggleSyntax() // disable syntax highlighting for predictable text
+
+	// Build a 500-char line using a repeating pattern so each segment is identifiable.
+	// Each group of 10 chars: "rNN_XXXXXX" where NN is the row number (00-49).
+	var sb strings.Builder
+	for row := range 50 {
+		sb.WriteString(fmt.Sprintf("r%02d_%06d", row, row))
+	}
+	longLine := sb.String()
+	if len(longLine) != 500 {
+		t.Fatalf("expected 500 chars, got %d", len(longLine))
+	}
+
+	lv.AppendLine(longLine)
+
+	// Verify the line wraps to 50 rows.
+	w := lv.buffer.WidthGet(0)
+	if wh := wrapHeight(w, vpWidth); wh != 50 {
+		t.Fatalf("expected 50 wrapped rows, got %d (width=%d, vpWidth=%d)", wh, w, vpWidth)
+	}
+
+	// Scroll to the middle: wrapYOffset=25 means we skip 25 visual rows.
+	lv.wrapYOffset = 25
+	lv.updateViewport()
+
+	vpHeight := lv.viewportHeight()
+	lines := lv.logVP.lines
+
+	// Should have vpHeight lines (or fewer if content runs out).
+	if len(lines) > vpHeight {
+		t.Fatalf("expected at most %d lines, got %d", vpHeight, len(lines))
+	}
+
+	// The first visible segment should start with "r25_" (the 26th row, 0-indexed).
+	firstStripped := ansi.Strip(lines[0])
+	if !strings.HasPrefix(firstStripped, "r25_") {
+		t.Fatalf("expected first visible segment to start with 'r25_', got %q", firstStripped)
+	}
+
+	// The second visible segment should start with "r26_".
+	if len(lines) > 1 {
+		secondStripped := ansi.Strip(lines[1])
+		if !strings.HasPrefix(secondStripped, "r26_") {
+			t.Fatalf("expected second visible segment to start with 'r26_', got %q", secondStripped)
+		}
+	}
+
+	// Verify the last visible row. With vpHeight=10 and startRow=25, we should
+	// see rows 25..34 (10 rows).
+	expectedLastRow := 25 + vpHeight - 1
+	if expectedLastRow > 49 {
+		expectedLastRow = 49
+	}
+	lastStripped := ansi.Strip(lines[len(lines)-1])
+	expectedPrefix := fmt.Sprintf("r%02d_", expectedLastRow)
+	if !strings.HasPrefix(lastStripped, expectedPrefix) {
+		t.Fatalf("expected last visible segment to start with %q, got %q", expectedPrefix, lastStripped)
+	}
+}

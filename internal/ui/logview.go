@@ -332,11 +332,12 @@ func (lv *LogView) updateViewportWrapped() {
 
 	// --- Build visual rows for the visible window ---
 	// We only fetch lines from firstDisplayIdx onward, enough to fill the
-	// viewport plus vOffset rows that we'll trim.
+	// viewport. The first long line's vOffset skip is handled inside the
+	// splitter (startRow parameter), so no post-hoc trimming is needed.
 	var visRows []string
 	var visWidths []int
 
-	for di := firstDisplayIdx; di < displayCount && len(visRows) < vpHeight+vOffset; di++ {
+	for di := firstDisplayIdx; di < displayCount && len(visRows) < vpHeight; di++ {
 		var line string
 		var w int
 		if hasIndicator && di == 0 {
@@ -396,23 +397,18 @@ func (lv *LogView) updateViewportWrapped() {
 			visRows = append(visRows, line)
 			visWidths = append(visWidths, w)
 		} else {
-			offset := 0
-			for offset < w {
-				end := min(offset+vpWidth, w)
-				segment := ansi.Cut(line, offset, end)
-				segWidth := end - offset
-				visRows = append(visRows, segment)
-				visWidths = append(visWidths, segWidth)
-				offset += vpWidth
+			// For the first visible long line, skip vOffset rows inside the
+			// splitter instead of generating them and trimming post-hoc.
+			startRow := 0
+			if di == firstDisplayIdx {
+				startRow = vOffset
 			}
+			segs, segWidths := splitWrappedVisible(line, vpWidth, startRow, vpHeight-len(visRows))
+			visRows = append(visRows, segs...)
+			visWidths = append(visWidths, segWidths...)
 		}
 	}
 
-	// Trim to viewport: skip vOffset rows from top, take vpHeight rows
-	if vOffset > 0 && vOffset < len(visRows) {
-		visRows = visRows[vOffset:]
-		visWidths = visWidths[vOffset:]
-	}
 	if len(visRows) > vpHeight {
 		visRows = visRows[:vpHeight]
 		visWidths = visWidths[:vpHeight]
