@@ -670,37 +670,33 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		a.activeOverlay = overlayTimeRange
 		return a, nil
 
-	// List horizontal scroll
-	case command == "list-scroll-left":
-		if focused := a.layout.FocusedSplit(); focused != nil {
-			focused.ScrollLeft()
-		}
-		return a, nil
-	case command == "list-scroll-right":
-		if focused := a.layout.FocusedSplit(); focused != nil {
-			focused.ScrollRight()
-		}
-		return a, nil
-
-	// Scroll and refresh
+	// Horizontal scroll
 	case command == "scroll-left":
 		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
 			a.layout.ActiveDetailPanel().ScrollLeft()
+		} else if focused := a.layout.FocusedSplit(); focused != nil {
+			focused.ScrollLeft()
 		}
 		return a, nil
 	case command == "scroll-right":
 		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
 			a.layout.ActiveDetailPanel().ScrollRight()
+		} else if focused := a.layout.FocusedSplit(); focused != nil {
+			focused.ScrollRight()
 		}
 		return a, nil
 	case command == "scroll-home":
 		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
 			a.layout.ActiveDetailPanel().ScrollHome()
+		} else if focused := a.layout.FocusedSplit(); focused != nil {
+			focused.ScrollHome()
 		}
 		return a, nil
 	case command == "scroll-end":
 		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
 			a.layout.ActiveDetailPanel().ScrollEnd()
+		} else if focused := a.layout.FocusedSplit(); focused != nil {
+			focused.ScrollEnd()
 		}
 		return a, nil
 	case command == "toggle-wrap":

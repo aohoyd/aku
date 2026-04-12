@@ -3714,6 +3714,82 @@ func TestDescribeDebounceFiresForEventsGVR(t *testing.T) {
 	}
 }
 
+func TestDescribeDebounceFiresForSecretsGVRWhenEnvResolved(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
+	plugin.Register(podsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	store := k8s.NewStore(nil, nil)
+	app.store = store
+	pod := &unstructured.Unstructured{}
+	pod.SetName("my-pod")
+	pod.SetNamespace("default")
+	store.CacheUpsert(podsGVR, "default", pod)
+	app.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{pod})
+
+	// Open describe panel with envResolved
+	model, _ := app.executeCommand("view-describe-uncovered")
+	app = model.(App)
+
+	if !app.envResolved {
+		t.Fatal("expected envResolved to be true after view-describe-uncovered")
+	}
+
+	seqBefore := app.describeDebounceSeq
+
+	// Send ResourceUpdatedMsg with secrets GVR
+	secretsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+	msg := k8s.ResourceUpdatedMsg{GVR: secretsGVR, Namespace: "default"}
+	result, _ := app.update(msg)
+	app = result.(App)
+
+	if app.describeDebounceSeq <= seqBefore {
+		t.Fatalf("expected describeDebounceSeq to increment for secrets GVR when envResolved: was %d, got %d",
+			seqBefore, app.describeDebounceSeq)
+	}
+}
+
+func TestDescribeDebounceSkipsSecretsGVRWhenNotEnvResolved(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
+	plugin.Register(podsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	store := k8s.NewStore(nil, nil)
+	app.store = store
+	pod := &unstructured.Unstructured{}
+	pod.SetName("my-pod")
+	pod.SetNamespace("default")
+	store.CacheUpsert(podsGVR, "default", pod)
+	app.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{pod})
+
+	// Open describe panel WITHOUT envResolved
+	model, _ := app.executeCommand("view-describe")
+	app = model.(App)
+
+	if app.envResolved {
+		t.Fatal("expected envResolved to be false after view-describe")
+	}
+
+	seqBefore := app.describeDebounceSeq
+
+	// Send ResourceUpdatedMsg with secrets GVR
+	secretsGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+	msg := k8s.ResourceUpdatedMsg{GVR: secretsGVR, Namespace: "default"}
+	result, _ := app.update(msg)
+	app = result.(App)
+
+	if app.describeDebounceSeq != seqBefore {
+		t.Fatalf("expected describeDebounceSeq unchanged for secrets GVR when not envResolved: was %d, got %d",
+			seqBefore, app.describeDebounceSeq)
+	}
+}
+
 func TestLastDescribedKeyClearedOnPanelClose(t *testing.T) {
 	app := newTestApp()
 

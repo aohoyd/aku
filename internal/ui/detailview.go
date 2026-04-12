@@ -298,9 +298,6 @@ func (d DetailView) modeName() string {
 // buildTitle constructs the title string for the detail view header.
 func (d DetailView) buildTitle() string {
 	title := d.modeName()
-	if d.loading {
-		title += " " + d.spinner.View()
-	}
 	if d.envResolved {
 		title += " [S]"
 	}

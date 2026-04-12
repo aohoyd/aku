@@ -25,7 +25,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var eventsGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}
+var (
+	eventsGVR     = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "events"}
+	configMapsGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+	secretsGVR    = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+)
 
 type overlay int
 
@@ -482,9 +486,14 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !a.layout.IsLogMode() {
 				if panel := a.layout.RightPanel(); panel != nil {
 					if panel.Mode() == msgs.DetailDescribe {
-						if focused := a.layout.FocusedSplit(); focused != nil && (msg.GVR == focused.Plugin().GVR() || msg.GVR == eventsGVR) {
-							a.describeDebounceSeq++
-							return a, a.describeDebounceCmd()
+						if focused := a.layout.FocusedSplit(); focused != nil {
+							gvrMatch := msg.GVR == focused.Plugin().GVR()
+							evtMatch := msg.GVR == eventsGVR
+							envMatch := a.envResolved && (msg.GVR == configMapsGVR || msg.GVR == secretsGVR)
+							if gvrMatch || evtMatch || envMatch {
+								a.describeDebounceSeq++
+								return a, a.describeDebounceCmd()
+							}
 						}
 						return a, nil // unrelated GVR — skip describe reload
 					}
@@ -784,9 +793,9 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a, cmd := a.reloadDetailPanel()
 		return a, cmd
 
-	case msgs.StatusBarClearErrorMsg, msgs.StatusBarClearWarningMsg:
-		a.statusBar.Update(msg)
-		return a, nil
+	case msgs.StatusBarClearErrorMsg, msgs.StatusBarClearWarningMsg, msgs.StatusBarShowSpinnerMsg:
+		cmd := a.statusBar.Update(msg)
+		return a, cmd
 
 	case spinner.TickMsg:
 		var cmds []tea.Cmd

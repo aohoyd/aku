@@ -27,6 +27,7 @@ type StatusBar struct {
 	spinner        spinner.Model
 	online         bool
 	inflight       int
+	showSpinner    bool
 	contextName    string
 }
 
@@ -109,7 +110,9 @@ func (s *StatusBar) SetOnline(v bool) {
 func (s *StatusBar) StartOperation() tea.Cmd {
 	s.inflight++
 	if s.inflight == 1 {
-		return s.spinner.Tick
+		return tea.Tick(1*time.Second, func(time.Time) tea.Msg {
+			return msgs.StatusBarShowSpinnerMsg{}
+		})
 	}
 	return nil
 }
@@ -118,23 +121,32 @@ func (s *StatusBar) EndOperation() {
 	if s.inflight > 0 {
 		s.inflight--
 	}
+	if s.inflight == 0 {
+		s.showSpinner = false
+	}
 }
 
 func (s *StatusBar) Busy() bool {
 	return s.inflight > 0
 }
 
-func (s *StatusBar) Update(msg tea.Msg) {
+func (s *StatusBar) Update(msg tea.Msg) tea.Cmd {
 	switch msg.(type) {
 	case msgs.StatusBarClearErrorMsg:
 		s.errorVisible = false
 	case msgs.StatusBarClearWarningMsg:
 		s.warningVisible = false
+	case msgs.StatusBarShowSpinnerMsg:
+		if s.inflight > 0 {
+			s.showSpinner = true
+			return s.spinner.Tick
+		}
 	}
+	return nil
 }
 
 func (s *StatusBar) UpdateSpinner(msg tea.Msg) tea.Cmd {
-	if s.inflight <= 0 {
+	if !s.showSpinner {
 		return nil
 	}
 	var cmd tea.Cmd
@@ -156,7 +168,7 @@ func (s StatusBar) View() string {
 	if s.online {
 		badgeStyle = ContextBadgeOnlineStyle
 	}
-	if s.inflight > 0 {
+	if s.showSpinner {
 		healthSlot = badgeStyle.Render(name + " " + s.spinner.View())
 	} else {
 		healthSlot = badgeStyle.Render(name)

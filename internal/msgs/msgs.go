@@ -258,6 +258,9 @@ type StatusBarClearErrorMsg struct{}
 // StatusBarClearWarningMsg signals the status bar to hide the warning message.
 type StatusBarClearWarningMsg struct{}
 
+// StatusBarShowSpinnerMsg signals the status bar to show the spinner after a delay.
+type StatusBarShowSpinnerMsg struct{}
+
 // ClusterHealthMsg carries the result of a cluster health check.
 type ClusterHealthMsg struct {
 	Online bool

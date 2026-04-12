@@ -191,6 +191,18 @@ func (r *ResourceList) ScrollLeft() {
 	r.table.SetXOffset(r.xOffset)
 }
 
+// ScrollHome resets horizontal scroll to the beginning.
+func (r *ResourceList) ScrollHome() {
+	r.xOffset = 0
+	r.table.SetXOffset(0)
+}
+
+// ScrollEnd scrolls horizontally to show the end of the content.
+func (r *ResourceList) ScrollEnd() {
+	r.xOffset = max(0, r.contentWidth-(r.width-2))
+	r.table.SetXOffset(r.xOffset)
+}
+
 // Cursor returns selected element.
 func (r *ResourceList) Cursor() int { return r.table.Cursor() }
 
