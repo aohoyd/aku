@@ -157,6 +157,41 @@ func (d *DetailView) ScrollRight() {
 	}
 }
 
+// ScrollHome resets horizontal scroll to the beginning of the line.
+// No-op when soft-wrap is enabled.
+func (d *DetailView) ScrollHome() {
+	if !d.viewport.SoftWrap {
+		d.viewport.SetXOffset(0)
+	}
+}
+
+// ScrollEnd scrolls horizontally to show the end of the longest visible line.
+// No-op when soft-wrap is enabled.
+func (d *DetailView) ScrollEnd() {
+	if !d.viewport.SoftWrap {
+		content := d.viewport.GetContent()
+		lines := strings.Split(content, "\n")
+		yOff := d.viewport.YOffset()
+		visCount := d.viewport.VisibleLineCount()
+		end := yOff + visCount
+		if end > len(lines) {
+			end = len(lines)
+		}
+		maxW := 0
+		for i := yOff; i < end; i++ {
+			w := ansi.StringWidth(lines[i])
+			if w > maxW {
+				maxW = w
+			}
+		}
+		off := maxW - d.viewport.Width()
+		if off < 0 {
+			off = 0
+		}
+		d.viewport.SetXOffset(off)
+	}
+}
+
 // PageDown scrolls the viewport down by one page.
 func (d *DetailView) PageDown() { d.viewport.PageDown() }
 

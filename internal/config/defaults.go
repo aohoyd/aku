@@ -87,6 +87,8 @@ func DefaultBindings() []Binding {
 		{Key: "L", Help: "scroll right", Command: "scroll-right", Scope: "details"},
 		{Key: "shift+left", Help: "scroll left", Command: "scroll-left", Scope: "details"},
 		{Key: "shift+right", Help: "scroll right", Command: "scroll-right", Scope: "details"},
+		{Key: "0", Help: "line start", Command: "scroll-home", Scope: "details"},
+		{Key: "$", Help: "line end", Command: "scroll-end", Scope: "details"},
 		{Key: "w", Help: "wrap", Command: "toggle-wrap", Scope: "details", Visible: true},
 		{Key: "alt+e", Help: "header", Command: "toggle-header", Scope: "details", Visible: true},
 		{Key: "r", Help: "refresh", Command: "refresh-detail", Scope: "details"},

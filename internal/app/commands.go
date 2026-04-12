@@ -693,6 +693,16 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			a.layout.ActiveDetailPanel().ScrollRight()
 		}
 		return a, nil
+	case command == "scroll-home":
+		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
+			a.layout.ActiveDetailPanel().ScrollHome()
+		}
+		return a, nil
+	case command == "scroll-end":
+		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
+			a.layout.ActiveDetailPanel().ScrollEnd()
+		}
+		return a, nil
 	case command == "toggle-wrap":
 		if a.layout.RightPanelVisible() {
 			a.layout.ActiveDetailPanel().ToggleWrap()

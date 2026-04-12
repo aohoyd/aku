@@ -70,6 +70,10 @@ type LogView struct {
 	totalWrappedRows int // total visual rows (sum of all wrapped heights)
 }
 
+// hScrollPadding is the number of columns to keep visible to the left of a
+// search match when adjusting horizontal scroll.
+const hScrollPadding = 15
+
 // NewLogView creates a new log view with the given dimensions and ring buffer capacity.
 func NewLogView(width, height, bufCapacity int, defaultTimeRange string, defaultSinceSeconds int64) LogView {
 	var logVP logViewport
@@ -758,6 +762,7 @@ func (lv *LogView) ensureMatchVisible() {
 				visualRow += (w + vpWidth - 1) / vpWidth
 			}
 		}
+		visualRow += pos.colStart / vpWidth // add wrapped row offset within the line
 
 		vpHeight := lv.viewportHeight()
 		if visualRow < lv.wrapYOffset {
@@ -775,6 +780,14 @@ func (lv *LogView) ensureMatchVisible() {
 	} else if pos.line >= lv.scrollOffset+h {
 		lv.scrollOffset = pos.line - h + 1
 	}
+
+	// Horizontal scroll: ensure the match start column is visible.
+	vpWidth := lv.logVP.width
+	xEnd := lv.logVP.xOffset + vpWidth
+	if pos.colStart < lv.logVP.xOffset || pos.colStart >= xEnd {
+		lv.logVP.xOffset = max(0, pos.colStart-hScrollPadding)
+	}
+
 	lv.autoscroll = false
 }
 
@@ -997,6 +1010,26 @@ func (lv *LogView) ScrollLeft() {
 func (lv *LogView) ScrollRight() {
 	if !lv.softWrap {
 		lv.logVP.xOffset += hScrollStep
+	}
+}
+
+// ScrollHome resets horizontal scroll to the beginning of the line.
+func (lv *LogView) ScrollHome() {
+	if !lv.softWrap {
+		lv.logVP.xOffset = 0
+	}
+}
+
+// ScrollEnd scrolls horizontally to show the end of the longest visible line.
+func (lv *LogView) ScrollEnd() {
+	if !lv.softWrap {
+		maxW := 0
+		for _, w := range lv.logVP.rawWidths {
+			if w > maxW {
+				maxW = w
+			}
+		}
+		lv.logVP.xOffset = max(0, maxW-lv.logVP.width)
 	}
 }
 

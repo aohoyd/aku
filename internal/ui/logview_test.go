@@ -2301,3 +2301,310 @@ func TestComputeLineMatchPositions_IntegrationWithLogView(t *testing.T) {
 		}
 	}
 }
+
+func TestLogView_EnsureMatchVisible_HScrollMatchAtCol0(t *testing.T) {
+	// Match at column 0 with xOffset 0 — no horizontal scroll change needed.
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.ToggleSyntax()
+	lv.AppendLine("needle at the start")
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(lv.matchPositions))
+	}
+	// colStart should be 0
+	if lv.matchPositions[0].colStart != 0 {
+		t.Fatalf("expected colStart 0, got %d", lv.matchPositions[0].colStart)
+	}
+
+	lv.logVP.xOffset = 0
+	lv.ensureMatchVisible()
+
+	if lv.logVP.xOffset != 0 {
+		t.Fatalf("expected xOffset to remain 0 for match at col 0, got %d", lv.logVP.xOffset)
+	}
+}
+
+func TestLogView_EnsureMatchVisible_HScrollMatchAtHighCol(t *testing.T) {
+	// Match far to the right — xOffset should adjust so the match is visible.
+	lv := NewLogView(82, 24, 100, "15m", 900) // logVP.width = 80
+	lv.ToggleSyntax()
+
+	// Create a line with "needle" starting at column 200.
+	line := strings.Repeat("x", 200) + "needle"
+	lv.AppendLine(line)
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(lv.matchPositions))
+	}
+	if lv.matchPositions[0].colStart != 200 {
+		t.Fatalf("expected colStart 200, got %d", lv.matchPositions[0].colStart)
+	}
+
+	lv.logVP.xOffset = 0
+	lv.ensureMatchVisible()
+
+	// xOffset should be colStart - hScrollPadding = 200 - 15 = 185
+	expected := 200 - hScrollPadding
+	if lv.logVP.xOffset != expected {
+		t.Fatalf("expected xOffset %d, got %d", expected, lv.logVP.xOffset)
+	}
+}
+
+func TestLogView_EnsureMatchVisible_HScrollMatchAlreadyVisible(t *testing.T) {
+	// Match is already within the visible horizontal range — no change.
+	lv := NewLogView(82, 24, 100, "15m", 900) // logVP.width = 80
+	lv.ToggleSyntax()
+
+	// "needle" at column 50
+	line := strings.Repeat("x", 50) + "needle" + strings.Repeat("x", 100)
+	lv.AppendLine(line)
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(lv.matchPositions))
+	}
+
+	// Set xOffset so column 50 is visible (xOffset=10, viewport shows cols 10..89).
+	lv.logVP.xOffset = 10
+	lv.ensureMatchVisible()
+
+	// Match at col 50 is in [10, 90), so xOffset should not change.
+	if lv.logVP.xOffset != 10 {
+		t.Fatalf("expected xOffset to remain 10 (match already visible), got %d", lv.logVP.xOffset)
+	}
+}
+
+func TestLogView_EnsureMatchVisible_HScrollMatchLeftOfViewport(t *testing.T) {
+	// Match is to the left of the current viewport — xOffset should scroll back.
+	lv := NewLogView(82, 24, 100, "15m", 900) // logVP.width = 80
+	lv.ToggleSyntax()
+
+	// "needle" at column 5
+	line := strings.Repeat("x", 5) + "needle" + strings.Repeat("x", 200)
+	lv.AppendLine(line)
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(lv.matchPositions))
+	}
+
+	// xOffset at 100: viewport shows cols 100..179, match at col 5 is off-screen left.
+	lv.logVP.xOffset = 100
+	lv.ensureMatchVisible()
+
+	// xOffset should be max(0, 5-15) = 0 (clamped to 0).
+	if lv.logVP.xOffset != 0 {
+		t.Fatalf("expected xOffset 0 (clamped), got %d", lv.logVP.xOffset)
+	}
+}
+
+func TestLogView_EnsureMatchVisible_HScrollNearStartClampToZero(t *testing.T) {
+	// Match near start of line where padding would go negative — should clamp to 0.
+	lv := NewLogView(82, 24, 100, "15m", 900) // logVP.width = 80
+	lv.ToggleSyntax()
+
+	// "needle" at column 5 (less than hScrollPadding=15)
+	line := strings.Repeat("x", 5) + "needle"
+	lv.AppendLine(line)
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if lv.matchPositions[0].colStart != 5 {
+		t.Fatalf("expected colStart 5, got %d", lv.matchPositions[0].colStart)
+	}
+
+	// Force xOffset past the match so it triggers adjustment.
+	lv.logVP.xOffset = 90
+	lv.ensureMatchVisible()
+
+	// max(0, 5-15) = 0
+	if lv.logVP.xOffset != 0 {
+		t.Fatalf("expected xOffset 0 (clamped to 0 since colStart-padding < 0), got %d", lv.logVP.xOffset)
+	}
+}
+
+func TestLogView_EnsureMatchVisible_WrapFirstRow(t *testing.T) {
+	// Match on the first wrapped row of a long line — no extra offset needed.
+	// vpWidth = 20, vpHeight = 10
+	lv := NewLogView(22, 12, 100, "15m", 900)
+	lv.ToggleSyntax() // disable highlighting so widths = len
+	lv.ToggleWrap()
+
+	// Line 0: 60 chars, wraps into 3 visual rows.
+	// "needle" starts at column 5 (first wrapped row: cols 0-19).
+	line := strings.Repeat("x", 5) + "needle" + strings.Repeat("x", 49)
+	lv.AppendLine(line)
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(lv.matchPositions))
+	}
+	if lv.matchPositions[0].colStart != 5 {
+		t.Fatalf("expected colStart 5, got %d", lv.matchPositions[0].colStart)
+	}
+
+	// visualRow = 0 (no lines before) + 5/20 = 0. Already visible.
+	lv.wrapYOffset = 0
+	lv.ensureMatchVisible()
+
+	if lv.wrapYOffset != 0 {
+		t.Fatalf("expected wrapYOffset 0 for match on first wrapped row, got %d", lv.wrapYOffset)
+	}
+}
+
+func TestLogView_EnsureMatchVisible_WrapSecondRow(t *testing.T) {
+	// Match on the second wrapped row of a long line — viewport must scroll down.
+	// vpWidth = 20, vpHeight = 4
+	lv := NewLogView(22, 6, 100, "15m", 900)
+	lv.ToggleSyntax()
+	lv.ToggleWrap()
+
+	// Line 0: short line (1 visual row)
+	lv.AppendLine("short")
+	// Line 1: short line (1 visual row)
+	lv.AppendLine("short")
+	// Line 2: 60 chars with "needle" at column 25 (second wrapped row: cols 20-39).
+	line2 := strings.Repeat("x", 25) + "needle" + strings.Repeat("x", 29)
+	lv.AppendLine(line2)
+	// Line 3: another long line to push total visual rows beyond viewport.
+	// 60 chars -> 3 visual rows. Total: 1+1+3+3 = 8 visual rows.
+	lv.AppendLine(strings.Repeat("y", 60))
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(lv.matchPositions))
+	}
+	if lv.matchPositions[0].colStart != 25 {
+		t.Fatalf("expected colStart 25, got %d", lv.matchPositions[0].colStart)
+	}
+
+	// visualRow for lines before match: line0=1, line1=1 -> 2.
+	// Plus wrapped row offset: 25/20 = 1 -> visualRow = 3.
+	// With wrapYOffset=0, vpHeight=4: visible rows 0-3. Row 3 is the last visible.
+	lv.wrapYOffset = 0
+	lv.ensureMatchVisible()
+	if lv.wrapYOffset != 0 {
+		t.Fatalf("expected wrapYOffset 0 (match at row 3 visible in viewport 0-3), got %d", lv.wrapYOffset)
+	}
+
+	// Scroll viewport past the match: wrapYOffset=4 means visible rows 4-7.
+	// maxOffset = max(8-4,0) = 4, so wrapYOffset=4 is valid.
+	// Match at visualRow=3 < wrapYOffset=4 -> scroll up to 3.
+	lv.wrapYOffset = 4
+	lv.ensureMatchVisible()
+	if lv.wrapYOffset != 3 {
+		t.Fatalf("expected wrapYOffset 3 after scrolling up to match, got %d", lv.wrapYOffset)
+	}
+}
+
+func TestLogView_EnsureMatchVisible_WrapLastRow(t *testing.T) {
+	// Match on the last wrapped row of a very long line.
+	// vpWidth = 20, vpHeight = 4
+	lv := NewLogView(22, 6, 100, "15m", 900)
+	lv.ToggleSyntax()
+	lv.ToggleWrap()
+
+	// Line 0: short (1 visual row)
+	lv.AppendLine("short")
+	// Line 1: 100 chars with "needle" at column 85 (wrapped row 85/20=4).
+	// The line wraps into ceil(100/20)=5 visual rows.
+	line := strings.Repeat("x", 85) + "needle" + strings.Repeat("x", 9)
+	lv.AppendLine(line)
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(lv.matchPositions))
+	}
+	if lv.matchPositions[0].colStart != 85 {
+		t.Fatalf("expected colStart 85, got %d", lv.matchPositions[0].colStart)
+	}
+
+	// visualRow: line0 = 1 row -> 1. Plus wrapped row offset: 85/20 = 4 -> visualRow = 5.
+	// vpHeight = 4, wrapYOffset = 0: visible rows 0-3. Match at row 5 is off-screen.
+	lv.wrapYOffset = 0
+	lv.ensureMatchVisible()
+	// visualRow(5) >= wrapYOffset(0)+vpHeight(4) -> wrapYOffset = 5-4+1 = 2
+	if lv.wrapYOffset != 2 {
+		t.Fatalf("expected wrapYOffset 2 after scrolling to match on last wrapped row, got %d", lv.wrapYOffset)
+	}
+}
+
+func TestLogView_ScrollHome_ResetsXOffset(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.ToggleSyntax()
+	// Manually set xOffset to simulate scrolled state.
+	lv.logVP.xOffset = 50
+	lv.ScrollHome()
+	if lv.logVP.xOffset != 0 {
+		t.Fatalf("expected xOffset 0 after ScrollHome, got %d", lv.logVP.xOffset)
+	}
+}
+
+func TestLogView_ScrollHome_NoOpInWrapMode(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.ToggleSyntax()
+	lv.ToggleWrap()
+	lv.logVP.xOffset = 50
+	lv.ScrollHome()
+	// In wrap mode, xOffset should remain unchanged.
+	if lv.logVP.xOffset != 50 {
+		t.Fatalf("expected xOffset 50 (unchanged) in wrap mode, got %d", lv.logVP.xOffset)
+	}
+}
+
+func TestLogView_ScrollEnd_ScrollsToLongestLine(t *testing.T) {
+	lv := NewLogView(22, 6, 100, "15m", 900) // vpWidth = 20
+	lv.ToggleSyntax()
+	// Append lines of varying widths.
+	lv.AppendLine("short")                                       // width 5
+	lv.AppendLine(strings.Repeat("a", 60))                       // width 60
+	lv.AppendLine(strings.Repeat("b", 40))                       // width 40
+
+	lv.ScrollEnd()
+	// maxWidth = 60, vpWidth = 20, expected xOffset = 60 - 20 = 40
+	if lv.logVP.xOffset != 40 {
+		t.Fatalf("expected xOffset 40 after ScrollEnd, got %d", lv.logVP.xOffset)
+	}
+}
+
+func TestLogView_ScrollEnd_NoOpInWrapMode(t *testing.T) {
+	lv := NewLogView(22, 6, 100, "15m", 900)
+	lv.ToggleSyntax()
+	lv.ToggleWrap()
+	lv.AppendLine(strings.Repeat("a", 60))
+	lv.ScrollEnd()
+	// In wrap mode, xOffset should remain 0.
+	if lv.logVP.xOffset != 0 {
+		t.Fatalf("expected xOffset 0 in wrap mode, got %d", lv.logVP.xOffset)
+	}
+}
+
+func TestLogView_ScrollEnd_AllLinesFitInViewport(t *testing.T) {
+	lv := NewLogView(82, 6, 100, "15m", 900) // vpWidth = 80
+	lv.ToggleSyntax()
+	lv.AppendLine("short")     // width 5
+	lv.AppendLine("also short") // width 10
+
+	lv.ScrollEnd()
+	// maxWidth = 10, vpWidth = 80 -> max(0, 10-80) = 0
+	if lv.logVP.xOffset != 0 {
+		t.Fatalf("expected xOffset 0 when all lines fit, got %d", lv.logVP.xOffset)
+	}
+}

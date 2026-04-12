@@ -25,6 +25,8 @@ type DetailPanel interface {
 	Searchable
 	ScrollLeft()
 	ScrollRight()
+	ScrollHome()
+	ScrollEnd()
 	ScrollUp()
 	ScrollDown()
 	PageUp()
