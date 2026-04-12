@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -60,6 +61,8 @@ type LogView struct {
 	logVP                  logViewport
 	highlightStyle         lipgloss.Style
 	selectedHighlightStyle lipgloss.Style
+	highlightSGR           string
+	selectedHighlightSGR   string
 	softWrap               bool
 
 	// Wrap-mode scroll tracking
@@ -72,6 +75,9 @@ func NewLogView(width, height, bufCapacity int, defaultTimeRange string, default
 	var logVP logViewport
 	logVP.SetSize(width-2, height-2)
 
+	hiStyle := lipgloss.NewStyle().Background(theme.SearchMatch).Foreground(theme.SearchFg)
+	selStyle := lipgloss.NewStyle().Background(theme.SearchSelected).Foreground(theme.SearchFg).Bold(true)
+
 	return LogView{
 		buffer:                 NewDualRingBuffer(bufCapacity),
 		width:                  width,
@@ -83,8 +89,10 @@ func NewLogView(width, height, bufCapacity int, defaultTimeRange string, default
 		defaultTimeRange:       defaultTimeRange,
 		defaultSinceSeconds:    defaultSinceSeconds,
 		logVP:                  logVP,
-		highlightStyle:         lipgloss.NewStyle().Background(theme.SearchMatch).Foreground(theme.SearchFg),
-		selectedHighlightStyle: lipgloss.NewStyle().Background(theme.SearchSelected).Foreground(theme.SearchFg).Bold(true),
+		highlightStyle:         hiStyle,
+		selectedHighlightStyle: selStyle,
+		highlightSGR:           styleToSGR(hiStyle),
+		selectedHighlightSGR:   styleToSGR(selStyle),
 	}
 }
 
@@ -197,24 +205,43 @@ func (lv *LogView) updateViewport() {
 			windowPositions = append(windowPositions, shifted)
 		}
 		if len(windowPositions) > 0 {
-			selectedInWindow := -1
+			// Determine which windowPosition is the globally selected match.
+			globalSelectedWP := -1
 			if lv.matchIndex >= 0 {
 				sel := lv.matchPositions[lv.matchIndex]
 				if sel.line >= windowStart && sel.line < windowEnd {
 					for i, wp := range windowPositions {
 						if wp.line == sel.line-windowStart && wp.colStart == sel.colStart {
-							selectedInWindow = i
+							globalSelectedWP = i
 							break
 						}
 					}
 				}
 			}
-			joined := strings.Join(window, "\n")
-			highlighted := buildHighlightedDisplay(
-				joined, windowPositions, selectedInWindow,
-				lv.highlightStyle, lv.selectedHighlightStyle,
-			)
-			window = strings.Split(highlighted, "\n")
+
+			// Group windowPositions by line and call injectHighlights per line.
+			wpIdx := 0
+			for wpIdx < len(windowPositions) {
+				lineIdx := windowPositions[wpIdx].line
+				lineStart := wpIdx
+				var ranges []highlightRange
+				for wpIdx < len(windowPositions) && windowPositions[wpIdx].line == lineIdx {
+					ranges = append(ranges, highlightRange{
+						start: windowPositions[wpIdx].colStart,
+						end:   windowPositions[wpIdx].colEnd,
+					})
+					wpIdx++
+				}
+				// Compute selectedInLine: which range within this line is selected.
+				selectedInLine := -1
+				if globalSelectedWP >= lineStart && globalSelectedWP < wpIdx {
+					selectedInLine = globalSelectedWP - lineStart
+				}
+				window[lineIdx] = injectHighlights(
+					window[lineIdx], ranges, selectedInLine,
+					lv.highlightSGR, lv.selectedHighlightSGR,
+				)
+			}
 		}
 	}
 
@@ -386,9 +413,13 @@ func (lv *LogView) updateViewportWrapped() {
 						}
 					}
 				}
-				line = buildHighlightedDisplay(
-					line, linePositions, selectedInLine,
-					lv.highlightStyle, lv.selectedHighlightStyle,
+				ranges := make([]highlightRange, len(linePositions))
+				for i, pos := range linePositions {
+					ranges[i] = highlightRange{start: pos.colStart, end: pos.colEnd}
+				}
+				line = injectHighlights(
+					line, ranges, selectedInLine,
+					lv.highlightSGR, lv.selectedHighlightSGR,
 				)
 			}
 		}
@@ -472,59 +503,111 @@ func (lv *LogView) AppendLine(line string) {
 		}
 	}
 
+	// Incremental search match update.
+	if lv.searchState.Active() {
+		hasIndicator := lv.buffer.Dropped() > 0
+		if evicted {
+			// Display indices shifted — full per-line rebuild.
+			lv.rebuildMatchPositions()
+		} else {
+			// Just append the new line's matches.
+			stripped := lv.buffer.StrippedGet(lv.buffer.Len() - 1)
+			var displayIdx int
+			if lv.filterState.Active() {
+				// When filter is active, display index is position in filteredIndices.
+				displayIdx = len(lv.filteredIndices) - 1
+			} else {
+				displayIdx = lv.buffer.Len() - 1
+			}
+			if hasIndicator {
+				displayIdx++ // indicator occupies index 0
+			}
+			newPositions := computeLineMatchPositions(stripped, lv.searchState.Re, displayIdx)
+			lv.matchPositions = append(lv.matchPositions, newPositions...)
+			lv.searchState.MatchCount = len(lv.matchPositions)
+		}
+	}
+
 	if lv.autoscroll && !lv.softWrap {
 		lv.scrollOffset = lv.totalDisplayLines() - lv.viewportHeight()
 	}
 	lv.updateViewport()
 }
 
+// rebuildMatchPositions recomputes all search match positions from scratch.
+// It clears matchPositions, iterates all lines (or filtered indices), applies
+// the indicator offset, and updates searchState.MatchCount.
+// It does NOT reset matchIndex — callers decide whether to reset navigation.
+func (lv *LogView) rebuildMatchPositions() {
+	lv.matchPositions = nil
+
+	if !lv.searchState.Active() {
+		lv.searchState.MatchCount = 0
+		return
+	}
+
+	hasIndicator := lv.buffer.Dropped() > 0
+	var positions []matchPosition
+
+	if lv.filterState.Active() {
+		for lineIdx, idx := range lv.filteredIndices {
+			bufIdx := idx - lv.filteredIndexOffset
+			if bufIdx >= 0 && bufIdx < lv.buffer.Len() {
+				positions = append(positions, computeLineMatchPositions(
+					lv.buffer.StrippedGet(bufIdx), lv.searchState.Re, lineIdx)...)
+			}
+		}
+	} else {
+		for i := range lv.buffer.Len() {
+			positions = append(positions, computeLineMatchPositions(
+				lv.buffer.StrippedGet(i), lv.searchState.Re, i)...)
+		}
+	}
+
+	if hasIndicator {
+		for i := range positions {
+			positions[i].line++
+		}
+	}
+
+	lv.matchPositions = positions
+	lv.searchState.MatchCount = len(positions)
+}
+
 // rebuildViewportContent recomputes search match positions and updates the viewport.
 // Called on search/filter activation (user action), not on every append.
 func (lv *LogView) rebuildViewportContent() {
-	hasIndicator := lv.buffer.Dropped() > 0
-
-	lv.matchPositions = nil
 	lv.matchIndex = -1
+	lv.rebuildMatchPositions()
 
-	if lv.searchState.Active() {
-		// Use stripped colored lines (not raw lines) so that search match
-		// positions correspond to the display columns that lipgloss.StyleRanges
-		// will operate on. The JSON highlighter reformats compact JSON by adding
-		// spaces, making ansi.Strip(colored) != raw.
-		var visibleLines []string
-		if lv.filterState.Active() {
-			for _, idx := range lv.filteredIndices {
-				bufIdx := idx - lv.filteredIndexOffset
-				if bufIdx >= 0 && bufIdx < lv.buffer.Len() {
-					visibleLines = append(visibleLines, lv.buffer.StrippedGet(bufIdx))
-				}
-			}
-		} else {
-			for i := range lv.buffer.Len() {
-				visibleLines = append(visibleLines, lv.buffer.StrippedGet(i))
-			}
-		}
-		strippedContent := strings.Join(visibleLines, "\n")
-
-		rawMatches := lv.searchState.Re.FindAllStringIndex(strippedContent, -1)
-		positions := computeMatchPositions(strippedContent, rawMatches)
-
-		if hasIndicator {
-			for i := range positions {
-				positions[i].line++
-			}
-		}
-
-		lv.matchPositions = positions
-		if len(positions) > 0 {
-			lv.matchIndex = 0
-		}
+	if len(lv.matchPositions) > 0 {
+		lv.matchIndex = 0
 	}
 
 	if lv.softWrap {
 		lv.recomputeTotalWrappedRows()
 	}
 	lv.updateViewport()
+}
+
+// computeLineMatchPositions runs FindAllStringIndex on a single stripped line
+// and converts byte offsets to grapheme-width columns using ansi.StringWidth.
+func computeLineMatchPositions(stripped string, re *regexp.Regexp, lineIdx int) []matchPosition {
+	byteMatches := re.FindAllStringIndex(stripped, -1)
+	if len(byteMatches) == 0 {
+		return nil
+	}
+	positions := make([]matchPosition, 0, len(byteMatches))
+	for _, match := range byteMatches {
+		colStart := ansi.StringWidth(stripped[:match[0]])
+		colEnd := ansi.StringWidth(stripped[:match[1]])
+		positions = append(positions, matchPosition{
+			line:     lineIdx,
+			colStart: colStart,
+			colEnd:   colEnd,
+		})
+	}
+	return positions
 }
 
 // View renders the log view with border and title.

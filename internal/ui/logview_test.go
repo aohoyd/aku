@@ -1912,3 +1912,392 @@ func TestLogView_WrappedVOffsetSkipFirstLine(t *testing.T) {
 		t.Fatalf("expected last visible segment to start with %q, got %q", expectedPrefix, lastStripped)
 	}
 }
+
+func TestComputeLineMatchPositions_MatchesJoinAllApproach(t *testing.T) {
+	// Verify that the per-line computeLineMatchPositions approach produces
+	// identical match positions to the old join-all approach (join lines,
+	// run FindAllStringIndex, call computeMatchPositions).
+	tests := []struct {
+		name  string
+		lines []string
+		pattern string
+	}{
+		{
+			name:    "simple matches across lines",
+			lines:   []string{"foo bar", "baz foo", "no match here", "foo end"},
+			pattern: "foo",
+		},
+		{
+			name:    "match at line boundaries",
+			lines:   []string{"endfoo", "foostart", "midfoomid"},
+			pattern: "foo",
+		},
+		{
+			name:    "multiple matches per line",
+			lines:   []string{"foo foo foo", "bar", "foo bar foo"},
+			pattern: "foo",
+		},
+		{
+			name:    "no matches",
+			lines:   []string{"abc", "def", "ghi"},
+			pattern: "xyz",
+		},
+		{
+			name:    "empty lines mixed in",
+			lines:   []string{"foo", "", "foo", "", ""},
+			pattern: "foo",
+		},
+		{
+			name:    "single line",
+			lines:   []string{"hello foo world"},
+			pattern: "foo",
+		},
+		{
+			name:    "regex pattern",
+			lines:   []string{"error: 123", "warn: 456", "error: 789"},
+			pattern: `error: \d+`,
+		},
+		{
+			name:    "match spanning would cross newline in join-all but not per-line",
+			lines:   []string{"abc", "def"},
+			pattern: "c\nd",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			re := regexp.MustCompile(tt.pattern)
+
+			// Per-line approach (new)
+			var perLinePositions []matchPosition
+			for lineIdx, line := range tt.lines {
+				perLinePositions = append(perLinePositions,
+					computeLineMatchPositions(line, re, lineIdx)...)
+			}
+
+			// Join-all approach (old) — but only counting non-cross-line matches
+			// The per-line approach by definition cannot find cross-line matches,
+			// so we compare only within-line matches from the old approach.
+			joined := strings.Join(tt.lines, "\n")
+			rawMatches := re.FindAllStringIndex(joined, -1)
+			oldPositions := computeMatchPositions(joined, rawMatches)
+
+			// Filter old positions to exclude cross-newline matches
+			// (those where the match spans more than one line).
+			// Actually, computeMatchPositions already handles this by clamping
+			// lineByteEnd, so a cross-line match would have a truncated colEnd.
+			// The per-line approach simply won't find cross-line matches at all.
+			// For fair comparison, skip the cross-line test case and compare directly.
+
+			if tt.pattern == "c\nd" {
+				// Cross-line pattern: per-line should find 0 matches
+				// (since no single line contains "c\nd").
+				if len(perLinePositions) != 0 {
+					t.Fatalf("expected 0 per-line matches for cross-line pattern, got %d", len(perLinePositions))
+				}
+				return
+			}
+
+			// For all non-cross-line patterns, results should be identical.
+			if len(perLinePositions) != len(oldPositions) {
+				t.Fatalf("match count mismatch: per-line=%d, join-all=%d",
+					len(perLinePositions), len(oldPositions))
+			}
+			for i := range perLinePositions {
+				pl := perLinePositions[i]
+				ol := oldPositions[i]
+				if pl.line != ol.line || pl.colStart != ol.colStart || pl.colEnd != ol.colEnd {
+					t.Errorf("match %d mismatch: per-line={line:%d, col:%d-%d} join-all={line:%d, col:%d-%d}",
+						i, pl.line, pl.colStart, pl.colEnd, ol.line, ol.colStart, ol.colEnd)
+				}
+			}
+		})
+	}
+}
+
+func TestLogView_IncrementalSearchAppendNewLines(t *testing.T) {
+	// Verify that appending lines while search is active incrementally
+	// updates matchPositions without a full rebuild.
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.ToggleSyntax() // disable syntax highlighting for predictable text
+
+	// Append initial lines and activate search.
+	lv.AppendLine("foo bar")
+	lv.AppendLine("baz qux")
+	if err := lv.ApplySearch("foo", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match after initial search, got %d", len(lv.matchPositions))
+	}
+	if lv.searchState.MatchCount != 1 {
+		t.Fatalf("expected MatchCount 1, got %d", lv.searchState.MatchCount)
+	}
+
+	// Append a line that matches while search is active.
+	lv.AppendLine("foo end")
+	if len(lv.matchPositions) != 2 {
+		t.Fatalf("expected 2 matches after appending matching line, got %d", len(lv.matchPositions))
+	}
+	if lv.searchState.MatchCount != 2 {
+		t.Fatalf("expected MatchCount 2, got %d", lv.searchState.MatchCount)
+	}
+
+	// Append a non-matching line — count should stay the same.
+	lv.AppendLine("no match here")
+	if len(lv.matchPositions) != 2 {
+		t.Fatalf("expected 2 matches after appending non-matching line, got %d", len(lv.matchPositions))
+	}
+	if lv.searchState.MatchCount != 2 {
+		t.Fatalf("expected MatchCount 2, got %d", lv.searchState.MatchCount)
+	}
+
+	// Append another matching line.
+	lv.AppendLine("foo again")
+	if len(lv.matchPositions) != 3 {
+		t.Fatalf("expected 3 matches after second matching append, got %d", len(lv.matchPositions))
+	}
+	if lv.searchState.MatchCount != 3 {
+		t.Fatalf("expected MatchCount 3, got %d", lv.searchState.MatchCount)
+	}
+
+	// Verify the new match is on the correct display line.
+	// Lines: 0="foo bar", 1="baz qux", 2="foo end", 3="no match here", 4="foo again"
+	// No indicator (no eviction), so display indices == buffer indices.
+	lastMatch := lv.matchPositions[len(lv.matchPositions)-1]
+	if lastMatch.line != 4 {
+		t.Fatalf("expected last match on display line 4, got %d", lastMatch.line)
+	}
+}
+
+func TestLogView_IncrementalSearchAppendWithEviction(t *testing.T) {
+	// Verify that appending lines past buffer capacity (eviction)
+	// triggers a full rebuild of matchPositions.
+	lv := NewLogView(80, 24, 5, "15m", 900) // capacity 5
+	lv.ToggleSyntax()
+
+	// Activate search before filling buffer.
+	if err := lv.ApplySearch("foo", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+
+	// Fill the buffer with matching lines.
+	lv.AppendLine("foo one")
+	lv.AppendLine("foo two")
+	lv.AppendLine("bar three")
+	lv.AppendLine("foo four")
+	lv.AppendLine("bar five")
+	// Buffer: [foo one, foo two, bar three, foo four, bar five]
+	// Matches: foo one (0), foo two (1), foo four (3) = 3 matches.
+	if len(lv.matchPositions) != 3 {
+		t.Fatalf("expected 3 matches before eviction, got %d", len(lv.matchPositions))
+	}
+	if lv.searchState.MatchCount != 3 {
+		t.Fatalf("expected MatchCount 3, got %d", lv.searchState.MatchCount)
+	}
+
+	// Append a matching line — triggers eviction of "foo one".
+	lv.AppendLine("foo six")
+	// Buffer: [foo two, bar three, foo four, bar five, foo six]
+	// Dropped=1, indicator present. Matches: foo two, foo four, foo six = 3 matches.
+	if len(lv.matchPositions) != 3 {
+		t.Fatalf("expected 3 matches after eviction, got %d", len(lv.matchPositions))
+	}
+	if lv.searchState.MatchCount != 3 {
+		t.Fatalf("expected MatchCount 3 after eviction, got %d", lv.searchState.MatchCount)
+	}
+
+	// With indicator at display 0, buffer lines start at display 1.
+	// Buffer indices: 0=foo two, 1=bar three, 2=foo four, 3=bar five, 4=foo six
+	// Display indices: 1=foo two, 2=bar three, 3=foo four, 4=bar five, 5=foo six
+	// Matches at display lines: 1 (foo two), 3 (foo four), 5 (foo six)
+	expectedDisplayLines := []int{1, 3, 5}
+	for i, pos := range lv.matchPositions {
+		if pos.line != expectedDisplayLines[i] {
+			t.Errorf("match %d: expected display line %d, got %d", i, expectedDisplayLines[i], pos.line)
+		}
+	}
+
+	// Append more lines to trigger additional evictions.
+	lv.AppendLine("bar seven")
+	lv.AppendLine("foo eight")
+	// Buffer: [foo four, bar five, foo six, bar seven, foo eight]
+	// Dropped=3, indicator present. Matches: foo four, foo six, foo eight = 3 matches.
+	if len(lv.matchPositions) != 3 {
+		t.Fatalf("expected 3 matches after multiple evictions, got %d", len(lv.matchPositions))
+	}
+	if lv.searchState.MatchCount != 3 {
+		t.Fatalf("expected MatchCount 3 after multiple evictions, got %d", lv.searchState.MatchCount)
+	}
+}
+
+func TestLogView_IncrementalSearchMatchCountAccuracy(t *testing.T) {
+	// Verify that searchState.MatchCount stays perfectly in sync with
+	// len(matchPositions) across many appends, with and without eviction.
+	lv := NewLogView(80, 24, 10, "15m", 900) // capacity 10
+	lv.ToggleSyntax()
+
+	if err := lv.ApplySearch("needle", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+
+	// Append 30 lines: every 3rd line matches.
+	for i := range 30 {
+		if i%3 == 0 {
+			lv.AppendLine(fmt.Sprintf("needle line %d", i))
+		} else {
+			lv.AppendLine(fmt.Sprintf("other line %d", i))
+		}
+		// After every append, MatchCount must equal len(matchPositions).
+		if lv.searchState.MatchCount != len(lv.matchPositions) {
+			t.Fatalf("after append %d: MatchCount=%d != len(matchPositions)=%d",
+				i, lv.searchState.MatchCount, len(lv.matchPositions))
+		}
+	}
+
+	// After 30 appends with capacity 10, buffer holds lines 20..29.
+	// Matching lines among 20..29: 21 (21%3==0), 24, 27 = 3 matches.
+	// Wait — 21%3==0 is true, 24%3==0 is true, 27%3==0 is true. So 3 matches.
+	if lv.buffer.Dropped() != 20 {
+		t.Fatalf("expected 20 dropped, got %d", lv.buffer.Dropped())
+	}
+
+	// Cross-check: do a full rebuild and compare.
+	savedCount := lv.searchState.MatchCount
+	savedPositions := make([]matchPosition, len(lv.matchPositions))
+	copy(savedPositions, lv.matchPositions)
+
+	lv.rebuildMatchPositions()
+
+	if lv.searchState.MatchCount != savedCount {
+		t.Fatalf("MatchCount mismatch: incremental=%d, full rebuild=%d",
+			savedCount, lv.searchState.MatchCount)
+	}
+	if len(lv.matchPositions) != len(savedPositions) {
+		t.Fatalf("matchPositions length mismatch: incremental=%d, full rebuild=%d",
+			len(savedPositions), len(lv.matchPositions))
+	}
+	for i := range lv.matchPositions {
+		if lv.matchPositions[i] != savedPositions[i] {
+			t.Errorf("matchPositions[%d] mismatch: incremental=%+v, full rebuild=%+v",
+				i, savedPositions[i], lv.matchPositions[i])
+		}
+	}
+}
+
+func TestLogView_IncrementalSearchDoesNotResetMatchIndex(t *testing.T) {
+	// Verify that appending lines while search is active does NOT reset
+	// matchIndex (user's current navigation position should be preserved).
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.ToggleSyntax()
+
+	lv.AppendLine("foo one")
+	lv.AppendLine("foo two")
+	lv.AppendLine("foo three")
+
+	if err := lv.ApplySearch("foo", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	// matchIndex starts at 0 after ApplySearch.
+	if lv.matchIndex != 0 {
+		t.Fatalf("expected matchIndex 0 after ApplySearch, got %d", lv.matchIndex)
+	}
+
+	// Navigate to the second match.
+	lv.SearchNext()
+	if lv.matchIndex != 1 {
+		t.Fatalf("expected matchIndex 1 after SearchNext, got %d", lv.matchIndex)
+	}
+
+	// Append a new matching line — matchIndex should stay at 1.
+	lv.AppendLine("foo four")
+	if lv.matchIndex != 1 {
+		t.Fatalf("expected matchIndex 1 preserved after append, got %d", lv.matchIndex)
+	}
+	if len(lv.matchPositions) != 4 {
+		t.Fatalf("expected 4 matches, got %d", len(lv.matchPositions))
+	}
+}
+
+func TestLogView_IncrementalSearchWithFilterActive(t *testing.T) {
+	// Verify incremental search update works when both filter and search are active.
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.ToggleSyntax()
+
+	lv.AppendLine("ERROR: first failure")
+	lv.AppendLine("INFO: all good")
+	lv.AppendLine("ERROR: second failure")
+
+	// Apply filter for ERROR lines.
+	if err := lv.ApplySearch("ERROR", msgs.SearchModeFilter); err != nil {
+		t.Fatalf("ApplySearch filter: %v", err)
+	}
+	// Apply search within filtered lines.
+	if err := lv.ApplySearch("failure", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch search: %v", err)
+	}
+	if len(lv.matchPositions) != 2 {
+		t.Fatalf("expected 2 matches in filtered set, got %d", len(lv.matchPositions))
+	}
+
+	// Append a line that matches both filter and search.
+	lv.AppendLine("ERROR: third failure")
+	if len(lv.matchPositions) != 3 {
+		t.Fatalf("expected 3 matches after appending matching line, got %d", len(lv.matchPositions))
+	}
+	if lv.searchState.MatchCount != 3 {
+		t.Fatalf("expected MatchCount 3, got %d", lv.searchState.MatchCount)
+	}
+
+	// Append a line that matches filter but NOT search.
+	lv.AppendLine("ERROR: no match keyword here")
+	if len(lv.matchPositions) != 3 {
+		t.Fatalf("expected 3 matches (new ERROR line doesn't contain 'failure'), got %d", len(lv.matchPositions))
+	}
+
+	// Append a line that matches neither filter nor search.
+	lv.AppendLine("INFO: irrelevant")
+	if len(lv.matchPositions) != 3 {
+		t.Fatalf("expected 3 matches (non-ERROR line should not change matches), got %d", len(lv.matchPositions))
+	}
+}
+
+func TestComputeLineMatchPositions_IntegrationWithLogView(t *testing.T) {
+	// Integration test: verify that rebuildViewportContent using the per-line
+	// approach produces correct match positions for a LogView with real data.
+	lv := NewLogView(80, 24, 100, "15m", 900)
+
+	lines := []string{
+		"2024-01-01 ERROR connection refused",
+		"2024-01-01 INFO request completed",
+		"2024-01-01 ERROR timeout occurred",
+		"2024-01-01 DEBUG all clear",
+		"2024-01-01 ERROR disk full",
+	}
+	for _, line := range lines {
+		lv.AppendLine(line)
+	}
+
+	// Search for "ERROR" — should find 3 matches, one per ERROR line.
+	if err := lv.ApplySearch("ERROR", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	if len(lv.matchPositions) != 3 {
+		t.Fatalf("expected 3 matches for 'ERROR', got %d", len(lv.matchPositions))
+	}
+
+	// Verify each match is on the correct line (lines 0, 2, 4 in stripped content).
+	expectedLines := []int{0, 2, 4}
+	for i, pos := range lv.matchPositions {
+		if pos.line != expectedLines[i] {
+			t.Errorf("match %d: expected line %d, got %d", i, expectedLines[i], pos.line)
+		}
+		// Verify the match columns point to "ERROR" in the stripped text.
+		stripped := lv.buffer.StrippedGet(pos.line)
+		matchedText := stripped[pos.colStart:pos.colEnd]
+		if matchedText != "ERROR" {
+			t.Errorf("match %d: expected 'ERROR' at [%d:%d], got %q",
+				i, pos.colStart, pos.colEnd, matchedText)
+		}
+	}
+}
