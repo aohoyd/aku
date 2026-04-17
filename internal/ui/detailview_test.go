@@ -451,8 +451,9 @@ func TestDetailViewYAMLSearchHighlightPosition(t *testing.T) {
 			t.Fatalf("match %d: line %d out of range", i, pos.line)
 		}
 		line := rawLines[pos.line]
-		// Extract the matched text using grapheme-width positions
-		matched := line[pos.colStart:pos.colEnd]
+		// Extract the matched text using display-column positions via ansi.Cut,
+		// consistent with how the runtime and other tests extract matches.
+		matched := ansi.Strip(ansi.Cut(line, pos.colStart, pos.colEnd))
 		if matched != "admi" {
 			t.Fatalf("match %d on line %d: expected 'admi' at cols [%d,%d], got %q (line: %q)",
 				i, pos.line, pos.colStart, pos.colEnd, matched, line)

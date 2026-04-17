@@ -397,7 +397,7 @@ func (lv *LogView) updateViewportWrapped() {
 	for di := firstDisplayIdx; di < displayCount && len(visRows) < vpHeight; di++ {
 		var line string
 		var w int
-		// bufIdx maps display index to buffer/filter index; -1 for indicator row.
+		// bufIdx maps display index to buffer/filter index (shifted by 1 when indicator row is present).
 		bufIdx := di
 		if hasIndicator {
 			bufIdx = di - 1
