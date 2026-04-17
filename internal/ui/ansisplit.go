@@ -5,6 +5,8 @@ import (
 
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/aohoyd/aku/internal/theme"
 )
 
 // isSGR returns true if seq is a CSI SGR sequence (ends with 'm').
@@ -272,4 +274,105 @@ func splitWrappedVisible(line string, vpWidth, startRow, numRows int) (segments 
 	}
 
 	return segments, widths
+}
+
+// wrapIndicatorWidth is the display-column width of the wrap indicator prefix
+// (↪ + space = 2 columns).
+const wrapIndicatorWidth = 2
+
+// cachedWrapIndicatorPrefix is the pre-rendered styled "↪ " string used as a
+// soft-wrap continuation indicator. Computed once at package init time to avoid
+// allocating a new lipgloss.Style on every wrapped row in the hot render path.
+var cachedWrapIndicatorPrefix = lipgloss.NewStyle().Foreground(theme.Subtle).Faint(true).Render("↪") + " "
+
+// wrapIndicatorPrefix returns a styled "↪ " string (dimmed arrow + plain space)
+// for use as a soft-wrap continuation indicator.
+func wrapIndicatorPrefix() string {
+	return cachedWrapIndicatorPrefix
+}
+
+// lineMap maps a visual (wrapped) row back to its logical source line and the
+// display-column offset within that line where the visual row begins.
+type lineMap struct {
+	logicalLine int
+	colOffset   int
+}
+
+// wrapLines pre-wraps content lines at the given display-column width,
+// producing a flat slice of wrapped visual lines and a parallel mapping from
+// each visual row back to the logical source line and column offset.
+//
+// Continuation rows (all segments after the first for a given logical line)
+// receive the wrap indicator prefix via prefixContinuationRows.
+//
+// If width <= 0, the input lines are returned as-is with identity mapping.
+func wrapLines(lines []string, width int) (wrapped []string, mapping []lineMap) {
+	if width <= 0 {
+		wrapped = make([]string, len(lines))
+		mapping = make([]lineMap, len(lines))
+		copy(wrapped, lines)
+		for i := range lines {
+			mapping[i] = lineMap{logicalLine: i, colOffset: 0}
+		}
+		return wrapped, mapping
+	}
+
+	for i, line := range lines {
+		lineWidth := ansi.StringWidth(line)
+
+		if lineWidth <= width {
+			// Line fits in a single visual row.
+			wrapped = append(wrapped, line)
+			mapping = append(mapping, lineMap{logicalLine: i, colOffset: 0})
+			continue
+		}
+
+		// Line needs wrapping: cut into segments of `width` display columns.
+		var segs []string
+		var widths []int
+		for col := 0; col < lineWidth; col += width {
+			end := col + width
+			if end > lineWidth {
+				end = lineWidth
+			}
+			seg := ansi.Cut(line, col, end)
+			segs = append(segs, seg)
+			widths = append(widths, end-col)
+			mapping = append(mapping, lineMap{logicalLine: i, colOffset: col})
+		}
+
+		// Add wrap indicator prefix to continuation rows.
+		prefixContinuationRows(segs, widths, wrapIndicatorPrefix(), wrapIndicatorWidth, false)
+
+		wrapped = append(wrapped, segs...)
+	}
+
+	return wrapped, mapping
+}
+
+// prefixContinuationRows prepends prefix to continuation segments in place.
+// It modifies segs (and widths stays unchanged because the prefix replaces
+// leading display columns of equal width).
+//
+// By default the first segment (index 0) is the original first row and is
+// skipped. When firstIsCont is true, all segments including index 0 are treated
+// as continuation rows.
+//
+// For each continuation segment: if its width is <= replaceWidth, the prefix is
+// simply prepended (the segment is too narrow to cut). Otherwise the leading
+// replaceWidth display columns are removed via ansi.Cut and the prefix is
+// prepended in their place.
+func prefixContinuationRows(segs []string, widths []int, prefix string, replaceWidth int, firstIsCont bool) {
+	start := 1
+	if firstIsCont {
+		start = 0
+	}
+	for i := start; i < len(segs); i++ {
+		if widths[i] <= replaceWidth {
+			segs[i] = prefix + segs[i]
+		} else {
+			tail := ansi.Cut(segs[i], replaceWidth, widths[i])
+			segs[i] = prefix + tail
+		}
+	}
 }
