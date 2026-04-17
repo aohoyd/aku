@@ -397,14 +397,15 @@ func (lv *LogView) updateViewportWrapped() {
 	for di := firstDisplayIdx; di < displayCount && len(visRows) < vpHeight; di++ {
 		var line string
 		var w int
+		// bufIdx maps display index to buffer/filter index; -1 for indicator row.
+		bufIdx := di
+		if hasIndicator {
+			bufIdx = di - 1
+		}
 		if hasIndicator && di == 0 {
 			line = fmt.Sprintf("~%d lines dropped", lv.buffer.Dropped())
 			w = len(line) // plain ASCII
 		} else {
-			bufIdx := di
-			if hasIndicator {
-				bufIdx = di - 1
-			}
 			if lv.filterState.Active() {
 				idx := lv.filteredIndices[bufIdx] - lv.filteredIndexOffset
 				line = lv.buffer.ColoredGet(idx)
@@ -419,15 +420,11 @@ func (lv *LogView) updateViewportWrapped() {
 		// Skip highlight injection for marker lines.
 		isMarker := false
 		if !(hasIndicator && di == 0) {
-			mBufIdx := di
-			if hasIndicator {
-				mBufIdx = di - 1
-			}
 			var rawLine string
 			if lv.filterState.Active() {
-				rawLine = lv.buffer.RawGet(lv.filteredIndices[mBufIdx] - lv.filteredIndexOffset)
+				rawLine = lv.buffer.RawGet(lv.filteredIndices[bufIdx] - lv.filteredIndexOffset)
 			} else {
-				rawLine = lv.buffer.RawGet(mBufIdx)
+				rawLine = lv.buffer.RawGet(bufIdx)
 			}
 			isMarker = markerRe.MatchString(rawLine)
 		}

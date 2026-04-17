@@ -299,7 +299,6 @@ const wrapIndicatorWidth = 2
 // allocating a new lipgloss.Style on every wrapped row in the hot render path.
 var cachedWrapIndicatorPrefix = lipgloss.NewStyle().Foreground(theme.Subtle).Faint(true).Render("↪") + " "
 
-
 // lineMap maps a visual (wrapped) row back to its logical source line and the
 // display-column offset within that line where the visual row begins.
 type lineMap struct {
@@ -358,6 +357,13 @@ func wrapLines(lines []string, width int) (wrapped []string, mapping []lineMap) 
 			}
 			seg := ansi.Cut(line, col, end)
 			actualW := ansi.StringWidth(seg)
+			if actualW == 0 {
+				// Wide character doesn't fit in contWidth — skip to end to
+				// avoid an infinite loop (mirrors the col > 0 guard in
+				// splitWrappedVisible).
+				col = end
+				continue
+			}
 			segs = append(segs, seg)
 			segWidths = append(segWidths, actualW)
 			mapping = append(mapping, lineMap{logicalLine: i, colOffset: col})

@@ -128,7 +128,6 @@ func (d *DetailView) SetContent(content render.Content, refresh bool) {
 	}
 	d.rawContent = content.Raw
 	d.displayContent = content.Display
-	d.viewport.SetContent(content.Display)
 	if refresh {
 		d.viewport.GotoTop()
 		d.viewport.SetXOffset(0)
