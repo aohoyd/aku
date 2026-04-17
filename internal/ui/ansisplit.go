@@ -146,8 +146,12 @@ func injectHighlights(line string, matches []highlightRange, selectedIdx int, hi
 }
 
 // splitWrappedVisible splits a single (potentially ANSI-decorated) line into
-// wrapped segments of vpWidth display columns, returning only the segments
-// visible in the window [startRow, startRow+numRows).
+// wrapped segments, returning only the segments visible in the window
+// [startRow, startRow+numRows).
+//
+// The first row (row 0) is vpWidth display columns wide. Continuation rows
+// (row 1+) are contWidth columns wide, leaving room for the wrap indicator
+// prefix to be prepended later without losing content.
 //
 // Each returned segment is self-contained: it starts with the accumulated SGR
 // state (so colours carry across wrap boundaries) and ends with \x1b[m if any
@@ -155,9 +159,12 @@ func injectHighlights(line string, matches []highlightRange, selectedIdx int, hi
 //
 // This replaces the O(N^2) pattern of calling ansi.Cut in a loop with a single
 // O(N) pass over the input.
-func splitWrappedVisible(line string, vpWidth, startRow, numRows int) (segments []string, widths []int) {
+func splitWrappedVisible(line string, vpWidth, contWidth, startRow, numRows int) (segments []string, widths []int) {
 	if line == "" || numRows <= 0 || vpWidth <= 0 {
 		return nil, nil
+	}
+	if contWidth <= 0 {
+		contWidth = 1
 	}
 
 	endRow := startRow + numRows
@@ -165,6 +172,7 @@ func splitWrappedVisible(line string, vpWidth, startRow, numRows int) (segments 
 	var (
 		row      int             // current wrap row
 		col      int             // current display column within row
+		rowWidth = vpWidth       // current row's width limit (vpWidth for row 0, contWidth for rows 1+)
 		sgrBuf   strings.Builder // accumulated SGR sequences for state tracking
 		segBuf   strings.Builder // current segment being built
 		segStart bool            // whether segBuf has been initialized for this row
@@ -225,13 +233,16 @@ func splitWrappedVisible(line string, vpWidth, startRow, numRows int) (segments 
 
 		// Check if this character would exceed the row width.
 		// Guard col > 0 so a wide char at column 0 is placed on the current
-		// row even if it exceeds vpWidth (avoids spurious empty segments).
-		if col+width > vpWidth && col > 0 {
+		// row even if it exceeds rowWidth (avoids spurious empty segments).
+		if col+width > rowWidth && col > 0 {
 			// Close current segment (row boundary).
 			if capturing {
 				closeSegment()
 			}
 			row++
+			if row == 1 {
+				rowWidth = contWidth
+			}
 			col = 0
 			if row >= endRow {
 				break
@@ -249,11 +260,14 @@ func splitWrappedVisible(line string, vpWidth, startRow, numRows int) (segments 
 		col += width
 
 		// Check if we've exactly filled the row.
-		if col >= vpWidth {
+		if col >= rowWidth {
 			if capturing {
 				closeSegment()
 			}
 			row++
+			if row == 1 {
+				rowWidth = contWidth
+			}
 			col = 0
 			if row >= endRow {
 				b = b[n:]
@@ -285,11 +299,6 @@ const wrapIndicatorWidth = 2
 // allocating a new lipgloss.Style on every wrapped row in the hot render path.
 var cachedWrapIndicatorPrefix = lipgloss.NewStyle().Foreground(theme.Subtle).Faint(true).Render("↪") + " "
 
-// wrapIndicatorPrefix returns a styled "↪ " string (dimmed arrow + plain space)
-// for use as a soft-wrap continuation indicator.
-func wrapIndicatorPrefix() string {
-	return cachedWrapIndicatorPrefix
-}
 
 // lineMap maps a visual (wrapped) row back to its logical source line and the
 // display-column offset within that line where the visual row begins.
@@ -327,22 +336,36 @@ func wrapLines(lines []string, width int) (wrapped []string, mapping []lineMap) 
 			continue
 		}
 
-		// Line needs wrapping: cut into segments of `width` display columns.
+		// Line needs wrapping: first segment at full width, continuation
+		// segments at contWidth (narrower to make room for ↪ prefix).
+		contWidth := width - wrapIndicatorWidth
+		if contWidth <= 0 {
+			contWidth = 1
+		}
 		var segs []string
-		var widths []int
-		for col := 0; col < lineWidth; col += width {
-			end := col + width
+		var segWidths []int
+		col := 0
+		for col < lineWidth {
+			var segW int
+			if col == 0 {
+				segW = width
+			} else {
+				segW = contWidth
+			}
+			end := col + segW
 			if end > lineWidth {
 				end = lineWidth
 			}
 			seg := ansi.Cut(line, col, end)
+			actualW := ansi.StringWidth(seg)
 			segs = append(segs, seg)
-			widths = append(widths, end-col)
+			segWidths = append(segWidths, actualW)
 			mapping = append(mapping, lineMap{logicalLine: i, colOffset: col})
+			col += actualW
 		}
 
 		// Add wrap indicator prefix to continuation rows.
-		prefixContinuationRows(segs, widths, wrapIndicatorPrefix(), wrapIndicatorWidth, false)
+		prefixContinuationRows(segs, segWidths, cachedWrapIndicatorPrefix, wrapIndicatorWidth, false)
 
 		wrapped = append(wrapped, segs...)
 	}
@@ -351,28 +374,19 @@ func wrapLines(lines []string, width int) (wrapped []string, mapping []lineMap) 
 }
 
 // prefixContinuationRows prepends prefix to continuation segments in place.
-// It modifies segs (and widths stays unchanged because the prefix replaces
-// leading display columns of equal width).
+// Segments are expected to already be split at the narrower continuation width,
+// so the prefix is simply prepended and widths are increased by prefixWidth.
 //
 // By default the first segment (index 0) is the original first row and is
 // skipped. When firstIsCont is true, all segments including index 0 are treated
 // as continuation rows.
-//
-// For each continuation segment: if its width is <= replaceWidth, the prefix is
-// simply prepended (the segment is too narrow to cut). Otherwise the leading
-// replaceWidth display columns are removed via ansi.Cut and the prefix is
-// prepended in their place.
-func prefixContinuationRows(segs []string, widths []int, prefix string, replaceWidth int, firstIsCont bool) {
+func prefixContinuationRows(segs []string, widths []int, prefix string, prefixWidth int, firstIsCont bool) {
 	start := 1
 	if firstIsCont {
 		start = 0
 	}
 	for i := start; i < len(segs); i++ {
-		if widths[i] <= replaceWidth {
-			segs[i] = prefix + segs[i]
-		} else {
-			tail := ansi.Cut(segs[i], replaceWidth, widths[i])
-			segs[i] = prefix + tail
-		}
+		segs[i] = prefix + segs[i]
+		widths[i] += prefixWidth
 	}
 }

@@ -74,6 +74,9 @@ type LogView struct {
 // search match when adjusting horizontal scroll.
 const hScrollPadding = 15
 
+// markerRe matches timestamp marker lines inserted by InsertMarker.
+var markerRe = regexp.MustCompile(`^--- \d{2}:\d{2}:\d{2} ---$`)
+
 // NewLogView creates a new log view with the given dimensions and ring buffer capacity.
 func NewLogView(width, height, bufCapacity int, defaultTimeRange string, defaultSinceSeconds int64) LogView {
 	var logVP logViewport
@@ -236,6 +239,23 @@ func (lv *LogView) updateViewport() {
 					})
 					wpIdx++
 				}
+				// Skip highlight injection for marker lines.
+				bufLineIdx := lineIdx
+				if hasIndicator && lv.scrollOffset == 0 {
+					bufLineIdx-- // adjust for indicator at window[0]
+				}
+				if bufLineIdx >= 0 {
+					var rawLine string
+					if lv.filterState.Active() {
+						rawLine = lv.buffer.RawGet(lv.filteredIndices[start+bufLineIdx] - lv.filteredIndexOffset)
+					} else {
+						rawLine = lv.buffer.RawGet(start + bufLineIdx)
+					}
+					if markerRe.MatchString(rawLine) {
+						continue
+					}
+				}
+
 				// Compute selectedInLine: which range within this line is selected.
 				selectedInLine := -1
 				if globalSelectedWP >= lineStart && globalSelectedWP < wpIdx {
@@ -253,7 +273,9 @@ func (lv *LogView) updateViewport() {
 }
 
 // wrapHeight returns the number of visual rows a line of the given display
-// width occupies when soft-wrapped to vpWidth columns.
+// width occupies when soft-wrapped. The first row is vpWidth columns wide;
+// continuation rows are vpWidth-wrapIndicatorWidth columns wide (to make
+// room for the ↪ prefix without losing content).
 func wrapHeight(displayWidth, vpWidth int) int {
 	if vpWidth <= 0 {
 		vpWidth = 1
@@ -261,7 +283,11 @@ func wrapHeight(displayWidth, vpWidth int) int {
 	if displayWidth <= vpWidth {
 		return 1
 	}
-	return (displayWidth + vpWidth - 1) / vpWidth // ceiling division
+	contWidth := vpWidth - wrapIndicatorWidth
+	if contWidth <= 0 {
+		contWidth = 1
+	}
+	return 1 + (displayWidth-vpWidth+contWidth-1)/contWidth
 }
 
 // recomputeTotalWrappedRows recalculates totalWrappedRows from scratch.
@@ -390,7 +416,22 @@ func (lv *LogView) updateViewportWrapped() {
 		}
 
 		// Bake search highlights for this single line if search is active.
-		if lv.searchState.Active() && len(lv.matchPositions) > 0 {
+		// Skip highlight injection for marker lines.
+		isMarker := false
+		if !(hasIndicator && di == 0) {
+			mBufIdx := di
+			if hasIndicator {
+				mBufIdx = di - 1
+			}
+			var rawLine string
+			if lv.filterState.Active() {
+				rawLine = lv.buffer.RawGet(lv.filteredIndices[mBufIdx] - lv.filteredIndexOffset)
+			} else {
+				rawLine = lv.buffer.RawGet(mBufIdx)
+			}
+			isMarker = markerRe.MatchString(rawLine)
+		}
+		if !isMarker && lv.searchState.Active() && len(lv.matchPositions) > 0 {
 			startIdx := sort.Search(len(lv.matchPositions), func(i int) bool {
 				return lv.matchPositions[i].line >= di
 			})
@@ -438,7 +479,9 @@ func (lv *LogView) updateViewportWrapped() {
 			if di == firstDisplayIdx {
 				startRow = vOffset
 			}
-			segs, segWidths := splitWrappedVisible(line, vpWidth, startRow, vpHeight-len(visRows))
+			contWidth := vpWidth - wrapIndicatorWidth
+			segs, segWidths := splitWrappedVisible(line, vpWidth, contWidth, startRow, vpHeight-len(visRows))
+			prefixContinuationRows(segs, segWidths, cachedWrapIndicatorPrefix, wrapIndicatorWidth, startRow > 0)
 			visRows = append(visRows, segs...)
 			visWidths = append(visWidths, segWidths...)
 		}
@@ -677,7 +720,7 @@ func (lv *LogView) ApplySearch(pattern string, mode msgs.SearchMode) error {
 		lv.filteredIndices = nil
 		if lv.filterState.Active() {
 			for i := range lv.buffer.Len() {
-				if lv.filterState.Re.MatchString(lv.buffer.RawGet(i)) {
+				if lv.filterState.Re.MatchString(lv.buffer.RawGet(i)) || markerRe.MatchString(lv.buffer.RawGet(i)) {
 					lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+i)
 				}
 			}
@@ -756,13 +799,17 @@ func (lv *LogView) ensureMatchVisible() {
 			} else {
 				w = lv.buffer.WidthGet(i)
 			}
-			if w <= vpWidth {
-				visualRow++
-			} else {
-				visualRow += (w + vpWidth - 1) / vpWidth
-			}
+			visualRow += wrapHeight(w, vpWidth)
 		}
-		visualRow += pos.colStart / vpWidth // add wrapped row offset within the line
+		// Add wrapped row offset within the line (first row is vpWidth wide,
+		// continuation rows are contWidth wide).
+		if pos.colStart >= vpWidth {
+			contWidth := vpWidth - wrapIndicatorWidth
+			if contWidth <= 0 {
+				contWidth = 1
+			}
+			visualRow += 1 + (pos.colStart-vpWidth)/contWidth
+		}
 
 		vpHeight := lv.viewportHeight()
 		if visualRow < lv.wrapYOffset {
@@ -925,7 +972,7 @@ func (lv *LogView) InsertMarker() {
 	if lv.softWrap && !lv.filterState.Active() {
 		lv.totalWrappedRows += wrapHeight(rawWidth, lv.logVP.width)
 	}
-	if lv.filterState.Active() && lv.filterState.Re.MatchString(raw) {
+	if lv.filterState.Active() {
 		lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+lv.buffer.Len()-1)
 		if lv.softWrap {
 			lv.recomputeTotalWrappedRows()

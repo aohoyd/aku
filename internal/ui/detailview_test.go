@@ -460,6 +460,50 @@ func TestDetailViewYAMLSearchHighlightPosition(t *testing.T) {
 	}
 }
 
+func TestDetailViewSearchHighlightPositionMultiByte(t *testing.T) {
+	// Verify that computeMatchPositions produces correct grapheme-column
+	// positions for content containing multi-byte UTF-8 characters.
+	// We enable softWrap so that reapplySearch populates matchPositions
+	// even for plain text content (the plain-text viewport path does not
+	// populate matchPositions).
+	dv := NewDetailView(80, 20)
+	dv.SetMode(msgs.DetailDescribe)
+
+	// Line with multi-byte characters: "prefix_\u4e16\u754c_target_end"
+	// \u4e16 and \u754c are CJK chars (each 3 bytes, 2 display columns).
+	// Byte layout: "prefix_" (7) + "\u4e16" (3) + "\u754c" (3) + "_target_end" (11) = 24 bytes
+	// Display cols: "prefix_" (7) + "\u4e16" (2) + "\u754c" (2) + "_target_end" (11) = 22 cols
+	// "target" starts at display col 7+2+2+1 = 12, ends at 12+6 = 18.
+	content := "prefix_\u4e16\u754c_target_end"
+	dv.SetContent(render.Content{Raw: content, Display: content}, true)
+	dv.ToggleWrap() // enable softWrap so matchPositions is populated
+
+	err := dv.ApplySearch("target", msgs.SearchModeSearch)
+	if err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+
+	if len(dv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(dv.matchPositions))
+	}
+
+	pos := dv.matchPositions[0]
+	if pos.line != 0 {
+		t.Fatalf("expected match on line 0, got %d", pos.line)
+	}
+	// "target" starts at grapheme-column 12 (7 ASCII + 2 CJK widths + 2 CJK widths + 1 underscore).
+	if pos.colStart != 12 || pos.colEnd != 18 {
+		t.Fatalf("expected cols [12,18], got [%d,%d]", pos.colStart, pos.colEnd)
+	}
+
+	// Verify by extracting from the raw line using ansi.Cut (display-column based).
+	rawLine := content
+	extracted := ansi.Strip(ansi.Cut(rawLine, pos.colStart, pos.colEnd))
+	if extracted != "target" {
+		t.Fatalf("ansi.Cut at match position should yield %q, got %q", "target", extracted)
+	}
+}
+
 func TestDetailViewYAMLSearchNavigation(t *testing.T) {
 	dv := NewDetailView(80, 20)
 	dv.SetMode(msgs.DetailYAML)
@@ -719,5 +763,206 @@ func TestDetailViewToggleHeaderDoubleToggle(t *testing.T) {
 	dv.ToggleHeader()
 	if !dv.ShowHeader() {
 		t.Fatal("ShowHeader should be true after second toggle")
+	}
+}
+
+func TestDetailViewWrapSearchCoordinate(t *testing.T) {
+	// Viewport width = 22-2 = 20, height = 6-2 = 4.
+	// With 4 visible rows and content that wraps, a match on a continuation
+	// row that is beyond the viewport must be scrolled into view.
+	dv := NewDetailView(22, 6)
+	dv.SetMode(msgs.DetailDescribe)
+
+	// Build content: 4 short lines (fill viewport), then one long line that
+	// wraps, containing the search term on the continuation row.
+	// Logical lines:
+	//   0: "line0"
+	//   1: "line1"
+	//   2: "line2"
+	//   3: "line3"
+	//   4: "abcdefghijklmnopqrstTARGEThere" (30 chars)
+	// With viewport width 20, line 4 wraps:
+	//   visual row 4: "abcdefghijklmnopqrst" (20 chars)
+	//   visual row 5: "↪ RGEThere" (colOffset=20, "TA" replaced by "↪ ")
+	// "TARGET" is at logical col 20-26 on line 4.
+	// On visual row 5: visualCol = 20-20=0..6-20=6 but colOffset>0 so clamp start to 2.
+	// Actually: colStart=20, colEnd=26, row colOffset=20
+	//   visualColStart = 20-20 = 0, visualColEnd = 26-20 = 6
+	//   Since colOffset>0 and colStart(0) < wrapIndicatorWidth(2), clamp to 2.
+	// So EnsureVisible(5, 2, 6).
+	content := "line0\nline1\nline2\nline3\nabcdefghijklmnopqrstTARGEThere"
+	dv.SetContent(render.Content{Raw: content, Display: content}, true)
+	dv.ToggleWrap()
+
+	err := dv.ApplySearch("TARGET", msgs.SearchModeSearch)
+	if err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+	if len(dv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(dv.matchPositions))
+	}
+
+	// Verify match is at logical line 4, cols 20-26.
+	pos := dv.matchPositions[0]
+	if pos.line != 4 || pos.colStart != 20 || pos.colEnd != 26 {
+		t.Fatalf("expected logical match at line=4 cols=[20,26], got line=%d cols=[%d,%d]",
+			pos.line, pos.colStart, pos.colEnd)
+	}
+
+	// SearchNext should scroll the viewport so that visual row 5 is visible.
+	dv.SearchNext()
+
+	// The viewport should have scrolled down — visual row 5 must be in view.
+	// With viewport height 4, if YOffset is e.g. 2, rows 2-5 are visible.
+	yOff := dv.viewport.YOffset()
+	vpHeight := dv.viewport.Height()
+	if yOff > 5 || yOff+vpHeight <= 5 {
+		t.Fatalf("after SearchNext, visual row 5 should be visible: YOffset=%d, Height=%d", yOff, vpHeight)
+	}
+}
+
+func TestDetailViewWrapSearchOnFirstSegment(t *testing.T) {
+	// Verify that a match on the first segment of a wrapped line (no indicator)
+	// is converted correctly.
+	dv := NewDetailView(22, 6)
+	dv.SetMode(msgs.DetailDescribe)
+
+	// Line 0: "TARGETabcdefghijklmnopqrstuvwx" (30 chars)
+	// Wraps at width 20:
+	//   visual row 0: "TARGETabcdefghijklmn" (colOffset=0)
+	//   visual row 1: "↪ rstuvwx"            (colOffset=20)
+	// "TARGET" at logical col 0-6, on visual row 0 col 0-6.
+	content := "TARGETabcdefghijklmnopqrstuvwx"
+	dv.SetContent(render.Content{Raw: content, Display: content}, true)
+	dv.ToggleWrap()
+
+	err := dv.ApplySearch("TARGET", msgs.SearchModeSearch)
+	if err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+	if len(dv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(dv.matchPositions))
+	}
+
+	// Verify logical coordinates.
+	pos := dv.matchPositions[0]
+	if pos.line != 0 || pos.colStart != 0 || pos.colEnd != 6 {
+		t.Fatalf("expected logical match at line=0 cols=[0,6], got line=%d cols=[%d,%d]",
+			pos.line, pos.colStart, pos.colEnd)
+	}
+
+	// logicalToVisual should map to visual row 0, cols 0-6 (no indicator).
+	vLine, vColStart, vColEnd := dv.logicalToVisual(pos)
+	if vLine != 0 || vColStart != 0 || vColEnd != 6 {
+		t.Fatalf("expected visual line=0 cols=[0,6], got line=%d cols=[%d,%d]",
+			vLine, vColStart, vColEnd)
+	}
+}
+
+func TestDetailViewWrapSearchBoundaryClamp(t *testing.T) {
+	// Edge case: match overlaps the wrap indicator region.
+	dv := NewDetailView(22, 6)
+	dv.SetMode(msgs.DetailDescribe)
+
+	// Line: "abcdefghijklmnopqrstTXyz..." (wraps at 20)
+	// "TX" starts at logical col 20. On continuation row (colOffset=20):
+	//   visualColStart = 20-20 = 0, but the first 2 cols are the "↪ " indicator.
+	//   logicalToVisual should clamp colStart to wrapIndicatorWidth (2).
+	content := "abcdefghijklmnopqrstTXyzabcdefghij"
+	dv.SetContent(render.Content{Raw: content, Display: content}, true)
+	dv.ToggleWrap()
+
+	err := dv.ApplySearch("TX", msgs.SearchModeSearch)
+	if err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+	if len(dv.matchPositions) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(dv.matchPositions))
+	}
+
+	pos := dv.matchPositions[0]
+	// Logical: line 0, cols 20-22
+	if pos.line != 0 || pos.colStart != 20 || pos.colEnd != 22 {
+		t.Fatalf("expected logical match at line=0 cols=[20,22], got line=%d cols=[%d,%d]",
+			pos.line, pos.colStart, pos.colEnd)
+	}
+
+	// logicalToVisual: continuation row has colOffset=20.
+	// visualColStart = 20-20 + wrapIndicatorWidth = 0 + 2 = 2.
+	// visualColEnd = 22-20 + wrapIndicatorWidth = 2 + 2 = 4.
+	vLine, vColStart, vColEnd := dv.logicalToVisual(pos)
+	if vColStart != wrapIndicatorWidth {
+		t.Fatalf("expected visual colStart=%d, got %d", wrapIndicatorWidth, vColStart)
+	}
+	if vColEnd != wrapIndicatorWidth+2 {
+		t.Fatalf("expected visual colEnd=%d, got %d", wrapIndicatorWidth+2, vColEnd)
+	}
+	// Visual row should be the continuation row (row 1 for single-line content).
+	if vLine != 1 {
+		t.Fatalf("expected visual line=1, got %d", vLine)
+	}
+}
+
+func TestDetailViewWrapSearchPrevNavigatesCorrectly(t *testing.T) {
+	// Verify SearchPrev also uses visual coordinates when wrapping.
+	dv := NewDetailView(22, 6)
+	dv.SetMode(msgs.DetailDescribe)
+
+	// Two matches: one on a short line visible at top, one on a wrapped
+	// continuation row below the viewport.
+	content := "MATCHline\nline1\nline2\nline3\nabcdefghijklmnopqrstMATCHhere"
+	dv.SetContent(render.Content{Raw: content, Display: content}, true)
+	dv.ToggleWrap()
+
+	err := dv.ApplySearch("MATCH", msgs.SearchModeSearch)
+	if err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+	if len(dv.matchPositions) != 2 {
+		t.Fatalf("expected 2 matches, got %d", len(dv.matchPositions))
+	}
+
+	// Navigate to second match (on wrapped continuation row).
+	dv.SearchNext() // matchIndex 0 -> 1
+	dv.SearchNext() // matchIndex 1 -> 0 (wraps around)
+
+	// Now SearchPrev should go to match 1 (the continuation row match).
+	dv.SearchPrev() // matchIndex 0 -> 1
+
+	// Visual row for second match should be visible.
+	yOff := dv.viewport.YOffset()
+	vpHeight := dv.viewport.Height()
+
+	// The second match is on logical line 4, col 20-25.
+	// With wrapping, line 4 wraps to visual rows 4 and 5.
+	// "MATCH" at logical col 20 is on visual row 5.
+	if yOff > 5 || yOff+vpHeight <= 5 {
+		t.Fatalf("after SearchPrev to wrapped match, visual row 5 should be visible: YOffset=%d, Height=%d",
+			yOff, vpHeight)
+	}
+}
+
+func TestDetailViewWrapSearchPlainTextBakesHighlights(t *testing.T) {
+	// When softWrap is active, even plain text (raw == display) should use
+	// baked highlights (matchPositions) rather than viewport.SetHighlights,
+	// because the viewport's highlight byte ranges don't align with wrapped content.
+	dv := NewDetailView(22, 10)
+	dv.SetMode(msgs.DetailDescribe)
+
+	content := "short\nabcdefghijklmnopqrstMATCHhere"
+	dv.SetContent(render.Content{Raw: content, Display: content}, true)
+	dv.ToggleWrap()
+
+	err := dv.ApplySearch("MATCH", msgs.SearchModeSearch)
+	if err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+
+	// With softWrap, matchPositions should be populated even for plain text.
+	if len(dv.matchPositions) == 0 {
+		t.Fatal("softWrap + plain text search should populate matchPositions")
+	}
+	if dv.matchIndex != 0 {
+		t.Fatalf("expected matchIndex=0, got %d", dv.matchIndex)
 	}
 }

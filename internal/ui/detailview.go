@@ -43,6 +43,8 @@ type DetailView struct {
 	matchIndex     int
 	inlineSearch   string
 	envResolved    bool
+	softWrap       bool
+	wrapMapping    []lineMap
 }
 
 // SetInlineSearch sets the inline search input text for rendering in the title.
@@ -134,17 +136,33 @@ func (d *DetailView) SetContent(content render.Content, refresh bool) {
 	d.reapplySearch()
 }
 
+// setViewportContent wraps content through wrapLines when softWrap is active,
+// then sets the result on the viewport. When softWrap is off, content is set
+// directly and the wrap mapping is cleared.
+func (d *DetailView) setViewportContent(content string) {
+	if d.softWrap {
+		lines := strings.Split(content, "\n")
+		wrapped, mapping := wrapLines(lines, d.viewport.Width())
+		d.wrapMapping = mapping
+		d.viewport.SetContent(strings.Join(wrapped, "\n"))
+	} else {
+		d.wrapMapping = nil
+		d.viewport.SetContent(content)
+	}
+}
+
 // ClearContent clears all content.
 func (d *DetailView) ClearContent() {
 	d.rawContent = ""
 	d.displayContent = ""
+	d.wrapMapping = nil
 	d.viewport.SetContent("")
 }
 
 // ScrollLeft scrolls the viewport left by hScrollStep columns.
 // No-op when soft-wrap is enabled.
 func (d *DetailView) ScrollLeft() {
-	if !d.viewport.SoftWrap {
+	if !d.softWrap {
 		d.viewport.ScrollLeft(hScrollStep)
 	}
 }
@@ -152,7 +170,7 @@ func (d *DetailView) ScrollLeft() {
 // ScrollRight scrolls the viewport right by hScrollStep columns.
 // No-op when soft-wrap is enabled.
 func (d *DetailView) ScrollRight() {
-	if !d.viewport.SoftWrap {
+	if !d.softWrap {
 		d.viewport.ScrollRight(hScrollStep)
 	}
 }
@@ -160,7 +178,7 @@ func (d *DetailView) ScrollRight() {
 // ScrollHome resets horizontal scroll to the beginning of the line.
 // No-op when soft-wrap is enabled.
 func (d *DetailView) ScrollHome() {
-	if !d.viewport.SoftWrap {
+	if !d.softWrap {
 		d.viewport.SetXOffset(0)
 	}
 }
@@ -168,7 +186,7 @@ func (d *DetailView) ScrollHome() {
 // ScrollEnd scrolls horizontally to show the end of the longest visible line.
 // No-op when soft-wrap is enabled.
 func (d *DetailView) ScrollEnd() {
-	if !d.viewport.SoftWrap {
+	if !d.softWrap {
 		content := d.viewport.GetContent()
 		lines := strings.Split(content, "\n")
 		yOff := d.viewport.YOffset()
@@ -210,13 +228,17 @@ func (d *DetailView) ScrollUp() { d.viewport.ScrollUp(1) }
 // ScrollDown scrolls the viewport down by one line.
 func (d *DetailView) ScrollDown() { d.viewport.ScrollDown(1) }
 
-// ToggleWrap toggles soft-wrap on the viewport. When enabling wrap,
-// the horizontal offset is reset since horizontal scroll is a no-op.
+// ToggleWrap toggles soft-wrap mode. When enabling wrap, content is pre-wrapped
+// via wrapLines so that continuation rows receive the "↪ " indicator. The
+// viewport's own SoftWrap is never used — we handle wrapping ourselves.
+// When enabling wrap, the horizontal offset is reset since horizontal scroll
+// is a no-op.
 func (d *DetailView) ToggleWrap() {
-	d.viewport.SoftWrap = !d.viewport.SoftWrap
-	if d.viewport.SoftWrap {
+	d.softWrap = !d.softWrap
+	if d.softWrap {
 		d.viewport.SetXOffset(0)
 	}
+	d.reapplySearch()
 }
 
 // ToggleHeader flips the header visibility and recalculates the viewport size.
@@ -264,6 +286,9 @@ func (d *DetailView) SetSize(w, h int) {
 	} else {
 		d.viewport.SetWidth(w - 2)
 		d.viewport.SetHeight(h - 2)
+	}
+	if d.softWrap {
+		d.reapplySearch()
 	}
 }
 
@@ -374,6 +399,35 @@ func (d DetailView) AnyActive() bool {
 	return d.searchState.Active() || d.filterState.Active()
 }
 
+// logicalToVisual converts a logical match position to visual (wrapped)
+// coordinates using d.wrapMapping. It finds the last visual row whose
+// logicalLine matches and whose colOffset is <= the match start column,
+// then adjusts the column range by subtracting that row's colOffset.
+// On continuation rows, columns are shifted right by wrapIndicatorWidth
+// to account for the prepended ↪ prefix.
+func (d *DetailView) logicalToVisual(pos matchPosition) (line, colStart, colEnd int) {
+	bestRow := -1
+	for row, m := range d.wrapMapping {
+		if m.logicalLine == pos.line && m.colOffset <= pos.colStart {
+			bestRow = row
+		} else if m.logicalLine > pos.line {
+			break
+		}
+	}
+	if bestRow < 0 {
+		// Fallback: return logical coordinates unchanged.
+		return pos.line, pos.colStart, pos.colEnd
+	}
+	colStart = pos.colStart - d.wrapMapping[bestRow].colOffset
+	colEnd = pos.colEnd - d.wrapMapping[bestRow].colOffset
+	// Continuation rows have ↪ prepended — shift visual position right.
+	if d.wrapMapping[bestRow].colOffset > 0 {
+		colStart += wrapIndicatorWidth
+		colEnd += wrapIndicatorWidth
+	}
+	return bestRow, colStart, colEnd
+}
+
 // SearchNext navigates to the next search match.
 func (d *DetailView) SearchNext() {
 	if !d.searchState.Active() {
@@ -383,7 +437,12 @@ func (d *DetailView) SearchNext() {
 		d.matchIndex = (d.matchIndex + 1) % len(d.matchPositions)
 		d.rebuildHighlightedDisplay()
 		pos := d.matchPositions[d.matchIndex]
-		d.viewport.EnsureVisible(pos.line, pos.colStart, pos.colEnd)
+		if d.softWrap && d.wrapMapping != nil {
+			vLine, vColStart, vColEnd := d.logicalToVisual(pos)
+			d.viewport.EnsureVisible(vLine, vColStart, vColEnd)
+		} else {
+			d.viewport.EnsureVisible(pos.line, pos.colStart, pos.colEnd)
+		}
 	} else {
 		d.viewport.HighlightNext()
 	}
@@ -401,7 +460,12 @@ func (d *DetailView) SearchPrev() {
 		}
 		d.rebuildHighlightedDisplay()
 		pos := d.matchPositions[d.matchIndex]
-		d.viewport.EnsureVisible(pos.line, pos.colStart, pos.colEnd)
+		if d.softWrap && d.wrapMapping != nil {
+			vLine, vColStart, vColEnd := d.logicalToVisual(pos)
+			d.viewport.EnsureVisible(vLine, vColStart, vColEnd)
+		} else {
+			d.viewport.EnsureVisible(pos.line, pos.colStart, pos.colEnd)
+		}
 	} else {
 		d.viewport.HighlightPrevious()
 	}
@@ -423,23 +487,24 @@ func (d *DetailView) reapplySearch() {
 	d.matchIndex = -1
 
 	if !d.searchState.Active() {
-		d.viewport.SetContent(displayForViewport)
+		d.setViewportContent(displayForViewport)
 		return
 	}
 
 	rawMatches := d.searchState.Re.FindAllStringIndex(rawForSearch, -1)
 
-	if rawForSearch == displayForViewport {
-		// Plain text (Describe/Logs): viewport handles highlighting correctly.
-		d.viewport.SetContent(displayForViewport)
+	// When soft-wrap is off AND content is plain text (no ANSI), the
+	// viewport's built-in highlight machinery works correctly.
+	if !d.softWrap && rawForSearch == displayForViewport {
+		d.setViewportContent(displayForViewport)
 		d.viewport.SetHighlights(rawMatches)
 		return
 	}
 
-	// ANSI-colored content (YAML): the viewport's parseMatches cannot handle
-	// ANSI content correctly (it tracks byte positions in stripped text but
-	// checks newlines in the original ANSI content). Bake highlights into the
-	// display text ourselves using lipgloss.StyleRanges.
+	// Otherwise (soft-wrap active OR ANSI-colored content), bake highlights
+	// into the display text ourselves. The viewport's parseMatches cannot
+	// handle ANSI content correctly, and its byte ranges don't align with
+	// wrapped line positions.
 	positions := computeMatchPositions(rawForSearch, rawMatches)
 	d.matchPositions = positions
 	if len(positions) > 0 {
@@ -449,7 +514,7 @@ func (d *DetailView) reapplySearch() {
 		displayForViewport, positions, d.matchIndex,
 		d.viewport.HighlightStyle, d.viewport.SelectedHighlightStyle,
 	)
-	d.viewport.SetContent(highlighted)
+	d.setViewportContent(highlighted)
 }
 
 // rebuildHighlightedDisplay re-applies highlights with the current matchIndex,
@@ -467,7 +532,7 @@ func (d *DetailView) rebuildHighlightedDisplay() {
 		displayBase, d.matchPositions, d.matchIndex,
 		d.viewport.HighlightStyle, d.viewport.SelectedHighlightStyle,
 	)
-	d.viewport.SetContent(highlighted)
+	d.setViewportContent(highlighted)
 	d.viewport.SetYOffset(y)
 	d.viewport.SetXOffset(x)
 }

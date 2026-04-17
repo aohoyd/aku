@@ -934,10 +934,10 @@ func TestLogView_InsertMarkerNonMatchingFilter(t *testing.T) {
 	}
 
 	// Insert a marker — its text "--- HH:MM:SS ---" does NOT match "ERROR",
-	// so it should NOT appear in the filtered view.
+	// but markers are ALWAYS included in the filtered view for visibility.
 	lv.InsertMarker()
-	if len(lv.filteredIndices) != 1 {
-		t.Fatalf("expected 1 filtered line (marker should not match 'ERROR'), got %d", len(lv.filteredIndices))
+	if len(lv.filteredIndices) != 2 {
+		t.Fatalf("expected 2 filtered lines (1 ERROR match + 1 marker always visible), got %d", len(lv.filteredIndices))
 	}
 }
 
@@ -955,11 +955,30 @@ func TestLogView_InsertMarkerMatchingFilter(t *testing.T) {
 		t.Fatalf("expected 1 filtered line before marker, got %d", len(lv.filteredIndices))
 	}
 
-	// Insert a marker — its text "--- HH:MM:SS ---" matches "---",
-	// so it should appear in the filtered view.
+	// Insert a marker — markers are ALWAYS included in the filtered view
+	// regardless of whether their text matches the filter pattern.
 	lv.InsertMarker()
 	if len(lv.filteredIndices) != 2 {
-		t.Fatalf("expected 2 filtered lines (1 match + 1 marker matching '---'), got %d", len(lv.filteredIndices))
+		t.Fatalf("expected 2 filtered lines (1 match + 1 marker always visible), got %d", len(lv.filteredIndices))
+	}
+}
+
+func TestLogView_ApplySearchPreservesExistingMarkers(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.AppendLine("ERROR: something broke")
+	lv.AppendLine("INFO: all good")
+
+	// Insert a marker before applying the filter
+	lv.InsertMarker()
+
+	// Apply a filter for ERROR — the marker text does NOT match "ERROR",
+	// but markers are ALWAYS included in the filtered view.
+	if err := lv.ApplySearch("ERROR", msgs.SearchModeFilter); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+	// Expect 2 entries: 1 ERROR line + 1 marker (always visible)
+	if len(lv.filteredIndices) != 2 {
+		t.Fatalf("expected 2 filtered entries (1 ERROR match + 1 marker always visible), got %d", len(lv.filteredIndices))
 	}
 }
 
@@ -1845,33 +1864,34 @@ func TestLogView_ApplySearchEmptyFilterNoPanic(t *testing.T) {
 }
 
 func TestLogView_WrappedVOffsetSkipFirstLine(t *testing.T) {
-	// A long line (500 ASCII chars) at vpWidth=10 produces 50 wrapped rows.
-	// Scroll to the middle (wrapYOffset=25) and verify the visible segments
-	// show the correct content starting from the 26th row (0-indexed row 25).
+	// A long line at vpWidth=10 (contWidth=8) wraps into multiple rows.
+	// Scroll to the middle and verify the visible segments show correct content.
 	const vpWidth = 10
+	const contWidth = vpWidth - wrapIndicatorWidth // 8
 	// LogView border takes 2 from each dimension, so inner width = vpWidth.
 	lv := NewLogView(vpWidth+2, 12, 100, "15m", 900) // inner: 10 wide, 10 tall
 	lv.softWrap = true
 	lv.autoscroll = false
 	lv.ToggleSyntax() // disable syntax highlighting for predictable text
 
-	// Build a 500-char line using a repeating pattern so each segment is identifiable.
-	// Each group of 10 chars: "rNN_XXXXXX" where NN is the row number (00-49).
+	// Build a long line with identifiable content. Use alphabetic markers
+	// at predictable offsets so we can verify which portion is displayed.
+	// Row 0 holds 10 chars, each continuation row holds 8 chars.
+	// We need enough content to produce many rows.
+	// Total chars for N rows: 10 + (N-1)*8. For 63 rows: 10 + 62*8 = 506.
 	var sb strings.Builder
-	for row := range 50 {
-		sb.WriteString(fmt.Sprintf("r%02d_%06d", row, row))
+	for i := range 506 {
+		sb.WriteByte('A' + byte(i%26))
 	}
 	longLine := sb.String()
-	if len(longLine) != 500 {
-		t.Fatalf("expected 500 chars, got %d", len(longLine))
-	}
 
 	lv.AppendLine(longLine)
 
-	// Verify the line wraps to 50 rows.
+	// Verify the line wraps to the expected number of rows.
 	w := lv.buffer.WidthGet(0)
-	if wh := wrapHeight(w, vpWidth); wh != 50 {
-		t.Fatalf("expected 50 wrapped rows, got %d (width=%d, vpWidth=%d)", wh, w, vpWidth)
+	expectedRows := wrapHeight(w, vpWidth)
+	if expectedRows != 63 {
+		t.Fatalf("expected 63 wrapped rows, got %d (width=%d, vpWidth=%d)", expectedRows, w, vpWidth)
 	}
 
 	// Scroll to the middle: wrapYOffset=25 means we skip 25 visual rows.
@@ -1886,30 +1906,118 @@ func TestLogView_WrappedVOffsetSkipFirstLine(t *testing.T) {
 		t.Fatalf("expected at most %d lines, got %d", vpHeight, len(lines))
 	}
 
-	// The first visible segment should start with "r25_" (the 26th row, 0-indexed).
+	// All visible segments are continuation rows (startRow > 0) so each has
+	// the "↪ " prefix prepended.
+
+	// Row 0: chars 0-9 (10 chars). Row k (k>=1): chars 10+(k-1)*8 .. 10+k*8-1.
+	// Row 25: chars 10 + 24*8 = 202 .. 209.
+	expectedStartChar := 10 + 24*contWidth // 202
+	expectedContent := longLine[expectedStartChar : expectedStartChar+contWidth]
+
 	firstStripped := ansi.Strip(lines[0])
-	if !strings.HasPrefix(firstStripped, "r25_") {
-		t.Fatalf("expected first visible segment to start with 'r25_', got %q", firstStripped)
+	if !strings.HasPrefix(firstStripped, "↪ ") {
+		t.Fatalf("expected first visible segment to start with '↪ ', got %q", firstStripped)
+	}
+	// Content after prefix should be the 8 chars from the original line.
+	firstContent := firstStripped[len("↪ "):]
+	if firstContent != expectedContent {
+		t.Fatalf("expected first visible content %q, got %q", expectedContent, firstContent)
 	}
 
-	// The second visible segment should start with "r26_".
+	// Verify the second visible segment comes from row 26.
 	if len(lines) > 1 {
 		secondStripped := ansi.Strip(lines[1])
-		if !strings.HasPrefix(secondStripped, "r26_") {
-			t.Fatalf("expected second visible segment to start with 'r26_', got %q", secondStripped)
+		if !strings.HasPrefix(secondStripped, "↪ ") {
+			t.Fatalf("expected second visible segment to start with '↪ ', got %q", secondStripped)
+		}
+		expectedStart2 := expectedStartChar + contWidth
+		expectedContent2 := longLine[expectedStart2 : expectedStart2+contWidth]
+		secondContent := secondStripped[len("↪ "):]
+		if secondContent != expectedContent2 {
+			t.Fatalf("expected second visible content %q, got %q", expectedContent2, secondContent)
 		}
 	}
 
-	// Verify the last visible row. With vpHeight=10 and startRow=25, we should
-	// see rows 25..34 (10 rows).
-	expectedLastRow := 25 + vpHeight - 1
-	if expectedLastRow > 49 {
-		expectedLastRow = 49
+	// Verify the last visible row.
+	lastRow := 25 + vpHeight - 1
+	if lastRow >= expectedRows {
+		lastRow = expectedRows - 1
 	}
 	lastStripped := ansi.Strip(lines[len(lines)-1])
-	expectedPrefix := fmt.Sprintf("r%02d_", expectedLastRow)
-	if !strings.HasPrefix(lastStripped, expectedPrefix) {
-		t.Fatalf("expected last visible segment to start with %q, got %q", expectedPrefix, lastStripped)
+	if !strings.HasPrefix(lastStripped, "↪ ") {
+		t.Fatalf("expected last visible segment to start with '↪ ', got %q", lastStripped)
+	}
+	lastStartChar := 10 + (lastRow-1)*contWidth
+	lastEndChar := lastStartChar + contWidth
+	if lastEndChar > len(longLine) {
+		lastEndChar = len(longLine)
+	}
+	expectedLastContent := longLine[lastStartChar:lastEndChar]
+	lastContent := lastStripped[len("↪ "):]
+	if lastContent != expectedLastContent {
+		t.Fatalf("expected last visible content %q, got %q", expectedLastContent, lastContent)
+	}
+}
+
+func TestLogView_WrapContinuationIndicator(t *testing.T) {
+	// Append a long line that wraps, enable wrap, and verify that
+	// continuation rows in logVP.lines contain the "↪" indicator
+	// while the first row does not. Also verify actual row widths.
+	const vpWidth = 20
+	contWidth := vpWidth - wrapIndicatorWidth // 18
+	lv := NewLogView(vpWidth+2, 12, 100, "15m", 900) // inner: 20 wide, 10 tall
+	lv.softWrap = true
+	lv.autoscroll = true
+	lv.ToggleSyntax() // disable syntax highlighting for predictable text
+
+	// 60 chars wraps: row 0 = 20, row 1 = 18+2(indicator) = 20, row 2 = 18+2 = 20,
+	// row 3 = remaining 4 + 2(indicator) = 6.
+	longLine := strings.Repeat("A", 60)
+	lv.AppendLine(longLine)
+
+	lines := lv.logVP.lines
+	// Expected rows: row 0 (20 chars), then continuation rows of 18 content chars each.
+	// 60 - 20 = 40 remaining, 40/18 = 2 full + 4 leftover => 4 rows total.
+	if len(lines) < 4 {
+		t.Fatalf("expected at least 4 wrapped rows, got %d", len(lines))
+	}
+
+	// First row should NOT have the continuation indicator and should be vpWidth wide.
+	firstStripped := ansi.Strip(lines[0])
+	if strings.Contains(firstStripped, "↪") {
+		t.Fatalf("first row should not contain ↪, got %q", firstStripped)
+	}
+	firstW := ansi.StringWidth(lines[0])
+	if firstW != vpWidth {
+		t.Fatalf("first row width = %d, want %d (vpWidth)", firstW, vpWidth)
+	}
+
+	// Continuation rows (index 1+) should start with "↪ " and have correct widths.
+	for i := 1; i < len(lines); i++ {
+		stripped := ansi.Strip(lines[i])
+		if !strings.HasPrefix(stripped, "↪ ") {
+			t.Fatalf("continuation row %d should start with '↪ ', got %q", i, stripped)
+		}
+		rowW := ansi.StringWidth(lines[i])
+		// Content after removing the indicator prefix.
+		contentPart := stripped[len("↪ "):]
+		contentW := ansi.StringWidth(contentPart)
+		// Full continuation rows should have contWidth content columns.
+		// The last row may be shorter.
+		if i < len(lines)-1 {
+			if contentW != contWidth {
+				t.Fatalf("continuation row %d content width = %d, want %d (contWidth)", i, contentW, contWidth)
+			}
+			if rowW != vpWidth {
+				t.Fatalf("continuation row %d total width = %d, want %d (vpWidth)", i, rowW, vpWidth)
+			}
+		} else {
+			// Last row: content width should be the remainder.
+			remaining := 60 - vpWidth - contWidth*(len(lines)-2)
+			if contentW != remaining {
+				t.Fatalf("last continuation row content width = %d, want %d", contentW, remaining)
+			}
+		}
 	}
 }
 
