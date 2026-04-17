@@ -1191,7 +1191,7 @@ func TestLogView_SearchUsesStrippedColoredLines(t *testing.T) {
 	// Verify match position corresponds to the visible (stripped colored) text.
 	pos := lv.matchPositions[0]
 	visible := ansi.Strip(lv.buffer.ColoredGet(0))
-	matched := visible[pos.colStart:pos.colEnd]
+	matched := ansi.Strip(ansi.Cut(visible, pos.colStart, pos.colEnd))
 	if matched != "connection" {
 		t.Fatalf("expected matched text 'connection', got %q (colStart=%d, colEnd=%d)",
 			matched, pos.colStart, pos.colEnd)
@@ -1239,7 +1239,7 @@ func TestLogView_SearchHighlightsCorrectlyInJSON(t *testing.T) {
 
 	// The match position must point to "Accept" in the visible (display) text.
 	pos := lv.matchPositions[0]
-	matched := visible[pos.colStart:pos.colEnd]
+	matched := ansi.Strip(ansi.Cut(visible, pos.colStart, pos.colEnd))
 	if !strings.EqualFold(matched, "accept") {
 		t.Fatalf("expected highlight on 'Accept', got %q at cols [%d:%d]\n  visible: %q",
 			matched, pos.colStart, pos.colEnd, visible)

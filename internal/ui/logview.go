@@ -398,8 +398,9 @@ func (lv *LogView) updateViewportWrapped() {
 		var line string
 		var w int
 		// bufIdx maps display index to buffer/filter index (shifted by 1 when indicator row is present).
+		// Only meaningful when di != 0 or hasIndicator is false (i.e., not the indicator row).
 		bufIdx := di
-		if hasIndicator {
+		if hasIndicator && di > 0 {
 			bufIdx = di - 1
 		}
 		if hasIndicator && di == 0 {
