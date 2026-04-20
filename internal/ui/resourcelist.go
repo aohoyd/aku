@@ -448,12 +448,11 @@ func (r *ResourceList) ParentContext() string {
 	return ""
 }
 
-// ParentSnap returns a pointer to the top nav snapshot, or nil if not in drill-down.
-func (r *ResourceList) ParentSnap() *NavSnapshot {
-	if snap, ok := r.navStack.Peek(); ok {
-		return &snap
-	}
-	return nil
+// ParentSnap returns a value copy of the top nav snapshot and an ok flag.
+// The returned snapshot is a one-time copy — callers that mutate the nav
+// stack (PushNav/PopNav) must re-fetch to see the new top.
+func (r *ResourceList) ParentSnap() (NavSnapshot, bool) {
+	return r.navStack.Peek()
 }
 
 // NavStackHasGVR reports whether this pane's nav stack contains a snapshot

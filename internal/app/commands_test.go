@@ -1682,9 +1682,9 @@ func TestEnterDetailDrillDownSetsParentUID(t *testing.T) {
 	if focused.ParentContext() != "po/pod-1" {
 		t.Fatalf("expected parentContext 'po/pod-1', got %q", focused.ParentContext())
 	}
-	if snap := focused.ParentSnap(); snap == nil || snap.ParentUID != "pod-uid-abc" {
+	if snap, ok := focused.ParentSnap(); !ok || snap.ParentUID != "pod-uid-abc" {
 		uid := ""
-		if snap != nil {
+		if ok {
 			uid = snap.ParentUID
 		}
 		t.Fatalf("expected parentUID 'pod-uid-abc', got %q", uid)
@@ -1738,9 +1738,9 @@ func TestClearOverlayMultiLevelPreservesParentContext(t *testing.T) {
 	if focused.ParentContext() != "de/nginx-deploy" {
 		t.Fatalf("expected parentContext 'de/nginx-deploy' after pop to RS, got %q", focused.ParentContext())
 	}
-	if snap := focused.ParentSnap(); snap == nil || snap.ParentUID != "deploy-uid-123" {
+	if snap, ok := focused.ParentSnap(); !ok || snap.ParentUID != "deploy-uid-123" {
 		uid := ""
-		if snap != nil {
+		if ok {
 			uid = snap.ParentUID
 		}
 		t.Fatalf("expected parentUID 'deploy-uid-123' after pop to RS, got %q", uid)

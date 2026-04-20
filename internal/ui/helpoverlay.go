@@ -44,6 +44,27 @@ func (h *HelpOverlay) SetSize(w, height int) {
 	h.height = height
 }
 
+// ScrollForTest returns the current scroll offset. Test-only accessor; the
+// production View/Update paths consult the unexported field directly.
+func (h HelpOverlay) ScrollForTest() int { return h.scroll }
+
+// ScrollWheel nudges the help overlay's vertical scroll by one line in
+// response to a mouse wheel event. Up/down mirror the j/k/arrow keybindings.
+// Left/right wheel and any other button are dropped.
+func (h *HelpOverlay) ScrollWheel(btn tea.MouseButton) {
+	switch btn {
+	case tea.MouseWheelUp:
+		if h.scroll > 0 {
+			h.scroll--
+		}
+	case tea.MouseWheelDown:
+		h.scroll++
+		if max := h.maxScroll(); h.scroll > max {
+			h.scroll = max
+		}
+	}
+}
+
 // Update handles key events for the help overlay.
 func (h HelpOverlay) Update(msg tea.Msg) (HelpOverlay, tea.Cmd) {
 	switch msg := msg.(type) {

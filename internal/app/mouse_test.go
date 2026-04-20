@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/aohoyd/aku/internal/config"
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
@@ -1184,14 +1185,15 @@ func TestDoubleClickAtExactly500msFires(t *testing.T) {
 }
 
 // TestMouseWheelInsideNonScrollableOverlayIsNoOp verifies wheel events inside
-// the rect of an overlay that does not have a ScrollWheel handler (help,
-// confirm) are silently dropped without panic.
+// the rect of a text-input overlay (confirm, port-forward, etc.) are silently
+// dropped without panic and without touching the background splits. These
+// overlays intentionally swallow wheel — they have no scrollable content.
 func TestMouseWheelInsideNonScrollableOverlayIsNoOp(t *testing.T) {
 	app := makeWheelApp(t)
 
-	// Open the help overlay (no ScrollWheel support).
-	app.activeOverlay = overlayHelp
-	app.helpOverlay.Open(nil)
+	// Open the confirm dialog: a single-screen prompt with no scroll.
+	app.activeOverlay = overlayConfirm
+	app.confirmDialog = ui.NewConfirmDialog("proceed?", app.width)
 	_ = app.View()
 
 	rect := app.OverlayRect()
@@ -1210,6 +1212,44 @@ func TestMouseWheelInsideNonScrollableOverlayIsNoOp(t *testing.T) {
 	if app.layout.SplitAt(0).Cursor() != splitBefore {
 		t.Fatalf("wheel on non-scrollable overlay must not move split cursor")
 	}
+}
+
+// TestMouseWheelInsideHelpOverlayScrollsHelp verifies that wheel events
+// inside the help overlay advance its scroll offset (mirrors j/k behavior).
+func TestMouseWheelInsideHelpOverlayScrollsHelp(t *testing.T) {
+	app := makeWheelApp(t)
+
+	// Open help with enough hints to force scrolling in the overlay.
+	hints := make([]config.KeyHint, 0, 30)
+	for range 30 {
+		hints = append(hints, config.KeyHint{Key: "k", Help: "move"})
+	}
+	app.activeOverlay = overlayHelp
+	// Shrink the terminal a bit so maxScroll > 0 even with generous screen.
+	app = sendWindowSize(app, 80, 14)
+	app.helpOverlay.Open([]config.HintGroup{{Scope: "Big", Hints: hints}})
+	_ = app.View()
+
+	rect := app.OverlayRect()
+	if rect.W == 0 || rect.H == 0 {
+		t.Fatalf("expected non-zero overlay rect, got %+v", rect)
+	}
+
+	scrollBefore := app.helpOverlay.ScrollForTest()
+	model, _ := app.update(tea.MouseWheelMsg{
+		X:      rect.X + rect.W/2,
+		Y:      rect.Y + rect.H/2,
+		Button: tea.MouseWheelDown,
+	})
+	app = model.(App)
+
+	if after := app.helpOverlay.ScrollForTest(); after != scrollBefore+1 {
+		t.Fatalf("expected help scroll to advance from %d to %d, got %d",
+			scrollBefore, scrollBefore+1, after)
+	}
+
+	// Splits must be untouched.
+	// (Wheel was routed to the overlay, not to PaneAt().)
 }
 
 // TestViewMouseModeDisabled verifies View() emits MouseModeNone when

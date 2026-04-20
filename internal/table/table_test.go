@@ -476,3 +476,30 @@ func makeRows(n int) []Row {
 	}
 	return rows
 }
+
+// TestRenderRowWithMoreCellsThanColumns confirms renderRow does not panic
+// when a plugin supplies a row with more cells than declared columns. The
+// extra cells are silently dropped.
+func TestRenderRowWithMoreCellsThanColumns(t *testing.T) {
+	m := New(
+		WithColumns([]Column{
+			{Title: "A", Width: 4},
+			{Title: "B", Width: 4},
+		}),
+		WithRows([]Row{
+			{"a1", "b1", "extra", "another"},
+		}),
+	)
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("renderRow panicked on overflow row: %v", r)
+		}
+	}()
+
+	// Exercise View() which calls renderRow for each row.
+	out := m.View()
+	if len(out) == 0 {
+		t.Fatal("expected non-empty render output")
+	}
+}

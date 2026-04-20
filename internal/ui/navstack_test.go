@@ -108,9 +108,9 @@ func TestResourceListPushPopParentContext(t *testing.T) {
 	if rl.ParentContext() != "de/nginx" {
 		t.Fatalf("expected parentContext 'de/nginx', got %q", rl.ParentContext())
 	}
-	if snap := rl.ParentSnap(); snap == nil || snap.ParentUID != "d-uid" {
+	if snap, ok := rl.ParentSnap(); !ok || snap.ParentUID != "d-uid" {
 		uid := ""
-		if snap != nil {
+		if ok {
 			uid = snap.ParentUID
 		}
 		t.Fatalf("expected parentUID 'd-uid', got %q", uid)
@@ -125,9 +125,9 @@ func TestResourceListPushPopParentContext(t *testing.T) {
 	if rl.ParentContext() != "re/rs-1" {
 		t.Fatalf("expected parentContext 're/rs-1', got %q", rl.ParentContext())
 	}
-	if snap := rl.ParentSnap(); snap == nil || snap.ParentUID != "rs-uid" {
+	if snap, ok := rl.ParentSnap(); !ok || snap.ParentUID != "rs-uid" {
 		uid := ""
-		if snap != nil {
+		if ok {
 			uid = snap.ParentUID
 		}
 		t.Fatalf("expected parentUID 'rs-uid', got %q", uid)
@@ -138,9 +138,9 @@ func TestResourceListPushPopParentContext(t *testing.T) {
 	if rl.ParentContext() != "de/nginx" {
 		t.Fatalf("expected parentContext 'de/nginx' after pop, got %q", rl.ParentContext())
 	}
-	if snap := rl.ParentSnap(); snap == nil || snap.ParentUID != "d-uid" {
+	if snap, ok := rl.ParentSnap(); !ok || snap.ParentUID != "d-uid" {
 		uid := ""
-		if snap != nil {
+		if ok {
 			uid = snap.ParentUID
 		}
 		t.Fatalf("expected parentUID 'd-uid' after pop, got %q", uid)
@@ -154,8 +154,8 @@ func TestResourceListPushPopParentContext(t *testing.T) {
 	if rl.ParentContext() != "" {
 		t.Fatalf("expected empty parentContext at root, got %q", rl.ParentContext())
 	}
-	if snap := rl.ParentSnap(); snap != nil {
-		t.Fatalf("expected nil ParentSnap at root, got %+v", snap)
+	if snap, ok := rl.ParentSnap(); ok {
+		t.Fatalf("expected no ParentSnap at root, got %+v", snap)
 	}
 	if rl.Plugin().Name() != "deployments" {
 		t.Fatalf("expected plugin 'deployments' at root, got %q", rl.Plugin().Name())

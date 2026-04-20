@@ -570,6 +570,63 @@ func TestComputeMatchPositions(t *testing.T) {
 	}
 }
 
+func TestComputeMatchPositionsMultiLineMatch(t *testing.T) {
+	// Simulate a (?s)-style cross-line match (e.g. "foo.*bar" with DotAll, or
+	// an explicit "\n" in the pattern). The match spans from byte 4 ("foo"
+	// end position 4) in line 0 all the way to byte 11 (past "bar" on line 1).
+	// Expect one matchPosition per line the match touches.
+	//
+	// Raw layout:
+	//   line 0: "prefoo"  (bytes 0..6)
+	//   line 1: "bar_end"  (bytes 7..14)
+	// Match: start=3 (f of "foo"), end=10 (after "bar").
+	raw := "prefoo\nbar_end"
+	matches := [][]int{{3, 10}}
+
+	positions := computeMatchPositions(raw, matches)
+	if len(positions) != 2 {
+		t.Fatalf("expected 2 positions for cross-line match, got %d", len(positions))
+	}
+
+	// First segment: line 0, colStart=3 ("pre"|"foo"), colEnd=6 (end of line).
+	if positions[0].line != 0 || positions[0].colStart != 3 || positions[0].colEnd != 6 {
+		t.Fatalf("segment 0: expected line=0 cols=[3,6], got line=%d cols=[%d,%d]",
+			positions[0].line, positions[0].colStart, positions[0].colEnd)
+	}
+	// Second segment: line 1, colStart=0, colEnd=3 ("bar").
+	if positions[1].line != 1 || positions[1].colStart != 0 || positions[1].colEnd != 3 {
+		t.Fatalf("segment 1: expected line=1 cols=[0,3], got line=%d cols=[%d,%d]",
+			positions[1].line, positions[1].colStart, positions[1].colEnd)
+	}
+}
+
+func TestComputeMatchPositionsMultiLineMatchSpansThreeLines(t *testing.T) {
+	// Match that spans three lines entirely consumes the middle line.
+	//   line 0: "aaa"  (bytes 0..3)
+	//   line 1: "bbb"  (bytes 4..7)
+	//   line 2: "ccc"  (bytes 8..11)
+	// Match: start=1 (second 'a'), end=10 (second 'c', inclusive up to col 2).
+	raw := "aaa\nbbb\nccc"
+	matches := [][]int{{1, 10}}
+
+	positions := computeMatchPositions(raw, matches)
+	if len(positions) != 3 {
+		t.Fatalf("expected 3 positions for 3-line match, got %d", len(positions))
+	}
+	if positions[0].line != 0 || positions[0].colStart != 1 || positions[0].colEnd != 3 {
+		t.Fatalf("segment 0: expected line=0 cols=[1,3], got line=%d cols=[%d,%d]",
+			positions[0].line, positions[0].colStart, positions[0].colEnd)
+	}
+	if positions[1].line != 1 || positions[1].colStart != 0 || positions[1].colEnd != 3 {
+		t.Fatalf("segment 1: expected line=1 cols=[0,3], got line=%d cols=[%d,%d]",
+			positions[1].line, positions[1].colStart, positions[1].colEnd)
+	}
+	if positions[2].line != 2 || positions[2].colStart != 0 || positions[2].colEnd != 2 {
+		t.Fatalf("segment 2: expected line=2 cols=[0,2], got line=%d cols=[%d,%d]",
+			positions[2].line, positions[2].colStart, positions[2].colEnd)
+	}
+}
+
 func TestDetailViewSetLoading(t *testing.T) {
 	dv := NewDetailView(60, 15)
 	dv.SetMode(msgs.DetailDescribe)

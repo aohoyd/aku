@@ -536,6 +536,12 @@ func (m Model) headersView() string {
 func (m *Model) renderRow(r int) string {
 	s := make([]string, 0, len(m.cols))
 	for i, value := range m.rows[r] {
+		// Defensive bounds guard: plugin-provided rows may contain more cells
+		// than declared columns (e.g. generic runtime-discovered plugins).
+		// Drop the extras rather than panicking with index out of range.
+		if i >= len(m.cols) {
+			break
+		}
 		if m.cols[i].Width <= 0 {
 			continue
 		}

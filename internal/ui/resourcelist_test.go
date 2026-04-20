@@ -711,16 +711,16 @@ func TestFocusMakesCursorVisible(t *testing.T) {
 
 func TestParentSnap(t *testing.T) {
 	rl := NewResourceList(&testPlugin{}, 80, 20)
-	// Before drilldown, ParentSnap should be nil
-	if snap := rl.ParentSnap(); snap != nil {
-		t.Fatalf("expected nil ParentSnap before drilldown, got %+v", snap)
+	// Before drilldown, ParentSnap should report ok=false
+	if snap, ok := rl.ParentSnap(); ok {
+		t.Fatalf("expected no ParentSnap before drilldown, got %+v", snap)
 	}
 	// Push a nav entry
 	child := &testPlugin{}
 	rl.PushNav(child, nil, "my-deployment", "uid-123", "", "")
-	snap := rl.ParentSnap()
-	if snap == nil {
-		t.Fatal("expected non-nil ParentSnap after drilldown")
+	snap, ok := rl.ParentSnap()
+	if !ok {
+		t.Fatal("expected ParentSnap after drilldown")
 	}
 	if snap.ParentName != "my-deployment" {
 		t.Fatalf("expected ParentName 'my-deployment', got %q", snap.ParentName)
@@ -732,14 +732,14 @@ func TestParentSnap(t *testing.T) {
 
 func TestParentSnapKindAndAPIVersion(t *testing.T) {
 	rl := NewResourceList(&testPlugin{}, 80, 20)
-	if snap := rl.ParentSnap(); snap != nil {
-		t.Fatalf("expected nil ParentSnap before drilldown, got %+v", snap)
+	if snap, ok := rl.ParentSnap(); ok {
+		t.Fatalf("expected no ParentSnap before drilldown, got %+v", snap)
 	}
 	child := &testPlugin{}
 	rl.PushNav(child, nil, "my-app", "", "v1", "Secret")
-	snap := rl.ParentSnap()
-	if snap == nil {
-		t.Fatal("expected non-nil ParentSnap after drilldown")
+	snap, ok := rl.ParentSnap()
+	if !ok {
+		t.Fatal("expected ParentSnap after drilldown")
 	}
 	if snap.ParentKind != "Secret" {
 		t.Fatalf("expected ParentKind 'Secret', got %q", snap.ParentKind)

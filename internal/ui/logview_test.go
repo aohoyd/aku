@@ -963,6 +963,100 @@ func TestLogView_InsertMarkerMatchingFilter(t *testing.T) {
 	}
 }
 
+// TestLogView_InsertMarkerAtCapacityWithFilterAndSoftWrap verifies that
+// InsertMarker correctly handles eviction when the ring buffer is full.
+// totalWrappedRows must stay consistent, and filteredIndices must not retain
+// stale absolute indices that would translate to negative buffer positions.
+func TestLogView_InsertMarkerAtCapacityWithFilterAndSoftWrap(t *testing.T) {
+	// Small capacity + soft wrap + filter all active.
+	lv := NewLogView(80, 24, 3, "15m", 900)
+	lv.softWrap = true
+	if err := lv.ApplySearch("match", msgs.SearchModeFilter); err != nil {
+		t.Fatalf("ApplySearch: %v", err)
+	}
+
+	// Fill to capacity with matching lines so filteredIndices has 3 entries.
+	lv.AppendLine("match one")
+	lv.AppendLine("match two")
+	lv.AppendLine("match three")
+	// Buffer now at capacity.
+	if lv.buffer.Len() != lv.buffer.Cap() {
+		t.Fatalf("expected buffer full, got len=%d cap=%d", lv.buffer.Len(), lv.buffer.Cap())
+	}
+	if len(lv.filteredIndices) != 3 {
+		t.Fatalf("expected 3 filtered indices, got %d", len(lv.filteredIndices))
+	}
+
+	// Insert a marker — this should evict "match one".
+	lv.InsertMarker()
+
+	// Buffer still at capacity; one line dropped.
+	if lv.buffer.Len() != lv.buffer.Cap() {
+		t.Fatalf("expected buffer full after InsertMarker, got len=%d", lv.buffer.Len())
+	}
+	if lv.buffer.Dropped() != 1 {
+		t.Fatalf("expected 1 dropped line, got %d", lv.buffer.Dropped())
+	}
+
+	// Every entry in filteredIndices must reference a still-live line:
+	// i.e. filteredIndices[i] - filteredIndexOffset must be in [0, Len()).
+	for i, abs := range lv.filteredIndices {
+		local := abs - lv.filteredIndexOffset
+		if local < 0 || local >= lv.buffer.Len() {
+			t.Fatalf("filteredIndices[%d]=%d out of buffer range [0,%d) after offset=%d",
+				i, abs, lv.buffer.Len(), lv.filteredIndexOffset)
+		}
+	}
+
+	// totalWrappedRows should equal the sum of wrapped heights of filtered
+	// entries plus the indicator row (now present because Dropped>0).
+	vpWidth := lv.logVP.width
+	expected := 0
+	for _, abs := range lv.filteredIndices {
+		local := abs - lv.filteredIndexOffset
+		expected += wrapHeight(lv.buffer.WidthGet(local), vpWidth)
+	}
+	expected++ // indicator row
+	if lv.totalWrappedRows != expected {
+		t.Fatalf("totalWrappedRows=%d, expected %d", lv.totalWrappedRows, expected)
+	}
+}
+
+// TestLogView_InsertMarkerAtCapacityNoFilterSoftWrap confirms that
+// totalWrappedRows stays consistent when InsertMarker evicts in soft-wrap
+// mode without a filter (no filteredIndices mutations needed).
+func TestLogView_InsertMarkerAtCapacityNoFilterSoftWrap(t *testing.T) {
+	lv := NewLogView(80, 24, 3, "15m", 900)
+	lv.softWrap = true
+
+	// Fill the buffer with lines of known width.
+	lv.AppendLine("alpha")
+	lv.AppendLine("beta")
+	lv.AppendLine("gamma")
+	rowsBefore := lv.totalWrappedRows
+
+	// InsertMarker should evict "alpha" — totalWrappedRows bookkeeping must
+	// subtract alpha's wrapped height, add the marker's wrapped height, and
+	// add 1 for the indicator row that now appears.
+	lv.InsertMarker()
+
+	if lv.buffer.Dropped() != 1 {
+		t.Fatalf("expected 1 dropped line, got %d", lv.buffer.Dropped())
+	}
+
+	// Recompute totalWrappedRows from scratch and compare.
+	vpWidth := lv.logVP.width
+	expected := 0
+	for i := range lv.buffer.Len() {
+		expected += wrapHeight(lv.buffer.WidthGet(i), vpWidth)
+	}
+	expected++ // indicator row
+	if lv.totalWrappedRows != expected {
+		t.Fatalf("totalWrappedRows=%d, expected %d (rowsBefore=%d)",
+			lv.totalWrappedRows, expected, rowsBefore)
+	}
+}
+
 func TestLogView_ApplySearchPreservesExistingMarkers(t *testing.T) {
 	lv := NewLogView(80, 24, 100, "15m", 900)
 	lv.AppendLine("ERROR: something broke")

@@ -1026,6 +1026,13 @@ func (a App) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 		// the address of fields on the local value receiver `a`; ScrollWheel
 		// mutates that local copy, which is then returned to bubbletea so
 		// the mutation persists.
+		//
+		// Overlays not listed here intentionally swallow the wheel:
+		//   - overlayPortForward, overlaySetImage, overlayHelmRollback,
+		//     overlayChartInput, overlayScale: text-input forms, no
+		//     scrollable content.
+		//   - overlayConfirm: single-screen prompt, no scroll.
+		//   - overlaySearchBar: inline single-line input.
 		switch a.activeOverlay {
 		case overlayResourcePicker:
 			(&a.resourcePicker).ScrollWheel(msg.Button)
@@ -1035,6 +1042,8 @@ func (a App) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 			(&a.containerPicker).ScrollWheel(msg.Button)
 		case overlayTimeRange:
 			(&a.timeRangePicker).ScrollWheel(msg.Button)
+		case overlayHelp:
+			(&a.helpOverlay).ScrollWheel(msg.Button)
 		}
 		return a, nil
 	}
@@ -1495,8 +1504,8 @@ func (a App) OverlayRect() ui.OverlayRect {
 // refreshDrillDownSplit re-runs the parent's DrillDown to get fresh filtered
 // children for a single split that is currently in a drill-down view.
 func (a App) refreshDrillDownSplit(split *ui.ResourceList) {
-	snap := split.ParentSnap()
-	if snap == nil {
+	snap, ok := split.ParentSnap()
+	if !ok {
 		return
 	}
 	drillable, ok := snap.Plugin.(plugin.DrillDowner)

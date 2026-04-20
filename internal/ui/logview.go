@@ -991,12 +991,53 @@ func (lv *LogView) InsertMarker() {
 	raw := fmt.Sprintf("--- %s ---", time.Now().Format("15:04:05"))
 	styled := lipgloss.NewStyle().Foreground(theme.Muted).Faint(true).Render(raw)
 	rawWidth := ansi.StringWidth(raw)
+
+	// Detect eviction before the Append so we can trim wrapped-row accounting
+	// and stale filtered indices consistently with AppendLine. Markers are
+	// always included in the filtered view (callers rely on them remaining
+	// visible regardless of the filter pattern).
+	droppedBefore := lv.buffer.Dropped()
+	var evictedWidth int
+	willEvict := lv.buffer.Len() == lv.buffer.Cap()
+	if willEvict && lv.softWrap {
+		evictedWidth = lv.buffer.WidthGet(0) // logical index 0 = oldest
+	}
+
 	lv.buffer.Append(raw, styled, raw, rawWidth)
-	// Markers are short and emitted at a controlled cadence; callers rely on
-	// them sticking in the buffer next to the surrounding entries, so we
-	// assume no eviction here and always surface the marker regardless of
-	// the active filter.
-	lv.trackNonEvictingAppend(true, rawWidth)
+	evicted := lv.buffer.Dropped() > droppedBefore
+
+	if evicted {
+		// Soft-wrap bookkeeping: drop the evicted line's contribution and
+		// account for the indicator row when it first appears.
+		if lv.softWrap && !lv.filterState.Active() {
+			vpWidth := lv.logVP.width
+			lv.totalWrappedRows += wrapHeight(rawWidth, vpWidth)
+			lv.totalWrappedRows -= wrapHeight(evictedWidth, vpWidth)
+			if droppedBefore == 0 {
+				lv.totalWrappedRows++ // indicator row now present
+			}
+		}
+		if lv.filterState.Active() {
+			// Shift the absolute-index baseline and drop stale entries that
+			// now refer to the evicted line.
+			lv.filteredIndexOffset++
+			for len(lv.filteredIndices) > 0 && lv.filteredIndices[0] < lv.filteredIndexOffset {
+				lv.filteredIndices = lv.filteredIndices[1:]
+			}
+			// Always surface markers — add the marker's absolute index.
+			lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+lv.buffer.Len()-1)
+			if lv.softWrap {
+				lv.recomputeTotalWrappedRows()
+			}
+		}
+		if lv.searchState.Active() {
+			// Display indices shifted — full rebuild keeps everything in sync.
+			lv.rebuildMatchPositions()
+		}
+	} else {
+		lv.trackNonEvictingAppend(true, rawWidth)
+	}
+
 	if lv.autoscroll && !lv.softWrap {
 		lv.scrollOffset = lv.totalDisplayLines() - lv.viewportHeight()
 	}

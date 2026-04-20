@@ -105,6 +105,68 @@ func TestHelpOverlayScrollUpClampsAtZero(t *testing.T) {
 	}
 }
 
+// Build a group tall enough to force scrolling at height=10.
+func tallHintGroups() []config.HintGroup {
+	hints := make([]config.KeyHint, 0, 30)
+	for i := range 30 {
+		hints = append(hints, config.KeyHint{Key: "k", Help: "move"})
+		_ = i
+	}
+	return []config.HintGroup{{Scope: "Big", Hints: hints}}
+}
+
+func TestHelpOverlayScrollWheelDown(t *testing.T) {
+	h := NewHelpOverlay(80, 10) // small height forces maxScroll > 0
+	h.Open(tallHintGroups())
+	if h.maxScroll() == 0 {
+		t.Skip("tall hint group did not exceed visibleHeight; cannot test scroll")
+	}
+	before := h.scroll
+	h.ScrollWheel(tea.MouseWheelDown)
+	if h.scroll != before+1 {
+		t.Fatalf("expected scroll to advance to %d after wheel down, got %d",
+			before+1, h.scroll)
+	}
+}
+
+func TestHelpOverlayScrollWheelUp(t *testing.T) {
+	h := NewHelpOverlay(80, 10)
+	h.Open(tallHintGroups())
+	if h.maxScroll() == 0 {
+		t.Skip("tall hint group did not exceed visibleHeight")
+	}
+	// Advance then roll back.
+	h.ScrollWheel(tea.MouseWheelDown)
+	h.ScrollWheel(tea.MouseWheelDown)
+	h.ScrollWheel(tea.MouseWheelUp)
+	if h.scroll != 1 {
+		t.Fatalf("expected scroll=1 after up, got %d", h.scroll)
+	}
+}
+
+func TestHelpOverlayScrollWheelClampsAtBounds(t *testing.T) {
+	h := NewHelpOverlay(80, 10)
+	h.Open(tallHintGroups())
+
+	// Wheel up on scroll==0 stays at 0.
+	h.ScrollWheel(tea.MouseWheelUp)
+	if h.scroll != 0 {
+		t.Fatalf("expected scroll=0 clamp after wheel up at 0, got %d", h.scroll)
+	}
+
+	// Wheel down beyond maxScroll stays at maxScroll.
+	max := h.maxScroll()
+	if max == 0 {
+		t.Skip("no scroll range to clamp")
+	}
+	for range max + 5 {
+		h.ScrollWheel(tea.MouseWheelDown)
+	}
+	if h.scroll != max {
+		t.Fatalf("expected scroll clamped to maxScroll=%d, got %d", max, h.scroll)
+	}
+}
+
 func TestHelpOverlayView(t *testing.T) {
 	h := NewHelpOverlay(80, 30)
 	h.Open(testHintGroups())

@@ -566,6 +566,9 @@ func (d *DetailView) rebuildHighlightedDisplay() {
 }
 
 // computeMatchPositions converts raw byte offsets to per-line grapheme-width positions.
+// A single regex match spanning multiple lines (e.g. via (?s) or literal \n in the
+// pattern) is expanded into one matchPosition per affected line so downstream
+// visual mapping scrolls to the correct location on SearchNext/Prev.
 func computeMatchPositions(raw string, rawMatches [][]int) []matchPosition {
 	if len(rawMatches) == 0 {
 		return nil
@@ -580,16 +583,42 @@ func computeMatchPositions(raw string, rawMatches [][]int) []matchPosition {
 			lineStart += len(rawLines[lineIdx]) + 1
 			lineIdx++
 		}
-		lineByteStart := start - lineStart
-		lineByteEnd := min(end-lineStart, len(rawLines[lineIdx]))
-		line := rawLines[lineIdx]
-		colStart := ansi.StringWidth(line[:lineByteStart])
-		colEnd := ansi.StringWidth(line[:lineByteEnd])
-		positions = append(positions, matchPosition{
-			line:     lineIdx,
-			colStart: colStart,
-			colEnd:   colEnd,
-		})
+		// Walk the lines the match spans, emitting a position per line.
+		// Preserve order; use a local cursor that does not perturb the outer
+		// (lineIdx, lineStart) tracking.
+		curIdx := lineIdx
+		curLineStart := lineStart
+		firstSegment := true
+		for curIdx < len(rawLines) {
+			line := rawLines[curIdx]
+			lineEndByte := curLineStart + len(line)
+			// Byte offsets for the portion of the match on this line.
+			var segStart, segEnd int
+			if firstSegment {
+				segStart = start - curLineStart
+			} else {
+				segStart = 0
+			}
+			if end <= lineEndByte {
+				segEnd = end - curLineStart
+			} else {
+				segEnd = len(line)
+			}
+			colStart := ansi.StringWidth(line[:segStart])
+			colEnd := ansi.StringWidth(line[:segEnd])
+			positions = append(positions, matchPosition{
+				line:     curIdx,
+				colStart: colStart,
+				colEnd:   colEnd,
+			})
+			if end <= lineEndByte {
+				break
+			}
+			// Advance to next line; +1 accounts for the consumed newline.
+			curLineStart = lineEndByte + 1
+			curIdx++
+			firstSegment = false
+		}
 	}
 	return positions
 }

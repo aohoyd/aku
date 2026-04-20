@@ -467,21 +467,16 @@ func (l *Layout) rebuildPaneRects() {
 
 	switch l.EffectiveZoom() {
 	case ZoomDetail:
-		if l.rightVisible {
-			// Detail/log fills the pane area. The panel itself is sized to
-			// cover the status-bar row on screen, but the rect intentionally
-			// stops at l.height per "status-bar row is not a pane" rule.
-			l.paneRects = append(l.paneRects, PaneRect{
-				X: 0, Y: 0, W: l.width, H: l.height,
-				Kind: l.detailPaneKind(),
-			})
-			return
-		}
-		// No right panel: zoomed focused split fills the area.
+		// EffectiveZoom() only returns ZoomDetail when detailZoomed &&
+		// rightVisible, so this branch always has rightVisible==true. Detail/log
+		// fills the pane area. The panel itself is sized to cover the
+		// status-bar row on screen, but the rect intentionally stops at
+		// l.height per "status-bar row is not a pane" rule.
 		l.paneRects = append(l.paneRects, PaneRect{
 			X: 0, Y: 0, W: l.width, H: l.height,
-			Kind: PaneSplit, SplitIdx: l.focusIdx,
+			Kind: l.detailPaneKind(),
 		})
+		return
 
 	case ZoomSplit:
 		if l.orientation == OrientationHorizontal {
