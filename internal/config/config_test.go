@@ -127,6 +127,50 @@ func TestHeartbeatIntervalNegative(t *testing.T) {
 	}
 }
 
+func TestLoadConfigWithMouseEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte("mouse:\n  enabled: true\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Mouse.Enabled {
+		t.Fatalf("expected cfg.Mouse.Enabled to be true, got false")
+	}
+}
+
+func TestLoadConfigWithMouseExplicitlyDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte("mouse:\n  enabled: false\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mouse.Enabled {
+		t.Fatalf("expected cfg.Mouse.Enabled to be false after explicit 'mouse.enabled: false'")
+	}
+}
+
+// TestDefaultConfigMouseDisabled verifies that mouse support is opt-in: the
+// zero-value Config returned by DefaultConfig has Mouse.Enabled=false without
+// touching the filesystem. This is the contract LoadConfig falls back to when
+// the mouse key is absent from the YAML, so a single assertion on
+// DefaultConfig replaces the redundant file-I/O flavor of this test.
+func TestDefaultConfigMouseDisabled(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.Mouse.Enabled {
+		t.Fatalf("expected DefaultConfig().Mouse.Enabled to be false, got true")
+	}
+}
+
 func TestLoadConfigWithCharts(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

@@ -38,6 +38,24 @@ const (
 	FocusTargetDetails                      // detail panel has focus
 )
 
+// PaneKind identifies the kind of pane at a given screen rect.
+type PaneKind int
+
+const (
+	PaneSplit  PaneKind = iota // a resource-list split pane
+	PaneDetail                 // the detail (describe/yaml) panel
+	PaneLog                    // the log view panel
+)
+
+// PaneRect is the screen-space rectangle occupied by a pane. It is cached
+// after each geometry recompute so app-level hit-testing (mouse) can map
+// (x, y) back to a pane without re-deriving the layout math.
+type PaneRect struct {
+	X, Y, W, H int
+	Kind       PaneKind
+	SplitIdx   int // only valid when Kind == PaneSplit
+}
+
 // Layout manages the left panel splits and optional right panel.
 type Layout struct {
 	splits       []ui.ResourceList
@@ -52,6 +70,7 @@ type Layout struct {
 	height       int
 	logView      *ui.LogView
 	logMode      bool
+	paneRects    []PaneRect
 }
 
 // New creates a new layout with the given terminal dimensions.
@@ -213,7 +232,11 @@ func (l *Layout) ActiveDetailPanel() ui.DetailPanel {
 func (l *Layout) IsLogMode() bool { return l.logMode }
 
 // SetLogMode enables or disables log mode.
-func (l *Layout) SetLogMode(on bool) { l.logMode = on }
+func (l *Layout) SetLogMode(on bool) {
+	l.logMode = on
+	// Pane kind depends on logMode; refresh the cache so PaneAt reflects it.
+	l.rebuildPaneRects()
+}
 
 // FocusedDetails returns whether the detail panel has input focus.
 func (l *Layout) FocusedDetails() bool {
@@ -410,10 +433,135 @@ func (l Layout) View() string {
 	}
 }
 
+// PaneAt returns the pane rect that contains the given screen coordinate.
+// Coordinates are in the same space used by Resize / the layout's View output;
+// the status-bar row is never part of a pane rect, so clicks there yield
+// (PaneRect{}, false). Also returns false for out-of-bounds clicks.
+func (l *Layout) PaneAt(x, y int) (PaneRect, bool) {
+	for _, r := range l.paneRects {
+		if x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H {
+			return r, true
+		}
+	}
+	return PaneRect{}, false
+}
+
+// detailPaneKind returns PaneLog when the right panel is showing logs,
+// PaneDetail otherwise.
+func (l *Layout) detailPaneKind() PaneKind {
+	if l.logMode {
+		return PaneLog
+	}
+	return PaneDetail
+}
+
+// rebuildPaneRects recomputes the cached pane rectangles from current geometry.
+// Called at the end of recalcSizes() so every geometry change refreshes the cache.
+// The status-bar row (owned by the app, at y == l.height) is never included.
+func (l *Layout) rebuildPaneRects() {
+	l.paneRects = l.paneRects[:0]
+	n := len(l.splits)
+	if n == 0 || l.width <= 0 || l.height <= 0 {
+		return
+	}
+
+	switch l.EffectiveZoom() {
+	case ZoomDetail:
+		if l.rightVisible {
+			// Detail/log fills the pane area. The panel itself is sized to
+			// cover the status-bar row on screen, but the rect intentionally
+			// stops at l.height per "status-bar row is not a pane" rule.
+			l.paneRects = append(l.paneRects, PaneRect{
+				X: 0, Y: 0, W: l.width, H: l.height,
+				Kind: l.detailPaneKind(),
+			})
+			return
+		}
+		// No right panel: zoomed focused split fills the area.
+		l.paneRects = append(l.paneRects, PaneRect{
+			X: 0, Y: 0, W: l.width, H: l.height,
+			Kind: PaneSplit, SplitIdx: l.focusIdx,
+		})
+
+	case ZoomSplit:
+		if l.orientation == OrientationHorizontal {
+			topHeight, bottomHeight := l.panelSizes()
+			l.paneRects = append(l.paneRects, PaneRect{
+				X: 0, Y: 0, W: l.width, H: topHeight,
+				Kind: PaneSplit, SplitIdx: l.focusIdx,
+			})
+			if l.rightVisible {
+				l.paneRects = append(l.paneRects, PaneRect{
+					X: 0, Y: topHeight, W: l.width, H: bottomHeight,
+					Kind: l.detailPaneKind(),
+				})
+			}
+		} else {
+			leftWidth, rightWidth := l.panelSizes()
+			l.paneRects = append(l.paneRects, PaneRect{
+				X: 0, Y: 0, W: leftWidth, H: l.height,
+				Kind: PaneSplit, SplitIdx: l.focusIdx,
+			})
+			if l.rightVisible {
+				l.paneRects = append(l.paneRects, PaneRect{
+					X: leftWidth, Y: 0, W: rightWidth, H: l.height,
+					Kind: l.detailPaneKind(),
+				})
+			}
+		}
+
+	default: // ZoomNone
+		if l.orientation == OrientationHorizontal {
+			topHeight, bottomHeight := l.panelSizes()
+			splitWidth := l.width / n
+			for i := range l.splits {
+				w := splitWidth
+				x := splitWidth * i
+				if i == n-1 {
+					w = l.width - splitWidth*(n-1)
+				}
+				l.paneRects = append(l.paneRects, PaneRect{
+					X: x, Y: 0, W: w, H: topHeight,
+					Kind: PaneSplit, SplitIdx: i,
+				})
+			}
+			if l.rightVisible {
+				l.paneRects = append(l.paneRects, PaneRect{
+					X: 0, Y: topHeight, W: l.width, H: bottomHeight,
+					Kind: l.detailPaneKind(),
+				})
+			}
+		} else {
+			leftWidth, rightWidth := l.panelSizes()
+			splitHeight := l.height / n
+			for i := range l.splits {
+				h := splitHeight
+				y := splitHeight * i
+				if i == n-1 {
+					h = l.height - splitHeight*(n-1)
+				}
+				l.paneRects = append(l.paneRects, PaneRect{
+					X: 0, Y: y, W: leftWidth, H: h,
+					Kind: PaneSplit, SplitIdx: i,
+				})
+			}
+			if l.rightVisible {
+				l.paneRects = append(l.paneRects, PaneRect{
+					X: leftWidth, Y: 0, W: rightWidth, H: l.height,
+					Kind: l.detailPaneKind(),
+				})
+			}
+		}
+	}
+}
+
 // recalcSizes recomputes sizes for all components.
 func (l *Layout) recalcSizes() {
 	n := len(l.splits)
 	if n == 0 {
+		// No splits: rebuildPaneRects clears the cached rect slice. No
+		// sizes to assign below.
+		l.rebuildPaneRects()
 		return
 	}
 
@@ -487,6 +635,8 @@ func (l *Layout) recalcSizes() {
 			f.EnsureCursorVisible()
 		}
 	}
+
+	l.rebuildPaneRects()
 }
 
 // panelSizes computes the primary and secondary panel dimensions.

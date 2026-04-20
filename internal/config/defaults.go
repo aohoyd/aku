@@ -9,7 +9,7 @@ func DefaultBindings() []Binding {
 		{Key: "y", Help: "yaml", Command: "view-yaml-focused", Visible: true},
 		{Key: "d", Help: "describe", Command: "view-describe-focused", Visible: true},
 		{Key: "x", Help: "uncovered", Command: "view-describe-uncovered", Scope: "resources",
-			For: []string{"pods", "secrets", "containers"}, Visible: true},
+			For: []string{"pods", "secrets", "containers", "deployments", "statefulsets", "daemonsets"}, Visible: true},
 		{Key: "Z", Help: "zoom", Command: "toggle-zoom", Visible: true},
 		{Key: "e", Help: "edit", Command: "edit", Visible: true},
 		{Key: "g", Help: "go to", Visible: true, Keys: []Binding{
@@ -89,7 +89,7 @@ func DefaultBindings() []Binding {
 
 		// ── Details scope ──
 		{Key: "x", Help: "env resolve", Command: "toggle-env-resolve", Scope: "details",
-			For: []string{"pods", "secrets", "containers", "helmmanifest"}, Visible: true},
+			For: []string{"pods", "secrets", "containers", "helmmanifest", "deployments", "statefulsets", "daemonsets"}, Visible: true},
 		{Key: "w", Help: "wrap", Command: "toggle-wrap", Scope: "details", Visible: true},
 		{Key: "alt+e", Help: "header", Command: "toggle-header", Scope: "details", Visible: true},
 		{Key: "r", Help: "refresh", Command: "refresh-detail", Scope: "details"},

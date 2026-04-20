@@ -679,6 +679,321 @@ func TestLayoutHorizontalZoomSplitView(t *testing.T) {
 	}
 }
 
+func TestPaneAtVerticalOneSplitWithDetail(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900) // content height = 25
+	l.AddSplit(podsPlugin(), "default")
+	l.ShowRightPanel()
+
+	// Expect: split occupies x[0..40), detail x[40..80), both y[0..25).
+	// Click inside the split pane.
+	r, ok := l.PaneAt(5, 5)
+	if !ok {
+		t.Fatal("expected hit inside split pane")
+	}
+	if r.Kind != PaneSplit || r.SplitIdx != 0 {
+		t.Fatalf("expected PaneSplit idx=0, got kind=%d idx=%d", r.Kind, r.SplitIdx)
+	}
+
+	// Click inside the detail pane.
+	r, ok = l.PaneAt(50, 5)
+	if !ok {
+		t.Fatal("expected hit inside detail pane")
+	}
+	if r.Kind != PaneDetail {
+		t.Fatalf("expected PaneDetail, got kind=%d", r.Kind)
+	}
+}
+
+func TestPaneAtVerticalTwoSplitsWithDetail(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900) // content height = 25
+	l.AddSplit(podsPlugin(), "default")
+	l.AddSplit(svcsPlugin(), "default")
+	l.ShowRightPanel()
+
+	// Splits are stacked in vertical orientation: leftWidth=40, splitHeight=12
+	// split 0: y[0..12), split 1: y[12..25) (last one takes remainder)
+	r, ok := l.PaneAt(10, 3)
+	if !ok || r.Kind != PaneSplit || r.SplitIdx != 0 {
+		t.Fatalf("expected split 0, got ok=%v kind=%d idx=%d", ok, r.Kind, r.SplitIdx)
+	}
+
+	r, ok = l.PaneAt(10, 15)
+	if !ok || r.Kind != PaneSplit || r.SplitIdx != 1 {
+		t.Fatalf("expected split 1, got ok=%v kind=%d idx=%d", ok, r.Kind, r.SplitIdx)
+	}
+
+	r, ok = l.PaneAt(60, 10)
+	if !ok || r.Kind != PaneDetail {
+		t.Fatalf("expected detail, got ok=%v kind=%d", ok, r.Kind)
+	}
+}
+
+func TestPaneAtHorizontalTwoSplitsWithDetail(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900) // content height = 25
+	l.AddSplit(podsPlugin(), "default")
+	l.AddSplit(svcsPlugin(), "default")
+	l.ShowRightPanel()
+	l.ToggleOrientation()
+
+	// Horizontal: two splits side by side across full width (width=80),
+	// topHeight = 12, bottomHeight = 13. Split 0 covers x[0..40), split 1
+	// covers x[40..80). Detail spans full width at y[12..25).
+	r, ok := l.PaneAt(10, 5)
+	if !ok || r.Kind != PaneSplit || r.SplitIdx != 0 {
+		t.Fatalf("expected split 0 at (10,5), got ok=%v kind=%d idx=%d", ok, r.Kind, r.SplitIdx)
+	}
+	r, ok = l.PaneAt(60, 5)
+	if !ok || r.Kind != PaneSplit || r.SplitIdx != 1 {
+		t.Fatalf("expected split 1 at (60,5), got ok=%v kind=%d idx=%d", ok, r.Kind, r.SplitIdx)
+	}
+	r, ok = l.PaneAt(10, 20)
+	if !ok || r.Kind != PaneDetail {
+		t.Fatalf("expected detail at (10,20), got ok=%v kind=%d", ok, r.Kind)
+	}
+	// Split-boundary edge: x=39 is the last column of split 0, x=40 is
+	// the first column of split 1 (in 2-split evenly divided 80 width).
+	r, ok = l.PaneAt(39, 5)
+	if !ok || r.Kind != PaneSplit || r.SplitIdx != 0 {
+		t.Fatalf("expected split 0 at x=39, got ok=%v kind=%d idx=%d", ok, r.Kind, r.SplitIdx)
+	}
+	r, ok = l.PaneAt(40, 5)
+	if !ok || r.Kind != PaneSplit || r.SplitIdx != 1 {
+		t.Fatalf("expected split 1 at x=40, got ok=%v kind=%d idx=%d", ok, r.Kind, r.SplitIdx)
+	}
+}
+
+func TestPaneAtSplitZoomedDetailStillHittable(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default")
+	l.AddSplit(svcsPlugin(), "default")
+	l.ShowRightPanel()
+	l.ToggleZoomSplit()
+
+	// In ZoomSplit with right panel visible, the detail pane is still
+	// rendered on the right side and must be hittable.
+	r, ok := l.PaneAt(60, 5)
+	if !ok {
+		t.Fatal("expected a hit on right side during split-zoom with detail visible")
+	}
+	if r.Kind != PaneDetail {
+		t.Fatalf("expected PaneDetail on right side during split-zoom, got kind=%d", r.Kind)
+	}
+}
+
+func TestPaneAtHorizontalOneSplitWithDetail(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900) // content height = 25
+	l.AddSplit(podsPlugin(), "default")
+	l.ShowRightPanel()
+	l.ToggleOrientation()
+
+	// Horizontal: top = height*0.5 = 12, bottom = 13, full width.
+	// Split at y[0..12), detail at y[12..25).
+	r, ok := l.PaneAt(40, 5)
+	if !ok || r.Kind != PaneSplit || r.SplitIdx != 0 {
+		t.Fatalf("expected split, got ok=%v kind=%d idx=%d", ok, r.Kind, r.SplitIdx)
+	}
+
+	r, ok = l.PaneAt(40, 20)
+	if !ok || r.Kind != PaneDetail {
+		t.Fatalf("expected detail, got ok=%v kind=%d", ok, r.Kind)
+	}
+}
+
+func TestPaneAtLogMode(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default")
+	l.ShowRightPanel()
+	l.SetLogMode(true)
+
+	r, ok := l.PaneAt(60, 5)
+	if !ok {
+		t.Fatal("expected hit inside right panel")
+	}
+	if r.Kind != PaneLog {
+		t.Fatalf("expected PaneLog, got kind=%d", r.Kind)
+	}
+}
+
+func TestPaneAtSplitZoomed(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default")
+	l.AddSplit(svcsPlugin(), "default")
+	l.ShowRightPanel()
+
+	l.ToggleZoomSplit() // focused is split 1
+
+	// In ZoomSplit with right panel visible: the focused split fills the
+	// left column and the detail panel remains visible on the right. Both
+	// rects are emitted so clicks on the visible detail pane are still
+	// routed correctly; only non-focused splits are hidden.
+	// Click inside the zoomed split area — expect focused split's rect.
+	r, ok := l.PaneAt(10, 10)
+	if !ok {
+		t.Fatal("expected hit inside zoomed split")
+	}
+	if r.Kind != PaneSplit || r.SplitIdx != 1 {
+		t.Fatalf("expected PaneSplit idx=1, got kind=%d idx=%d", r.Kind, r.SplitIdx)
+	}
+
+	// No rect for non-focused split 0: clicking anywhere should hit either the
+	// zoomed split or nothing (since it fills the whole left area).
+	// Anywhere outside pane area (status bar row) → false.
+	if _, ok := l.PaneAt(10, 25); ok {
+		t.Fatal("status-bar row should not match any pane rect")
+	}
+}
+
+func TestPaneAtDetailZoomed(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default")
+	l.ShowRightPanel()
+
+	l.ToggleZoomDetail()
+
+	// Only detail rect. Any click in the pane area hits detail.
+	r, ok := l.PaneAt(10, 10)
+	if !ok {
+		t.Fatal("expected hit inside zoomed detail")
+	}
+	if r.Kind != PaneDetail {
+		t.Fatalf("expected PaneDetail, got kind=%d", r.Kind)
+	}
+
+	// A click far in what would normally be the split area — now detail.
+	r, ok = l.PaneAt(1, 1)
+	if !ok || r.Kind != PaneDetail {
+		t.Fatalf("expected PaneDetail across whole area, got ok=%v kind=%d", ok, r.Kind)
+	}
+
+	// Status-bar row (y == 25) must not match, even though the detail panel
+	// visually extends into it.
+	if _, ok := l.PaneAt(10, 25); ok {
+		t.Fatal("status-bar row should not match any pane rect")
+	}
+}
+
+// TestPaneAtDetailZoomedWithoutRightPanel documents the interaction between
+// ToggleZoomDetail and the right panel: calling ToggleZoomDetail without a
+// visible right panel is a no-op (EffectiveZoom stays at ZoomNone), so PaneAt
+// returns the standard vertical-split rects. This guards the invariant the
+// rebuildPaneRects fallback branch relies on.
+func TestPaneAtDetailZoomedWithoutRightPanel(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default")
+	l.AddSplit(svcsPlugin(), "default")
+	// Do NOT ShowRightPanel.
+
+	l.ToggleZoomDetail()
+	// ToggleZoomDetail is a no-op without the right panel visible, so
+	// EffectiveZoom stays at ZoomNone and the splits render normally.
+	if l.EffectiveZoom() != ZoomNone {
+		t.Fatalf("expected EffectiveZoom ZoomNone without right panel, got %d", l.EffectiveZoom())
+	}
+
+	// Clicks at the top should hit split 0, and further down hit split 1.
+	r0, ok := l.PaneAt(10, 2)
+	if !ok {
+		t.Fatal("expected hit near top of layout")
+	}
+	if r0.Kind != PaneSplit {
+		t.Fatalf("expected PaneSplit, got kind=%d", r0.Kind)
+	}
+	// Status-bar row still excluded.
+	if _, ok := l.PaneAt(10, 25); ok {
+		t.Fatal("status-bar row should not match any pane rect")
+	}
+}
+
+// TestPaneAtHorizontalSplitZoomed covers the ZoomSplit case when the
+// orientation is horizontal — the zoomed split rect spans the full width and
+// the detail pane occupies the bottom band.
+func TestPaneAtHorizontalSplitZoomed(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default")
+	l.AddSplit(svcsPlugin(), "default")
+	l.ShowRightPanel()
+	l.ToggleOrientation() // horizontal
+	l.ToggleZoomSplit()   // zooms the focused split
+
+	if l.EffectiveZoom() != ZoomSplit {
+		t.Fatalf("expected ZoomSplit, got %d", l.EffectiveZoom())
+	}
+
+	// Top-left of the horizontal layout: should hit the focused split across
+	// the full width.
+	r, ok := l.PaneAt(5, 2)
+	if !ok {
+		t.Fatal("expected hit inside horizontally-zoomed split")
+	}
+	if r.Kind != PaneSplit || r.SplitIdx != l.FocusIndex() {
+		t.Fatalf("expected PaneSplit idx=%d, got kind=%d idx=%d",
+			l.FocusIndex(), r.Kind, r.SplitIdx)
+	}
+	// The full width should still route to the zoomed split at the same y.
+	r2, ok := l.PaneAt(70, 2)
+	if !ok || r2.Kind != PaneSplit || r2.SplitIdx != l.FocusIndex() {
+		t.Fatalf("expected full-width zoomed split at right edge, got ok=%v kind=%d idx=%d",
+			ok, r2.Kind, r2.SplitIdx)
+	}
+}
+
+func TestPaneAtStatusBarRow(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900) // content height = 25, status-bar at y=25
+	l.AddSplit(podsPlugin(), "default")
+	l.ShowRightPanel()
+
+	if _, ok := l.PaneAt(10, 25); ok {
+		t.Fatal("click on status-bar row (y=25) should return false")
+	}
+	if _, ok := l.PaneAt(50, 25); ok {
+		t.Fatal("click on status-bar row (y=25) should return false (detail side)")
+	}
+}
+
+func TestPaneAtOutOfBounds(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default")
+	l.ShowRightPanel()
+
+	if _, ok := l.PaneAt(80, 5); ok {
+		t.Fatal("x == width should be out of bounds")
+	}
+	if _, ok := l.PaneAt(100, 5); ok {
+		t.Fatal("x > width should be out of bounds")
+	}
+	if _, ok := l.PaneAt(10, 30); ok {
+		t.Fatal("y > height should be out of bounds")
+	}
+	if _, ok := l.PaneAt(-1, 5); ok {
+		t.Fatal("negative x should be out of bounds")
+	}
+	if _, ok := l.PaneAt(10, -1); ok {
+		t.Fatal("negative y should be out of bounds")
+	}
+}
+
+func TestPaneAtRebuildsOnResize(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default")
+	l.ShowRightPanel()
+
+	// Resize to a smaller terminal — pane rects should reflect new geometry.
+	l.Resize(40, 20)
+
+	// leftWidth = 40*0.5 = 20; content height = 19
+	r, ok := l.PaneAt(5, 5)
+	if !ok || r.Kind != PaneSplit {
+		t.Fatalf("expected split, got ok=%v kind=%d", ok, r.Kind)
+	}
+	r, ok = l.PaneAt(25, 5)
+	if !ok || r.Kind != PaneDetail {
+		t.Fatalf("expected detail, got ok=%v kind=%d", ok, r.Kind)
+	}
+	if _, ok := l.PaneAt(5, 19); ok {
+		t.Fatal("status-bar row after resize (y=19) should not match")
+	}
+}
+
 func TestLayoutToggleOrientationRecalcsSizes(t *testing.T) {
 	l := New(80, 26, 1000, "15m", 900) // height = 25
 	l.AddSplit(podsPlugin(), "default")

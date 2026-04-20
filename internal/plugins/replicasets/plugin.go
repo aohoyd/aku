@@ -86,7 +86,7 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 	b.KV(render.LEVEL_0, "Replicas", replicaStr)
 
 	// Pod Template
-	workload.DescribePodTemplate(b, rs.Spec.Template)
+	workload.DescribePodTemplate(b, rs.Spec.Template, nil, nil)
 
 	// Conditions
 	workload.DescribeConditions(b, rs)

@@ -14,7 +14,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var gvr = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
+var (
+	gvr           = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
+	configMapsGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+	secretsGVR    = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+)
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes DaemonSets.
 type Plugin struct {
@@ -69,6 +73,22 @@ func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
+	return p.describe(obj, nil, nil)
+}
+
+// DescribeUncovered implements plugin.Uncoverable. It resolves env references
+// in template containers by passing live ConfigMaps and Secrets from the store.
+func (p *Plugin) DescribeUncovered(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
+	if p.store == nil {
+		return p.describe(obj, nil, nil)
+	}
+	ns := obj.GetNamespace()
+	p.store.Subscribe(configMapsGVR, ns)
+	p.store.Subscribe(secretsGVR, ns)
+	return p.describe(obj, p.store.List(configMapsGVR, ns), p.store.List(secretsGVR, ns))
+}
+
+func (p *Plugin) describe(obj *unstructured.Unstructured, configMaps, secrets []*unstructured.Unstructured) (render.Content, error) {
 	ds, err := toDaemonSet(obj)
 	if err != nil {
 		return render.Content{}, fmt.Errorf("converting to DaemonSet: %w", err)
@@ -106,7 +126,7 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 	}
 
 	// Pod Template
-	workload.DescribePodTemplate(b, ds.Spec.Template)
+	workload.DescribePodTemplate(b, ds.Spec.Template, configMaps, secrets)
 
 	// Conditions
 	workload.DescribeConditions(b, ds)

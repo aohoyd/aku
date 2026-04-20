@@ -33,6 +33,11 @@ type LogsConfig struct {
 	DefaultTimeRange string `yaml:"default_time_range,omitempty"`
 }
 
+// MouseConfig holds configuration for mouse support.
+type MouseConfig struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+}
+
 // Config holds the application configuration.
 type Config struct {
 	Charts map[string]map[string]string `yaml:"charts,omitempty"`
@@ -40,6 +45,7 @@ type Config struct {
 	Debug  DebugConfig                  `yaml:"debug,omitempty"`
 	Exec   ExecConfig                   `yaml:"exec,omitempty"`
 	Logs   LogsConfig                   `yaml:"logs,omitempty"`
+	Mouse  MouseConfig                  `yaml:"mouse,omitempty"`
 }
 
 // DefaultConfig returns a config with default settings.

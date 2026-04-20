@@ -282,7 +282,12 @@ func splitWrappedVisible(line string, vpWidth, contWidth, startRow, numRows int)
 		b = b[n:]
 	}
 
-	// Flush remaining content in the last segment.
+	// Flush remaining content in the last segment. The col > 0 guard drops a
+	// trailing segment that contains only SGR escapes (no printable width):
+	// such a segment would render as an empty row and would not round-trip
+	// through visual->logical column mapping. Mid-loop closeSegment() calls
+	// happen on row boundaries where col is guaranteed > 0 (we only advance
+	// the row after writing at least one character), so no content is lost.
 	if capturing && segStart && col > 0 {
 		closeSegment()
 	}
@@ -293,6 +298,18 @@ func splitWrappedVisible(line string, vpWidth, contWidth, startRow, numRows int)
 // wrapIndicatorWidth is the display-column width of the wrap indicator prefix
 // (↪ + space = 2 columns).
 const wrapIndicatorWidth = 2
+
+// continuationWidth returns the display-column width of continuation rows
+// (rows 1+) for a viewport with the given first-row width. Continuation rows
+// are narrower to leave room for the ↪ prefix. The result is clamped to 1 to
+// avoid division-by-zero and infinite loops when vpWidth <= wrapIndicatorWidth.
+func continuationWidth(vpWidth int) int {
+	w := vpWidth - wrapIndicatorWidth
+	if w <= 0 {
+		return 1
+	}
+	return w
+}
 
 // cachedWrapIndicatorPrefix is the pre-rendered styled "↪ " string used as a
 // soft-wrap continuation indicator. Computed once at package init time to avoid
@@ -314,6 +331,15 @@ type lineMap struct {
 // receive the wrap indicator prefix via prefixContinuationRows.
 //
 // If width <= 0, the input lines are returned as-is with identity mapping.
+//
+// Relationship to splitWrappedVisible: wrapLines uses ansi.Cut because its
+// caller (DetailView) needs the complete wrapped set plus a logical-to-visual
+// mapping table for search navigation across arbitrary rows. Cut makes
+// building the mapping trivial (colOffset == start of the Cut). The log view
+// uses splitWrappedVisible instead because it only ever renders a window of
+// contiguous rows and does not need a full mapping table; a single-pass ANSI
+// parser is asymptotically cheaper than N calls to ansi.Cut when N is large.
+// Both paths share prefixContinuationRows and the contWidth convention.
 func wrapLines(lines []string, width int) (wrapped []string, mapping []lineMap) {
 	if width <= 0 {
 		wrapped = make([]string, len(lines))
@@ -324,6 +350,13 @@ func wrapLines(lines []string, width int) (wrapped []string, mapping []lineMap) 
 		}
 		return wrapped, mapping
 	}
+
+	// Pre-allocate with a lower bound equal to the input line count: every
+	// line contributes at least one wrapped row. Lines that wrap contribute
+	// more, so the slice may still grow, but the initial capacity eliminates
+	// the early doublings that dominate allocation cost for short inputs.
+	wrapped = make([]string, 0, len(lines))
+	mapping = make([]lineMap, 0, len(lines))
 
 	for i, line := range lines {
 		lineWidth := ansi.StringWidth(line)
@@ -337,12 +370,12 @@ func wrapLines(lines []string, width int) (wrapped []string, mapping []lineMap) 
 
 		// Line needs wrapping: first segment at full width, continuation
 		// segments at contWidth (narrower to make room for ↪ prefix).
-		contWidth := width - wrapIndicatorWidth
-		if contWidth <= 0 {
-			contWidth = 1
-		}
-		var segs []string
-		var segWidths []int
+		contWidth := continuationWidth(width)
+		// Estimate segment count: ceil(lineWidth / contWidth) + 1 covers the
+		// first full-width row.
+		estSegs := (lineWidth+contWidth-1)/contWidth + 1
+		segs := make([]string, 0, estSegs)
+		segWidths := make([]int, 0, estSegs)
 		col := 0
 		for col < lineWidth {
 			var segW int
@@ -358,11 +391,25 @@ func wrapLines(lines []string, width int) (wrapped []string, mapping []lineMap) 
 			seg := ansi.Cut(line, col, end)
 			actualW := ansi.StringWidth(seg)
 			if actualW == 0 {
-				// Wide character doesn't fit in contWidth — skip to end to
-				// avoid an infinite loop (mirrors the col > 0 guard in
-				// splitWrappedVisible).
-				col = end
-				continue
+				// A wide character straddles the segment end. Mirror
+				// splitWrappedVisible: place the character on the current
+				// row even if it exceeds rowWidth, rather than dropping it
+				// (which would create a gap in the mapping and misalign
+				// search highlights). We widen the cut by one column to
+				// pull the full wide character onto this row.
+				extEnd := end + 1
+				if extEnd > lineWidth {
+					extEnd = lineWidth
+				}
+				seg = ansi.Cut(line, col, extEnd)
+				actualW = ansi.StringWidth(seg)
+				if actualW == 0 {
+					// Defensive: cannot make progress. Advance one column to
+					// avoid an infinite loop. This should be unreachable
+					// with well-formed ANSI input.
+					col++
+					continue
+				}
 			}
 			segs = append(segs, seg)
 			segWidths = append(segWidths, actualW)

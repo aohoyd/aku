@@ -283,16 +283,37 @@ func wrapHeight(displayWidth, vpWidth int) int {
 	if displayWidth <= vpWidth {
 		return 1
 	}
-	contWidth := vpWidth - wrapIndicatorWidth
-	if contWidth <= 0 {
-		contWidth = 1
-	}
+	contWidth := continuationWidth(vpWidth)
 	return 1 + (displayWidth-vpWidth+contWidth-1)/contWidth
 }
 
 // recomputeTotalWrappedRows recalculates totalWrappedRows from scratch.
 // Called after resize, toggle wrap, filter change, or any bulk mutation —
 // NOT on every AppendLine (that path uses incremental updates).
+// trackNonEvictingAppend updates filteredIndices and totalWrappedRows after a
+// buffer.Append that did not evict an existing line. Used by AppendLine's
+// filter-active branch (when no eviction) and by InsertMarker. Callers that
+// handle eviction must use the AppendLine path, which also performs index
+// trimming and a full recomputeTotalWrappedRows.
+//
+// include controls whether the just-appended line should be added to
+// filteredIndices. InsertMarker always passes true (markers are not subject
+// to the filter regex); AppendLine passes true only when the regex matches.
+func (lv *LogView) trackNonEvictingAppend(include bool, rawWidth int) {
+	if lv.softWrap && !lv.filterState.Active() {
+		lv.totalWrappedRows += wrapHeight(rawWidth, lv.logVP.width)
+	}
+	if !lv.filterState.Active() {
+		return
+	}
+	if include {
+		lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+lv.buffer.Len()-1)
+	}
+	if lv.softWrap {
+		lv.recomputeTotalWrappedRows()
+	}
+}
+
 func (lv *LogView) recomputeTotalWrappedRows() {
 	vpWidth := lv.logVP.width
 	total := 0
@@ -477,7 +498,7 @@ func (lv *LogView) updateViewportWrapped() {
 			if di == firstDisplayIdx {
 				startRow = vOffset
 			}
-			contWidth := vpWidth - wrapIndicatorWidth
+			contWidth := continuationWidth(vpWidth)
 			segs, segWidths := splitWrappedVisible(line, vpWidth, contWidth, startRow, vpHeight-len(visRows))
 			prefixContinuationRows(segs, segWidths, cachedWrapIndicatorPrefix, wrapIndicatorWidth, startRow > 0)
 			visRows = append(visRows, segs...)
@@ -496,7 +517,14 @@ func (lv *LogView) updateViewportWrapped() {
 // AppendLine appends a log line to the ring buffer and updates the viewport.
 func (lv *LogView) AppendLine(line string) {
 	droppedBefore := lv.buffer.Dropped()
-	colored := lv.pipeline.Highlight(line)
+	// ToggleSyntax sets pipeline to nil to disable highlighting; mirror its
+	// guard here so AppendLine never panics when syntax is off.
+	var colored string
+	if lv.pipeline != nil {
+		colored = lv.pipeline.Highlight(line)
+	} else {
+		colored = line
+	}
 	coloredWidth := ansi.StringWidth(colored)
 
 	// Before the buffer mutates, capture the evicted line's width for
@@ -802,10 +830,7 @@ func (lv *LogView) ensureMatchVisible() {
 		// Add wrapped row offset within the line (first row is vpWidth wide,
 		// continuation rows are contWidth wide).
 		if pos.colStart >= vpWidth {
-			contWidth := vpWidth - wrapIndicatorWidth
-			if contWidth <= 0 {
-				contWidth = 1
-			}
+			contWidth := continuationWidth(vpWidth)
 			visualRow += 1 + (pos.colStart-vpWidth)/contWidth
 		}
 
@@ -967,15 +992,11 @@ func (lv *LogView) InsertMarker() {
 	styled := lipgloss.NewStyle().Foreground(theme.Muted).Faint(true).Render(raw)
 	rawWidth := ansi.StringWidth(raw)
 	lv.buffer.Append(raw, styled, raw, rawWidth)
-	if lv.softWrap && !lv.filterState.Active() {
-		lv.totalWrappedRows += wrapHeight(rawWidth, lv.logVP.width)
-	}
-	if lv.filterState.Active() {
-		lv.filteredIndices = append(lv.filteredIndices, lv.filteredIndexOffset+lv.buffer.Len()-1)
-		if lv.softWrap {
-			lv.recomputeTotalWrappedRows()
-		}
-	}
+	// Markers are short and emitted at a controlled cadence; callers rely on
+	// them sticking in the buffer next to the surrounding entries, so we
+	// assume no eviction here and always surface the marker regardless of
+	// the active filter.
+	lv.trackNonEvictingAppend(true, rawWidth)
 	if lv.autoscroll && !lv.softWrap {
 		lv.scrollOffset = lv.totalDisplayLines() - lv.viewportHeight()
 	}
@@ -993,6 +1014,8 @@ func (lv *LogView) SetInlineSearch(s string) { lv.inlineSearch = s }
 // Update handles messages for viewport scrolling.
 func (lv LogView) Update(msg tea.Msg) (LogView, tea.Cmd) {
 	switch msg := msg.(type) {
+	// Wheel events are handled locally here because LogView owns soft-wrap
+	// scroll state the app dispatcher cannot reach; no ScrollWheel helper.
 	case tea.MouseWheelMsg:
 		switch msg.Button {
 		case tea.MouseWheelDown:

@@ -967,3 +967,63 @@ func TestDetailViewWrapSearchPlainTextBakesHighlights(t *testing.T) {
 		t.Fatalf("expected matchIndex=0, got %d", dv.matchIndex)
 	}
 }
+
+// scrollableDetailView returns a DetailView with enough content that the
+// viewport can be scrolled vertically.
+func scrollableDetailView(t *testing.T) *DetailView {
+	t.Helper()
+	dv := NewDetailView(40, 6)
+	dv.SetMode(msgs.DetailYAML)
+	var lines []string
+	for i := range 30 {
+		lines = append(lines, fmt.Sprintf("line-%02d", i))
+	}
+	content := strings.Join(lines, "\n")
+	dv.SetContent(render.Content{Raw: content, Display: content}, true)
+	return &dv
+}
+
+func TestDetailViewScrollWheelDownIncreasesYOffset(t *testing.T) {
+	dv := scrollableDetailView(t)
+	before := dv.viewport.YOffset()
+	dv.ScrollWheel(tea.MouseWheelDown)
+	if got := dv.viewport.YOffset(); got <= before {
+		t.Fatalf("wheel down: YOffset before=%d after=%d (expected increase)", before, got)
+	}
+}
+
+func TestDetailViewScrollWheelUpAtTopStays(t *testing.T) {
+	dv := scrollableDetailView(t)
+	dv.viewport.GotoTop()
+	if y := dv.viewport.YOffset(); y != 0 {
+		t.Fatalf("expected YOffset 0 before wheel up, got %d", y)
+	}
+	dv.ScrollWheel(tea.MouseWheelUp)
+	if got := dv.viewport.YOffset(); got != 0 {
+		t.Fatalf("wheel up at top: YOffset expected 0, got %d", got)
+	}
+}
+
+func TestDetailViewScrollWheelLeftRightNoOp(t *testing.T) {
+	dv := scrollableDetailView(t)
+	// Scroll down once so YOffset > 0, then left/right must be a no-op.
+	dv.ScrollWheel(tea.MouseWheelDown)
+	yBefore := dv.viewport.YOffset()
+	xBefore := dv.viewport.XOffset()
+
+	dv.ScrollWheel(tea.MouseWheelLeft)
+	if got := dv.viewport.YOffset(); got != yBefore {
+		t.Fatalf("wheel left changed YOffset: before=%d after=%d", yBefore, got)
+	}
+	if got := dv.viewport.XOffset(); got != xBefore {
+		t.Fatalf("wheel left changed XOffset: before=%d after=%d", xBefore, got)
+	}
+
+	dv.ScrollWheel(tea.MouseWheelRight)
+	if got := dv.viewport.YOffset(); got != yBefore {
+		t.Fatalf("wheel right changed YOffset: before=%d after=%d", yBefore, got)
+	}
+	if got := dv.viewport.XOffset(); got != xBefore {
+		t.Fatalf("wheel right changed XOffset: before=%d after=%d", xBefore, got)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
@@ -1043,5 +1044,121 @@ func TestColumnWidthsRecomputedWhenRowCountChanges(t *testing.T) {
 	// Column widths should have been recomputed (different slice)
 	if &rl.cachedColumnWidths[0] == &savedCols[0] {
 		t.Fatal("expected cachedColumnWidths to be recomputed when row count changes")
+	}
+}
+
+func TestResourceListRowAtYAboveChrome(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 20)
+	rl.SetObjects([]*unstructured.Unstructured{
+		makeObj("pod-a"), makeObj("pod-b"), makeObj("pod-c"),
+	})
+
+	// y=0 is the top border (with injected title) → -1
+	if got := rl.RowAtY(0); got != -1 {
+		t.Fatalf("y=0 (border): expected -1, got %d", got)
+	}
+	// y=1 is the table's header row (border chrome accounts for y=0, then
+	// table.RowAtY sees its own y=0 which is its header) → -1
+	if got := rl.RowAtY(1); got != -1 {
+		t.Fatalf("y=1 (table header): expected -1, got %d", got)
+	}
+}
+
+func TestResourceListRowAtYFirstDataRow(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 20)
+	rl.SetObjects([]*unstructured.Unstructured{
+		makeObj("pod-a"), makeObj("pod-b"), makeObj("pod-c"),
+	})
+
+	// y=2 is just past top-border (y=0) + table header (y=1) → first data row
+	if got := rl.RowAtY(2); got != 0 {
+		t.Fatalf("y=2 (first data row): expected 0, got %d", got)
+	}
+	if got := rl.RowAtY(3); got != 1 {
+		t.Fatalf("y=3: expected 1, got %d", got)
+	}
+	if got := rl.RowAtY(4); got != 2 {
+		t.Fatalf("y=4: expected 2, got %d", got)
+	}
+}
+
+func TestResourceListRowAtYPastLastRow(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 20)
+	rl.SetObjects([]*unstructured.Unstructured{
+		makeObj("pod-a"), makeObj("pod-b"),
+	})
+
+	// 2 rows: valid at y=2,3. y=4 → past last → -1
+	if got := rl.RowAtY(4); got != -1 {
+		t.Fatalf("y past last row: expected -1, got %d", got)
+	}
+	if got := rl.RowAtY(100); got != -1 {
+		t.Fatalf("y=100: expected -1, got %d", got)
+	}
+}
+
+func TestResourceListRowAtYNegative(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 20)
+	rl.SetObjects([]*unstructured.Unstructured{makeObj("pod-a")})
+	if got := rl.RowAtY(-1); got != -1 {
+		t.Fatalf("y=-1: expected -1, got %d", got)
+	}
+}
+
+func TestResourceListScrollWheelDownAdvancesCursor(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 20)
+	rl.SetObjects([]*unstructured.Unstructured{
+		makeObj("pod-a"), makeObj("pod-b"), makeObj("pod-c"),
+	})
+	before := rl.Cursor()
+	rl.ScrollWheel(tea.MouseWheelDown)
+	if got := rl.Cursor(); got != before+1 {
+		t.Fatalf("cursor after wheel down: expected %d, got %d", before+1, got)
+	}
+}
+
+func TestResourceListScrollWheelDownAtBottomStays(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 20)
+	rl.SetObjects([]*unstructured.Unstructured{
+		makeObj("pod-a"), makeObj("pod-b"),
+	})
+	rl.GotoBottom()
+	bottom := rl.Cursor()
+	rl.ScrollWheel(tea.MouseWheelDown)
+	if got := rl.Cursor(); got != bottom {
+		t.Fatalf("cursor at bottom after wheel down: expected %d, got %d", bottom, got)
+	}
+}
+
+func TestResourceListScrollWheelUpAtTopStays(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 20)
+	rl.SetObjects([]*unstructured.Unstructured{
+		makeObj("pod-a"), makeObj("pod-b"),
+	})
+	rl.GotoTop()
+	if rl.Cursor() != 0 {
+		t.Fatalf("expected cursor at 0 before wheel up, got %d", rl.Cursor())
+	}
+	rl.ScrollWheel(tea.MouseWheelUp)
+	if got := rl.Cursor(); got != 0 {
+		t.Fatalf("cursor at top after wheel up: expected 0, got %d", got)
+	}
+}
+
+func TestResourceListScrollWheelLeftRightNoOp(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 20)
+	rl.SetObjects([]*unstructured.Unstructured{
+		makeObj("pod-a"), makeObj("pod-b"), makeObj("pod-c"),
+	})
+	// Advance once so we're not at top (to prove left/right don't move).
+	rl.CursorDown()
+	before := rl.Cursor()
+	rl.ScrollWheel(tea.MouseWheelLeft)
+	if got := rl.Cursor(); got != before {
+		t.Fatalf("wheel left changed cursor: before=%d after=%d", before, got)
+	}
+	rl.ScrollWheel(tea.MouseWheelRight)
+	if got := rl.Cursor(); got != before {
+		t.Fatalf("wheel right changed cursor: before=%d after=%d", before, got)
 	}
 }

@@ -49,7 +49,7 @@ func DescribeSelector(b *render.Builder, matchLabels map[string]string) {
 	}
 }
 
-func DescribePodTemplate(b *render.Builder, template corev1.PodTemplateSpec) {
+func DescribePodTemplate(b *render.Builder, template corev1.PodTemplateSpec, configMaps, secrets []*unstructured.Unstructured) {
 	b.Section(render.LEVEL_0, "Pod Template")
 	if len(template.Labels) > 0 {
 		b.KVMulti(render.LEVEL_1, "Labels", template.Labels)
@@ -60,18 +60,18 @@ func DescribePodTemplate(b *render.Builder, template corev1.PodTemplateSpec) {
 	if template.Spec.ServiceAccountName != "" {
 		b.KV(render.LEVEL_1, "Service Account", template.Spec.ServiceAccountName)
 	}
-	DescribeTemplateContainers(b, "Containers", template.Spec.Containers)
-	DescribeTemplateContainers(b, "Init Containers", template.Spec.InitContainers)
+	DescribeTemplateContainers(b, "Containers", template.Spec.Containers, configMaps, secrets)
+	DescribeTemplateContainers(b, "Init Containers", template.Spec.InitContainers, configMaps, secrets)
 }
 
-func DescribeTemplateContainers(b *render.Builder, label string, ctrs []corev1.Container) {
+func DescribeTemplateContainers(b *render.Builder, label string, ctrs []corev1.Container, configMaps, secrets []*unstructured.Unstructured) {
 	if len(ctrs) == 0 {
 		return
 	}
 	b.Section(render.LEVEL_1, label)
 	for _, c := range ctrs {
 		b.Section(render.LEVEL_2, c.Name)
-		containers.DescribeContainer(b, render.LEVEL_3, c, nil, nil, nil, nil)
+		containers.DescribeContainer(b, render.LEVEL_3, c, nil, nil, configMaps, secrets)
 	}
 }
 

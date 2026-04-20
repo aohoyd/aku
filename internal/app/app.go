@@ -80,7 +80,21 @@ type App struct {
 	envResolved bool
 
 	// Overlay components
-	activeOverlay       overlay
+	activeOverlay overlay
+	// overlayRect is the screen area occupied by the currently active overlay,
+	// populated on each render and used by the mouse dispatcher to hit-test
+	// wheel/click events.
+	//
+	// WARNING / intentional pattern: this is a *pointer* field even though App
+	// is otherwise a value type. View() is a value-receiver by bubbletea
+	// contract, but the rect it computes must survive back to the next Update()
+	// call; returning a new App from View() is not an option. The pointer lets
+	// setOverlayRect/clearOverlayRect mutate the single shared cell through a
+	// value receiver. This is the only side-effecting field in View(); see the
+	// setOverlayRect/clearOverlayRect helpers. New() always initializes the
+	// pointer to a fresh zero rect — nothing reassigns it at runtime, so
+	// nil-checks are not needed on the read path.
+	overlayRect         *ui.OverlayRect
 	resourcePicker      ui.ResourcePicker
 	nsPicker            ui.NsPicker
 	confirmDialog       ui.ConfirmDialog
@@ -116,6 +130,31 @@ type App struct {
 	describeGen         uint64
 	describeDebounceSeq uint64
 	lastDetailKey       string
+
+	// Mouse double-click detection. `now` is injected so tests can advance a
+	// virtual clock; defaults to time.Now in New(). `lastClick*` record the
+	// previous click used to decide whether the current click is a double.
+	now            func() time.Time
+	lastClickTime  time.Time
+	lastClickKind  layout.PaneKind
+	lastClickRow   int // body-row index under the last click (-1 if chrome)
+	lastClickSplit int // split index for the last click (-1 if not a split)
+
+	// executeCommandFn is a test seam for intercepting command dispatch from
+	// the mouse double-click handler. When nil, (App).executeCommand is
+	// used. Tests that supply a spy receive the current App so state
+	// mutations made by handleMouseClick (e.g. resetting lastClickTime)
+	// propagate back into the returned model.
+	//
+	// Why a seam rather than observing the real side effects: the
+	// "enter-detail" command branches on split kind (resources, details,
+	// logs) and for some plugins triggers async drill-down work that
+	// depends on a live k8s client or store subscription. Mocking those
+	// dependencies just to observe "did Enter fire" would require wiring
+	// a full fake store per double-click test. The seam narrows the
+	// assertion to what's actually under test — the double-click decision
+	// — leaving the command-dispatch path covered by its own tests.
+	executeCommandFn func(a App, cmd string) (tea.Model, tea.Cmd)
 }
 
 // ResourceSpec describes a resource pane to open at startup.
@@ -155,6 +194,10 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 		containerPicker:     ui.NewContainerPicker(40, 20),
 		timeRangePicker:     ui.NewTimeRangePicker(40, 20),
 		scaleOverlay:        ui.NewScaleOverlay(40, 20),
+		overlayRect:         &ui.OverlayRect{},
+		now:                 time.Now,
+		lastClickRow:        -1,
+		lastClickSplit:      -1,
 	}
 
 	if initialOrientation == layout.OrientationHorizontal {
@@ -369,6 +412,12 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 		return a.handleKey(msg)
+
+	case tea.MouseClickMsg:
+		return a.handleMouseClick(msg)
+
+	case tea.MouseWheelMsg:
+		return a.handleMouseWheel(msg)
 
 	case msgs.ResourcePickedMsg:
 		// Handle resource picker submissions
@@ -862,6 +911,157 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return a.executeCommand(command)
 }
 
+// doubleClickWindow is the maximum elapsed time between two clicks for them
+// to be considered a double-click. Hardcoded per the mouse-support plan.
+const doubleClickWindow = 500 * time.Millisecond
+
+// handleMouseClick routes a left-click event to the pane under the cursor,
+// moving focus (and the split's row cursor when applicable). Non-left buttons
+// and clicks outside any pane are dropped. When an overlay is active the
+// click is dropped entirely — the overlay is not dismissed and no background
+// focus is stolen.
+//
+// A second left-click on the same split cell within doubleClickWindow is
+// treated as a double-click and dispatches the "enter-detail" command (the
+// same action Enter binds to in the resources scope).
+func (a App) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	// Defense in depth: bubbletea should not deliver mouse events when
+	// MouseMode is None, but tests bypass that path and a misbehaving
+	// terminal could too.
+	if !a.config.Mouse.Enabled {
+		return a, nil
+	}
+	if msg.Button != tea.MouseLeft {
+		return a, nil
+	}
+	if a.activeOverlay != overlayNone {
+		return a, nil
+	}
+	rect, ok := a.layout.PaneAt(msg.X, msg.Y)
+	if !ok {
+		return a, nil
+	}
+	// row is the body-row index under the click (or -1 for chrome / non-split).
+	row := -1
+	var refreshCmd tea.Cmd
+	switch rect.Kind {
+	case layout.PaneSplit:
+		prevFocusIdx := a.layout.FocusIndex()
+		split := a.layout.SplitAt(rect.SplitIdx)
+		prevCursor := -1
+		if split != nil {
+			prevCursor = split.Cursor()
+		}
+		a.layout.FocusSplitAt(rect.SplitIdx)
+		a.layout.FocusResources()
+		crossSplit := rect.SplitIdx != prevFocusIdx
+		if split != nil {
+			if r := split.RowAtY(msg.Y - rect.Y); r >= 0 {
+				split.SetCursor(r)
+				row = r
+				if crossSplit || r != prevCursor {
+					a, refreshCmd = a.refreshDetailPanelOrLog()
+				}
+			}
+		}
+	case layout.PaneDetail, layout.PaneLog:
+		a.layout.FocusDetails()
+	}
+
+	// Double-click detection: only splits can drill down, and the second
+	// click must land on the same data row as the first. Comparing row
+	// indices (not raw screen coords) protects against false doubles when
+	// the viewport has scrolled between the two clicks. Clicks on the
+	// detail/log pane update lastClick* (so a follow-up click on a split at
+	// the same coords cannot spuriously count as a double) but never trigger
+	// a double themselves.
+	now := a.now()
+	isDouble := rect.Kind == layout.PaneSplit &&
+		a.lastClickKind == layout.PaneSplit &&
+		row >= 0 &&
+		row == a.lastClickRow &&
+		rect.SplitIdx == a.lastClickSplit &&
+		now.Sub(a.lastClickTime) <= doubleClickWindow
+
+	a.lastClickTime = now
+	a.lastClickKind = rect.Kind
+	a.lastClickRow = row
+	if rect.Kind == layout.PaneSplit {
+		a.lastClickSplit = rect.SplitIdx
+	} else {
+		a.lastClickSplit = -1
+	}
+
+	if isDouble {
+		// Reset so a third click in quick succession does not chain into
+		// another double-click. The updated `a` (with lastClick state and
+		// reset lastClickTime) is passed by value into executeCommand, so
+		// the returned model preserves these fields.
+		a.lastClickTime = time.Time{}
+		if a.executeCommandFn != nil {
+			return a.executeCommandFn(a, "enter-detail")
+		}
+		return a.executeCommand("enter-detail")
+	}
+	return a, refreshCmd
+}
+
+// handleMouseWheel routes a wheel event to the pane under the cursor (or the
+// active overlay) without changing focus. Wheel events outside any pane or
+// outside the active overlay rect are dropped.
+func (a App) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	// Defense in depth: bubbletea should not deliver mouse events when
+	// MouseMode is None, but tests bypass that path and a misbehaving
+	// terminal could too.
+	if !a.config.Mouse.Enabled {
+		return a, nil
+	}
+	if a.activeOverlay != overlayNone {
+		// Drop events if we have no populated rect (View() has not yet run)
+		// or the pointer is outside the overlay bounds.
+		if !a.OverlayRect().Contains(msg.X, msg.Y) {
+			return a, nil
+		}
+		// Inline the active-overlay routing. The pointer expressions take
+		// the address of fields on the local value receiver `a`; ScrollWheel
+		// mutates that local copy, which is then returned to bubbletea so
+		// the mutation persists.
+		switch a.activeOverlay {
+		case overlayResourcePicker:
+			(&a.resourcePicker).ScrollWheel(msg.Button)
+		case overlayNsPicker:
+			(&a.nsPicker).ScrollWheel(msg.Button)
+		case overlayContainerPicker:
+			(&a.containerPicker).ScrollWheel(msg.Button)
+		case overlayTimeRange:
+			(&a.timeRangePicker).ScrollWheel(msg.Button)
+		}
+		return a, nil
+	}
+
+	rect, ok := a.layout.PaneAt(msg.X, msg.Y)
+	if !ok {
+		return a, nil
+	}
+	switch rect.Kind {
+	case layout.PaneSplit:
+		if split := a.layout.SplitAt(rect.SplitIdx); split != nil {
+			split.ScrollWheel(msg.Button)
+		}
+	case layout.PaneDetail:
+		if panel := a.layout.RightPanel(); panel != nil {
+			panel.ScrollWheel(msg.Button)
+		}
+	case layout.PaneLog:
+		if lv := a.layout.LogView(); lv != nil {
+			updated, cmd := lv.Update(msg)
+			*lv = updated
+			return a, cmd
+		}
+	}
+	return a, nil
+}
+
 func (a App) refreshDetailPanelOpts(preserve bool) (App, tea.Cmd) {
 	if a.layout.IsLogMode() {
 		// In log mode, refreshes are handled by the log stream, not the detail panel
@@ -877,6 +1077,12 @@ func (a App) refreshDetailPanelOpts(preserve bool) (App, tea.Cmd) {
 	sel := focused.Selected()
 	if sel == nil {
 		return a, nil
+	}
+	// When the selected resource changes (cursor move, mouse click, identity
+	// change from store update, etc.), clear uncover state so the [S] header
+	// indicator does not stick on resources whose plugin may not support it.
+	if newKey := a.detailKey(); newKey != "" && a.lastDetailKey != "" && newKey != a.lastDetailKey {
+		a.envResolved = false
 	}
 	panel := a.layout.RightPanel()
 	panel.SetEnvResolved(a.envResolved)
@@ -1203,57 +1409,87 @@ func (a App) View() tea.View {
 		main = lipgloss.JoinVertical(lipgloss.Left, body, statusBar)
 	}
 
-	switch a.activeOverlay {
-	case overlayResourcePicker:
-		if v := a.resourcePicker.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
+	// Capture the overlay rect (for mouse hit-testing) and composite the
+	// overlay onto main in a single pass — PlaceOverlayWithRect measures
+	// and anchors the overlay once and returns both the rendered string
+	// and the rect.
+	overlayView := a.currentOverlayView()
+	if overlayView != "" {
+		rendered, rect, ok := ui.PlaceOverlayWithRect(a.width, a.height, main, overlayView)
+		if ok {
+			a.setOverlayRect(rect)
+		} else {
+			a.clearOverlayRect()
 		}
-	case overlayNsPicker:
-		if v := a.nsPicker.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
-	case overlayPortForward:
-		if v := a.portForwardOverlay.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
-	case overlaySetImage:
-		if v := a.setImageOverlay.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
-	case overlayHelmRollback:
-		if v := a.helmRollbackOverlay.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
-	case overlayChartInput:
-		if v := a.chartInputOverlay.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
-	case overlayConfirm:
-		if v := a.confirmDialog.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
-	case overlayHelp:
-		if v := a.helpOverlay.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
-	case overlayContainerPicker:
-		if v := a.containerPicker.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
-	case overlayTimeRange:
-		if v := a.timeRangePicker.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
-	case overlayScale:
-		if v := a.scaleOverlay.View(); v != "" {
-			main = ui.PlaceOverlay(a.width, a.height, main, v)
-		}
+		main = rendered
+	} else {
+		a.clearOverlayRect()
 	}
 
 	return tea.View{
 		Content:   main,
 		AltScreen: true,
+		MouseMode: mouseMode(a.config.Mouse.Enabled),
 	}
+}
+
+// mouseMode returns the tea.MouseMode enum for the configured mouse.enabled
+// flag. Kept as a tiny helper so tea.View{} construction stays expression-form.
+func mouseMode(enabled bool) tea.MouseMode {
+	if enabled {
+		return tea.MouseModeCellMotion
+	}
+	return tea.MouseModeNone
+}
+
+// currentOverlayView returns the rendered view string of the currently active
+// overlay, or "" if no overlay is active or its view is empty. The search bar
+// and confirm dialog returns are handled consistently with the render switch
+// in View().
+func (a App) currentOverlayView() string {
+	switch a.activeOverlay {
+	case overlayResourcePicker:
+		return a.resourcePicker.View()
+	case overlayNsPicker:
+		return a.nsPicker.View()
+	case overlayPortForward:
+		return a.portForwardOverlay.View()
+	case overlaySetImage:
+		return a.setImageOverlay.View()
+	case overlayHelmRollback:
+		return a.helmRollbackOverlay.View()
+	case overlayChartInput:
+		return a.chartInputOverlay.View()
+	case overlayConfirm:
+		return a.confirmDialog.View()
+	case overlayHelp:
+		return a.helpOverlay.View()
+	case overlayContainerPicker:
+		return a.containerPicker.View()
+	case overlayTimeRange:
+		return a.timeRangePicker.View()
+	case overlayScale:
+		return a.scaleOverlay.View()
+	}
+	return ""
+}
+
+// setOverlayRect stores the current overlay's screen rectangle. Uses a pointer
+// field so the mutation persists across the value-receiver View() call. The
+// pointer is always non-nil — New() initializes it and nothing reassigns it.
+func (a App) setOverlayRect(r ui.OverlayRect) {
+	*a.overlayRect = r
+}
+
+// clearOverlayRect zeroes the stored overlay rect (no active overlay).
+func (a App) clearOverlayRect() {
+	*a.overlayRect = ui.OverlayRect{}
+}
+
+// OverlayRect returns the screen rectangle occupied by the currently active
+// overlay. The zero value (all fields 0) indicates no active overlay.
+func (a App) OverlayRect() ui.OverlayRect {
+	return *a.overlayRect
 }
 
 // refreshDrillDownSplit re-runs the parent's DrillDown to get fresh filtered

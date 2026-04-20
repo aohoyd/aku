@@ -300,6 +300,175 @@ func TestTableXOffsetNoScrollNeeded(t *testing.T) {
 	}
 }
 
+func TestRowAtYWithHeaderZeroScroll(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(10)),
+		WithHeight(10),
+	)
+	// cursor=0 so m.start=0
+	if got := m.RowAtY(0); got != -1 {
+		t.Fatalf("y=0 (header): expected -1, got %d", got)
+	}
+	if got := m.RowAtY(1); got != 0 {
+		t.Fatalf("y=1: expected 0, got %d", got)
+	}
+	if got := m.RowAtY(2); got != 1 {
+		t.Fatalf("y=2: expected 1, got %d", got)
+	}
+	if got := m.RowAtY(5); got != 4 {
+		t.Fatalf("y=5: expected 4, got %d", got)
+	}
+}
+
+func TestRowAtYWithNonZeroScroll(t *testing.T) {
+	// Small viewport, many rows, cursor far down — forces m.start > 0
+	// AND viewport.YOffset() > 0 because MoveDown adjusts the viewport
+	// scroll position to keep the cursor visible.
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(6), // viewport height 5 after header
+	)
+	m.MoveDown(20) // cursor = 20
+
+	// Verify m.start is non-zero
+	if m.start == 0 {
+		t.Fatalf("test setup: expected m.start > 0, got %d", m.start)
+	}
+
+	// y=0 is header row → -1
+	if got := m.RowAtY(0); got != -1 {
+		t.Fatalf("y=0 (header): expected -1, got %d", got)
+	}
+	// y=1 is the first rendered body row, which corresponds to data
+	// index m.start + viewport.YOffset().
+	want := m.start + m.viewport.YOffset()
+	if got := m.RowAtY(1); got != want {
+		t.Fatalf("y=1: expected m.start+YOffset=%d, got %d", want, got)
+	}
+	if got := m.RowAtY(2); got != want+1 {
+		t.Fatalf("y=2: expected %d, got %d", want+1, got)
+	}
+}
+
+// TestRowAtYWithStartOnlyNoYOffset exercises the m.start > 0 branch in
+// isolation — the rendered window starts at m.start but the viewport itself
+// has not been scrolled (YOffset == 0). RowAtY(1) must return m.start.
+func TestRowAtYWithStartOnlyNoYOffset(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(11), // viewport height 10 after header
+	)
+	// Cursor at index 15 — UpdateViewport sets m.start = clamp(15-10, 0, 15) = 5.
+	// EnsureCursorVisible centers the cursor and SetYOffset would normally
+	// move it; we then explicitly reset YOffset to 0 so we exercise pure
+	// m.start contribution.
+	m.SetCursor(15)
+	m.viewport.SetYOffset(0)
+
+	if m.start == 0 {
+		t.Fatalf("test setup: expected m.start > 0, got %d", m.start)
+	}
+	if m.viewport.YOffset() != 0 {
+		t.Fatalf("test setup: expected YOffset == 0, got %d", m.viewport.YOffset())
+	}
+	if got := m.RowAtY(1); got != m.start {
+		t.Fatalf("y=1: expected m.start=%d, got %d", m.start, got)
+	}
+	if got := m.RowAtY(2); got != m.start+1 {
+		t.Fatalf("y=2: expected m.start+1=%d, got %d", m.start+1, got)
+	}
+}
+
+func TestRowAtYOutOfRange(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(3)),
+		WithHeight(10),
+	)
+	// 3 rows: valid data at y=1,2,3. y=4 → past last row → -1.
+	if got := m.RowAtY(4); got != -1 {
+		t.Fatalf("y past last row: expected -1, got %d", got)
+	}
+	if got := m.RowAtY(100); got != -1 {
+		t.Fatalf("y=100: expected -1, got %d", got)
+	}
+}
+
+func TestRowAtYPastViewportWithScroll(t *testing.T) {
+	// Many rows, small viewport, cursor far down so m.start > 0. A y that
+	// is valid in terms of header+data count but past the viewport bottom
+	// must return -1 (no row is actually rendered there).
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(6), // viewport height 5 after header
+	)
+	m.MoveDown(20)
+	if m.start == 0 {
+		t.Fatalf("test setup: expected m.start > 0, got %d", m.start)
+	}
+	vh := 5 // viewport height matches WithHeight(6) - 1 header
+
+	// y=1+vh (== 6) is one past the last rendered body row — must be -1.
+	if got := m.RowAtY(1 + vh); got != -1 {
+		t.Fatalf("y=1+vh: expected -1 (off-bottom), got %d", got)
+	}
+	// Within viewport still works. The data row visible at the last body
+	// line is m.start + viewport.YOffset() + (vh-1).
+	wantLast := m.start + m.viewport.YOffset() + vh - 1
+	if got := m.RowAtY(vh); got != wantLast {
+		t.Fatalf("y=vh (last visible row): expected %d, got %d", wantLast, got)
+	}
+}
+
+func TestRowAtYEmptyRows(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithHeight(10),
+	)
+	for _, y := range []int{-1, 0, 1, 2, 5} {
+		if got := m.RowAtY(y); got != -1 {
+			t.Fatalf("empty table, y=%d: expected -1, got %d", y, got)
+		}
+	}
+}
+
+func TestRowAtYNegativeY(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(5)),
+		WithHeight(10),
+	)
+	if got := m.RowAtY(-1); got != -1 {
+		t.Fatalf("y=-1: expected -1, got %d", got)
+	}
+}
+
+func TestRowAtYDoesNotMutate(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(10)),
+		WithHeight(10),
+	)
+	m.SetCursor(3)
+	startBefore := m.start
+	cursorBefore := m.Cursor()
+
+	_ = m.RowAtY(2)
+	_ = m.RowAtY(100)
+	_ = m.RowAtY(-5)
+
+	if m.start != startBefore {
+		t.Fatalf("RowAtY mutated m.start: before=%d after=%d", startBefore, m.start)
+	}
+	if m.Cursor() != cursorBefore {
+		t.Fatalf("RowAtY mutated cursor: before=%d after=%d", cursorBefore, m.Cursor())
+	}
+}
+
 func makeRows(n int) []Row {
 	rows := make([]Row, n)
 	for i := range n {

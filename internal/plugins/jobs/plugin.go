@@ -102,7 +102,7 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 	workload.DescribeConditions(b, job)
 
 	// Pod Template
-	workload.DescribePodTemplate(b, job.Spec.Template)
+	workload.DescribePodTemplate(b, job.Spec.Template, nil, nil)
 
 	return b.Build(), nil
 }

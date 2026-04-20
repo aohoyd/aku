@@ -309,6 +309,36 @@ func (m *Model) EnsureCursorVisible() {
 	m.viewport.SetYOffset(newOffset)
 }
 
+// RowAtY maps a y-coordinate (relative to the table's top-left, 0 = header row
+// when a header is shown) to the underlying row index. Returns -1 if y falls
+// on the header row, above it, or past the last data row. Pure lookup — does
+// not mutate any state.
+//
+// Header height is always 1 because View() always emits exactly one header
+// line (see headersView()); the literal is used here instead of a
+// lipgloss.Height round-trip for speed. If headers ever become optional or
+// multi-line, recompute from headersView().
+func (m *Model) RowAtY(localY int) int {
+	const headerHeight = 1
+	offset := localY - headerHeight
+	if offset < 0 {
+		return -1
+	}
+	// Off the bottom of the visible viewport: no row here even if m.rows
+	// still has data beyond the scrolled window.
+	if offset >= m.viewport.Height() {
+		return -1
+	}
+	// The rendered window starts at m.start in the data; the viewport then
+	// scrolls within that rendered slice by viewport.YOffset() lines. So the
+	// data row visible at body-line `offset` is m.start + YOffset + offset.
+	idx := m.start + m.viewport.YOffset() + offset
+	if idx < 0 || idx >= len(m.rows) {
+		return -1
+	}
+	return idx
+}
+
 // SelectedRow returns the selected row.
 // You can cast it to your own implementation.
 func (m Model) SelectedRow() Row {

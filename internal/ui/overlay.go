@@ -35,12 +35,74 @@ const (
 	dimOff = "\x1b[22m"
 )
 
+// OverlayRect describes the screen area occupied by a rendered overlay.
+// X,Y are the top-left cell coordinates; W,H are the overlay content width
+// and height in cells.
+type OverlayRect struct {
+	X, Y, W, H int
+}
+
+// Contains reports whether the given cell coordinate lies inside the rect.
+// Returns false for zero-sized rects (W == 0 || H == 0), which is the
+// sentinel for "no active overlay".
+func (r OverlayRect) Contains(x, y int) bool {
+	if r.W == 0 || r.H == 0 {
+		return false
+	}
+	return x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H
+}
+
+// overlayContentWidth returns the maximum cell-width across overlay lines.
+func overlayContentWidth(overlayLines []string) int {
+	ow := 0
+	for _, l := range overlayLines {
+		if w := ansi.StringWidth(l); w > ow {
+			ow = w
+		}
+	}
+	return ow
+}
+
+// overlayAnchor returns the top-left (col, row) where an ow x oh overlay
+// should be placed on a bgWidth x bgHeight background at the given
+// normalized position. Coordinates are clamped so the overlay fits inside
+// the background whenever it is small enough.
+func overlayAnchor(bgWidth, bgHeight, ow, oh int, hPos, vPos float64) (int, int) {
+	col := int(float64(bgWidth-ow) * hPos)
+	row := int(float64(bgHeight-oh) * vPos)
+	if col < 0 {
+		col = 0
+	}
+	if row < 0 {
+		row = 0
+	}
+	if col+ow > bgWidth {
+		col = max(0, bgWidth-ow)
+	}
+	if row+oh > bgHeight {
+		row = max(0, bgHeight-oh)
+	}
+	return col, row
+}
+
 // PlaceOverlay composites the overlay string centered (by default) over bg,
 // dimming the background content that is not covered by the overlay.
 // bgWidth and bgHeight are the terminal dimensions.
 func PlaceOverlay(bgWidth, bgHeight int, bg, overlay string, opts ...OverlayOption) string {
+	out, _, _ := placeOverlayInternal(bgWidth, bgHeight, bg, overlay, opts...)
+	return out
+}
+
+// PlaceOverlayWithRect is like PlaceOverlay but also returns the rect that the
+// overlay occupies on screen. Splits and width measurement happen once. When
+// overlay is empty, returns bg and a zero rect with ok=false.
+func PlaceOverlayWithRect(bgWidth, bgHeight int, bg, overlay string, opts ...OverlayOption) (string, OverlayRect, bool) {
+	return placeOverlayInternal(bgWidth, bgHeight, bg, overlay, opts...)
+}
+
+func placeOverlayInternal(bgWidth, bgHeight int, bg, overlay string, opts ...OverlayOption) (string, OverlayRect, bool) {
 	if overlay == "" {
-		return bg
+		return bg, OverlayRect{}, false
 	}
 
 	cfg := overlayOpts{hPos: 0.5, vPos: 0.5, dim: true}
@@ -59,27 +121,20 @@ func PlaceOverlay(bgWidth, bgHeight int, bg, overlay string, opts ...OverlayOpti
 	overlayLines := strings.Split(overlay, "\n")
 	oh := len(overlayLines)
 
-	ow := 0
-	for _, l := range overlayLines {
-		if w := ansi.StringWidth(l); w > ow {
-			ow = w
-		}
-	}
+	ow := overlayContentWidth(overlayLines)
+	col, row := overlayAnchor(bgWidth, bgHeight, ow, oh, cfg.hPos, cfg.vPos)
 
-	col := int(float64(bgWidth-ow) * cfg.hPos)
-	row := int(float64(bgHeight-oh) * cfg.vPos)
-	if col < 0 {
-		col = 0
+	// Visible dimensions of the rect, clamped to the background so callers
+	// hit-testing with Contains never reach past the terminal edge.
+	visW := ow
+	if col+visW > bgWidth {
+		visW = max(0, bgWidth-col)
 	}
-	if row < 0 {
-		row = 0
+	visH := oh
+	if row+visH > bgHeight {
+		visH = max(0, bgHeight-row)
 	}
-	if col+ow > bgWidth {
-		col = max(0, bgWidth-ow)
-	}
-	if row+oh > bgHeight {
-		row = max(0, bgHeight-oh)
-	}
+	rect := OverlayRect{X: col, Y: row, W: visW, H: visH}
 
 	var sb strings.Builder
 	sb.Grow(len(bg) + len(overlay) + bgHeight*10)
@@ -136,5 +191,5 @@ func PlaceOverlay(bgWidth, bgHeight int, bg, overlay string, opts ...OverlayOpti
 		}
 	}
 
-	return sb.String()
+	return sb.String(), rect, true
 }

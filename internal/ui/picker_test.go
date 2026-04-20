@@ -133,6 +133,98 @@ func TestPickerEnterOnEmptyListClosesWithNil(t *testing.T) {
 	}
 }
 
+func TestPickerScrollWheelDownAdvancesCursor(t *testing.T) {
+	p := newTestPicker([]string{"a", "b", "c"})
+	p.Open()
+	if p.Cursor() != 0 {
+		t.Fatalf("initial cursor should be 0, got %d", p.Cursor())
+	}
+	p.ScrollWheel(tea.MouseWheelDown)
+	if p.Cursor() != 1 {
+		t.Fatalf("cursor should be 1 after wheel down, got %d", p.Cursor())
+	}
+	p.ScrollWheel(tea.MouseWheelDown)
+	if p.Cursor() != 2 {
+		t.Fatalf("cursor should be 2 after second wheel down, got %d", p.Cursor())
+	}
+}
+
+func TestPickerScrollWheelDownAtLastStays(t *testing.T) {
+	p := newTestPicker([]string{"a", "b", "c"})
+	p.Open()
+	p.ScrollWheel(tea.MouseWheelDown)
+	p.ScrollWheel(tea.MouseWheelDown)
+	if p.Cursor() != 2 {
+		t.Fatalf("cursor should be 2 after two wheel downs, got %d", p.Cursor())
+	}
+	p.ScrollWheel(tea.MouseWheelDown)
+	if p.Cursor() != 2 {
+		t.Fatalf("cursor should clamp at 2 (last), got %d", p.Cursor())
+	}
+}
+
+func TestPickerScrollWheelUpAtFirstStays(t *testing.T) {
+	p := newTestPicker([]string{"a", "b", "c"})
+	p.Open()
+	if p.Cursor() != 0 {
+		t.Fatalf("initial cursor should be 0, got %d", p.Cursor())
+	}
+	p.ScrollWheel(tea.MouseWheelUp)
+	if p.Cursor() != 0 {
+		t.Fatalf("cursor should clamp at 0, got %d", p.Cursor())
+	}
+}
+
+func TestPickerScrollWheelUpMovesCursorBack(t *testing.T) {
+	p := newTestPicker([]string{"a", "b", "c"})
+	p.Open()
+	p.ScrollWheel(tea.MouseWheelDown)
+	p.ScrollWheel(tea.MouseWheelDown)
+	if p.Cursor() != 2 {
+		t.Fatalf("setup: expected cursor 2, got %d", p.Cursor())
+	}
+	p.ScrollWheel(tea.MouseWheelUp)
+	if p.Cursor() != 1 {
+		t.Fatalf("cursor should be 1 after wheel up, got %d", p.Cursor())
+	}
+}
+
+func TestPickerScrollWheelLeftRightNoOp(t *testing.T) {
+	p := newTestPicker([]string{"a", "b", "c"})
+	p.Open()
+	p.ScrollWheel(tea.MouseWheelDown)
+	if p.Cursor() != 1 {
+		t.Fatalf("setup: expected cursor 1, got %d", p.Cursor())
+	}
+	p.ScrollWheel(tea.MouseWheelLeft)
+	if p.Cursor() != 1 {
+		t.Fatalf("wheel left should not move cursor, got %d", p.Cursor())
+	}
+	p.ScrollWheel(tea.MouseWheelRight)
+	if p.Cursor() != 1 {
+		t.Fatalf("wheel right should not move cursor, got %d", p.Cursor())
+	}
+}
+
+// TestPickerScrollWheelOnInactivePickerDoesNothing verifies that wheel events
+// on a picker that was never opened (or was closed) do not panic and do not
+// move the cursor off its initial 0 value. Defensive: the app dispatcher
+// should never route wheel events to an inactive overlay, but we guarantee
+// the component tolerates it regardless.
+func TestPickerScrollWheelOnInactivePickerDoesNothing(t *testing.T) {
+	p := newTestPicker([]string{"a", "b", "c"})
+	// Picker is NOT opened.
+	if p.Active() {
+		t.Fatal("precondition: picker should be inactive")
+	}
+	before := p.Cursor()
+	p.ScrollWheel(tea.MouseWheelDown)
+	p.ScrollWheel(tea.MouseWheelUp)
+	if p.Cursor() != before {
+		t.Fatalf("cursor moved on inactive picker: before=%d after=%d", before, p.Cursor())
+	}
+}
+
 func TestPickerFilterResetsSelection(t *testing.T) {
 	p := newTestPicker([]string{"alpha", "beta", "gamma"})
 	p.Open()

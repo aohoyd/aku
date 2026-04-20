@@ -14,7 +14,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var gvr = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+var (
+	gvr           = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	configMapsGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+	secretsGVR    = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+)
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes Deployments.
 type Plugin struct {
@@ -62,6 +66,22 @@ func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
+	return p.describe(obj, nil, nil)
+}
+
+// DescribeUncovered implements plugin.Uncoverable. It resolves env references
+// in template containers by passing live ConfigMaps and Secrets from the store.
+func (p *Plugin) DescribeUncovered(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
+	if p.store == nil {
+		return p.describe(obj, nil, nil)
+	}
+	ns := obj.GetNamespace()
+	p.store.Subscribe(configMapsGVR, ns)
+	p.store.Subscribe(secretsGVR, ns)
+	return p.describe(obj, p.store.List(configMapsGVR, ns), p.store.List(secretsGVR, ns))
+}
+
+func (p *Plugin) describe(obj *unstructured.Unstructured, configMaps, secrets []*unstructured.Unstructured) (render.Content, error) {
 	deploy, err := toDeployment(obj)
 	if err != nil {
 		return render.Content{}, fmt.Errorf("converting to Deployment: %w", err)
@@ -134,8 +154,8 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 	}
 
 	// Containers
-	workload.DescribeTemplateContainers(b, "Containers", deploy.Spec.Template.Spec.Containers)
-	workload.DescribeTemplateContainers(b, "Init Containers", deploy.Spec.Template.Spec.InitContainers)
+	workload.DescribeTemplateContainers(b, "Containers", deploy.Spec.Template.Spec.Containers, configMaps, secrets)
+	workload.DescribeTemplateContainers(b, "Init Containers", deploy.Spec.Template.Spec.InitContainers, configMaps, secrets)
 
 	// Conditions
 	workload.DescribeConditions(b, deploy)

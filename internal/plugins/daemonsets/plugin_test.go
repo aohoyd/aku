@@ -194,6 +194,106 @@ func TestPluginDescribeDocument(t *testing.T) {
 	}
 }
 
+func TestPluginDescribeUncovered(t *testing.T) {
+	store := k8s.NewStore(nil, nil)
+	cmGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+	secGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+
+	store.CacheUpsert(cmGVR, "default", &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{"name": "app-config", "namespace": "default"},
+			"data":     map[string]any{"DB_HOST": "postgres.svc"},
+		},
+	})
+	store.CacheUpsert(secGVR, "default", &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{"name": "my-secret", "namespace": "default"},
+			"data":     map[string]any{"api-key": "c2VjcmV0"},
+		},
+	})
+
+	p := New(nil, store)
+
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{
+				"name":              "fluentd",
+				"namespace":         "default",
+				"creationTimestamp": "2026-02-24T10:00:00Z",
+			},
+			"spec": map[string]any{
+				"selector": map[string]any{"matchLabels": map[string]any{"app": "fluentd"}},
+				"template": map[string]any{
+					"spec": map[string]any{
+						"containers": []any{
+							map[string]any{
+								"name":  "fluentd",
+								"image": "fluentd:v1.16",
+								"envFrom": []any{
+									map[string]any{
+										"configMapRef": map[string]any{"name": "app-config"},
+									},
+								},
+								"env": []any{
+									map[string]any{
+										"name": "API_KEY",
+										"valueFrom": map[string]any{
+											"secretKeyRef": map[string]any{"name": "my-secret", "key": "api-key"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	unc, ok := p.(plugin.Uncoverable)
+	if !ok {
+		t.Fatal("Plugin should implement Uncoverable")
+	}
+
+	c, err := unc.DescribeUncovered(t.Context(), obj)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.Display == "" {
+		t.Fatal("display output should not be empty")
+	}
+	if stripped := ansi.Strip(c.Display); stripped != c.Raw {
+		t.Errorf("strip invariant violated: ansi.Strip(c.Display) != raw\nstripped: %q\nraw:      %q",
+			stripped, c.Raw)
+	}
+	if !strings.Contains(c.Raw, "app-config") {
+		t.Errorf("expected 'app-config' source in uncovered output\n%s", c.Raw)
+	}
+	if !strings.Contains(c.Raw, "postgres.svc") {
+		t.Errorf("expected resolved configmap value 'postgres.svc' in output\n%s", c.Raw)
+	}
+	if !strings.Contains(c.Raw, "secret") {
+		t.Errorf("expected resolved secret value in output\n%s", c.Raw)
+	}
+	if strings.Contains(c.Raw, "<key api-key in Secret my-secret>") {
+		t.Errorf("should not contain unresolved reference\n%s", c.Raw)
+	}
+}
+
+func TestPluginDescribeUncoveredNilStore(t *testing.T) {
+	p := &Plugin{store: nil}
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{"name": "x", "namespace": "default"},
+			"spec":     map[string]any{"template": map[string]any{"spec": map[string]any{}}},
+		},
+	}
+	unc := plugin.ResourcePlugin(p).(plugin.Uncoverable)
+	if _, err := unc.DescribeUncovered(t.Context(), obj); err != nil {
+		t.Fatalf("unexpected error with nil store: %v", err)
+	}
+}
+
 func TestDaemonSetDrillDown(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	store := k8s.NewStore(nil, nil)

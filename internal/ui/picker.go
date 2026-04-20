@@ -87,6 +87,18 @@ func (p Picker[T]) Filtered() []T {
 	return p.filtered
 }
 
+// ScrollWheel nudges the picker's selection by one item in response to a
+// mouse wheel event. Up/down reuse the same cursor movement as k/j and the
+// arrow keys. Left/right wheel and any other button are dropped.
+func (p *Picker[T]) ScrollWheel(btn tea.MouseButton) {
+	switch btn {
+	case tea.MouseWheelUp:
+		p.overlay.HandleListKeys(tea.KeyPressMsg{Code: tea.KeyUp})
+	case tea.MouseWheelDown:
+		p.overlay.HandleListKeys(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+}
+
 // Update handles key messages for the picker.
 func (p Picker[T]) Update(msg tea.Msg) (Picker[T], tea.Cmd) {
 	switch msg := msg.(type) {

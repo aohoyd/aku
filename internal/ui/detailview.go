@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -227,6 +228,18 @@ func (d *DetailView) ScrollUp() { d.viewport.ScrollUp(1) }
 // ScrollDown scrolls the viewport down by one line.
 func (d *DetailView) ScrollDown() { d.viewport.ScrollDown(1) }
 
+// ScrollWheel nudges the viewport by one line in response to a mouse wheel
+// event. Up/down delegate to the embedded bubbles/viewport's scroll helpers.
+// Left/right wheel and any other button are dropped.
+func (d *DetailView) ScrollWheel(btn tea.MouseButton) {
+	switch btn {
+	case tea.MouseWheelUp:
+		d.viewport.ScrollUp(1)
+	case tea.MouseWheelDown:
+		d.viewport.ScrollDown(1)
+	}
+}
+
 // ToggleWrap toggles soft-wrap mode. When enabling wrap, content is pre-wrapped
 // via wrapLines so that continuation rows receive the "↪ " indicator. The
 // viewport's own SoftWrap is never used — we handle wrapping ourselves.
@@ -405,18 +418,34 @@ func (d DetailView) AnyActive() bool {
 // On continuation rows, columns are shifted right by wrapIndicatorWidth
 // to account for the prepended ↪ prefix.
 func (d *DetailView) logicalToVisual(pos matchPosition) (line, colStart, colEnd int) {
-	bestRow := -1
-	for row, m := range d.wrapMapping {
-		if m.logicalLine == pos.line && m.colOffset <= pos.colStart {
-			bestRow = row
-		} else if m.logicalLine > pos.line {
-			break
+	// wrapMapping is sorted by (logicalLine, colOffset) since wrapLines
+	// emits segments in input order, each line's continuation rows following
+	// its first row. Use a binary search to find the first row with
+	// logicalLine > pos.line OR (logicalLine == pos.line && colOffset >
+	// pos.colStart) — the best matching row is the one immediately before.
+	n := len(d.wrapMapping)
+	idx := sort.Search(n, func(i int) bool {
+		m := d.wrapMapping[i]
+		if m.logicalLine != pos.line {
+			return m.logicalLine > pos.line
 		}
+		return m.colOffset > pos.colStart
+	})
+	bestRow := -1
+	if idx > 0 && d.wrapMapping[idx-1].logicalLine == pos.line {
+		bestRow = idx - 1
 	}
 	if bestRow < 0 {
 		// Fallback: return logical coordinates unchanged.
 		return pos.line, pos.colStart, pos.colEnd
 	}
+	// Invariant: the scan above picks the last row whose colOffset <=
+	// pos.colStart, so pos.colStart - colOffset is guaranteed >= 0. And
+	// pos.colEnd >= pos.colStart by construction of matchPosition (end is
+	// strictly after start), so colEnd - colOffset is also >= 0. Matches do
+	// not span row boundaries — wrapping is a visual concern and each
+	// logical match lives inside a single wrap segment; so no clamp against
+	// the row width is needed here.
 	colStart = pos.colStart - d.wrapMapping[bestRow].colOffset
 	colEnd = pos.colEnd - d.wrapMapping[bestRow].colOffset
 	// Continuation rows have ↪ prepended — shift visual position right.

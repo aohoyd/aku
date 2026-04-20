@@ -176,6 +176,25 @@ func (r *ResourceList) CursorUp() { r.table.MoveUp(1); r.refreshSearchHighlights
 // CursorDown moves the table cursor down by one row.
 func (r *ResourceList) CursorDown() { r.table.MoveDown(1); r.refreshSearchHighlights() }
 
+// SetCursor sets the table cursor to the given row index. Out-of-range values
+// are clamped by the underlying table.
+func (r *ResourceList) SetCursor(row int) {
+	r.table.SetCursor(row)
+	r.refreshSearchHighlights()
+}
+
+// ScrollWheel advances the cursor by one row in response to a mouse wheel
+// event. Up/down reuse CursorUp/CursorDown (same as k/j). Left/right wheel
+// and any other button are dropped.
+func (r *ResourceList) ScrollWheel(btn tea.MouseButton) {
+	switch btn {
+	case tea.MouseWheelUp:
+		r.CursorUp()
+	case tea.MouseWheelDown:
+		r.CursorDown()
+	}
+}
+
 const listScrollStep = 8
 
 // ScrollRight scrolls the resource list right by listScrollStep characters.
@@ -205,6 +224,22 @@ func (r *ResourceList) ScrollEnd() {
 
 // Cursor returns selected element.
 func (r *ResourceList) Cursor() int { return r.table.Cursor() }
+
+// RowAtY maps a y-coordinate (relative to the ResourceList pane's top-left,
+// y=0 = top border line that carries the injected title) to an index into the
+// underlying display objects. Returns -1 for the border/header area or any y
+// past the last data row. Chrome accounted for: 1 line for the top border
+// (the title is injected into that border line via injectBorderTitle, so it
+// shares the same row); the table's own header row is subtracted inside
+// table.RowAtY.
+func (r *ResourceList) RowAtY(y int) int {
+	const borderChrome = 1
+	adjusted := y - borderChrome
+	if adjusted < 0 {
+		return -1
+	}
+	return r.table.RowAtY(adjusted)
+}
 
 // Plugin returns the current plugin.
 func (r *ResourceList) Plugin() plugin.ResourcePlugin {

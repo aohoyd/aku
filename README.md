@@ -47,6 +47,13 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Column sorting by name, namespace, age, status, or kind
 - Fully customizable keybindings via YAML
 
+**Mouse (optional)**
+- Wheel scrolls the pane under the cursor without changing focus
+- When an overlay (namespace picker, resource picker, etc.) is open, the wheel scrolls the overlay's list
+- Click on a split focuses that split and moves its cursor to the clicked row
+- Double-click (two clicks on the same data row within 500 ms (inclusive)) acts as Enter and drills into the resource
+- Enable with `mouse.enabled: true` in `config.yaml`
+
 ## Installation
 
 ### From GitHub releases
@@ -127,7 +134,17 @@ logs:
 api:
   timeout_seconds: 5       # default
   heartbeat_seconds: 5     # cluster health check interval (default)
+
+# Mouse support (off by default — preserves terminal text selection)
+mouse:
+  enabled: true    # default: false
 ```
+
+When `mouse.enabled` is `false` or unset, aku does not process mouse events and native terminal text selection works normally.
+
+When mouse support is enabled, aku captures mouse events for click focus, wheel scrolling, and double-click drill-down. Two clicks on the same row within 500 ms (inclusive) are treated as Enter. When no overlay is open, scrolling the wheel over any pane moves that pane's cursor without changing focus. When an overlay is open, the wheel scrolls the overlay's list instead.
+
+To copy text while mouse support is enabled, hold Option (iTerm2, macOS Terminal) or Shift (most Linux terminals) while dragging to bypass aku and use the terminal's native selection.
 
 ### keymap.yaml
 
@@ -240,6 +257,7 @@ syntax:
 | `R` | Deployments, Pods | Rollout restart |
 | `R` | Helm releases | Rollback |
 | `C` | Helm releases | Set chart |
+| `x` | Pods, Secrets, Containers, Deployments, StatefulSets, DaemonSets | Resolve/show env variables (list and detail) |
 | `pf` | Pods, Containers | Port forward |
 | `ss` | Pods, Containers | Exec |
 | `sd` | Pods, Containers, Nodes | Debug container |
