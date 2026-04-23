@@ -327,6 +327,10 @@ func (d DetailView) modeName() string {
 		return "Describe"
 	case msgs.DetailLogs:
 		return "Logs"
+	case msgs.DetailValues:
+		return "Values (user)"
+	case msgs.DetailValuesAll:
+		return "Values (all)"
 	default:
 		return ""
 	}

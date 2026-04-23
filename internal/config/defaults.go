@@ -24,6 +24,7 @@ func DefaultBindings() []Binding {
 			{Key: "D", Help: "daemonsets", Command: "goto-daemonsets"},
 			{Key: "f", Help: "port-forwards", Command: "goto-portforwards"},
 			{Key: "H", Help: "helm", Command: "goto-helmreleases"},
+			{Key: "i", Help: "ingresses", Command: "goto-ingresses"},
 		}},
 		{Key: "G", Help: "bottom", Command: "cursor-bottom"},
 		{Key: "o", Help: "split", Visible: true, Keys: []Binding{
@@ -37,6 +38,7 @@ func DefaultBindings() []Binding {
 			{Key: "D", Help: "daemonsets", Command: "split-daemonsets"},
 			{Key: "f", Help: "port-forwards", Command: "split-portforwards"},
 			{Key: "H", Help: "helm", Command: "split-helmreleases"},
+			{Key: "i", Help: "ingresses", Command: "split-ingresses"},
 		}},
 		{Key: "ctrl+d", Help: "delete", Command: "delete", Visible: true},
 		{Key: "ctrl+f", Help: "page down", Command: "page-down"},
@@ -118,6 +120,10 @@ func DefaultBindings() []Binding {
 		{Key: "R", Help: "rollback", Command: "helm-rollback",
 			For: []string{"helmreleases"}, Visible: true},
 		{Key: "C", Help: "set chart", Command: "helm-set-chart",
+			For: []string{"helmreleases"}, Visible: true},
+		{Key: "v", Help: "values", Command: "view-helm-values-user",
+			For: []string{"helmreleases"}, Visible: true},
+		{Key: "V", Help: "all values", Command: "view-helm-values-all",
 			For: []string{"helmreleases"}, Visible: true},
 		{Key: "s", Help: "exec", Scope: "resources", Visible: true,
 			For: []string{"pods", "containers", "nodes"}, Keys: []Binding{

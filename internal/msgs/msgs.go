@@ -13,6 +13,8 @@ const (
 	DetailYAML DetailMode = iota
 	DetailDescribe
 	DetailLogs
+	DetailValues    // helm get values <release>
+	DetailValuesAll // helm get values <release> --all
 )
 
 // NamespaceSelectedMsg signals the namespace picker selected a namespace.
@@ -227,6 +229,16 @@ type HelmReleasesLoadedMsg struct {
 	Namespace string
 	Objects   []*unstructured.Unstructured
 	Err       error
+}
+
+// HelmValuesLoadedMsg carries the result of an async Helm GetValues fetch.
+// Mode is DetailValues or DetailValuesAll, identifying which fetch produced this result.
+type HelmValuesLoadedMsg struct {
+	ReleaseName string
+	Namespace   string
+	Mode        DetailMode
+	Content     render.Content
+	Err         error
 }
 
 // LogStreamReadyMsg carries the result of an async log stream connection.

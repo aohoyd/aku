@@ -62,6 +62,29 @@ func TestDetailViewModeLabel(t *testing.T) {
 	}
 }
 
+func TestDetailViewHeaderReflectsValuesMode(t *testing.T) {
+	cases := []struct {
+		name string
+		mode msgs.DetailMode
+		want string
+	}{
+		{"yaml", msgs.DetailYAML, "YAML"},
+		{"values user", msgs.DetailValues, "Values (user)"},
+		{"values all", msgs.DetailValuesAll, "Values (all)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dv := NewDetailView(60, 15)
+			dv.SetMode(tc.mode)
+			view := dv.View()
+			stripped := ansi.Strip(view)
+			if !strings.Contains(stripped, tc.want) {
+				t.Fatalf("view for mode %v should contain %q in border, got:\n%s", tc.mode, tc.want, stripped)
+			}
+		})
+	}
+}
+
 func TestDetailViewSetModeResetsContent(t *testing.T) {
 	dv := NewDetailView(40, 10)
 	dv.SetMode(msgs.DetailLogs)

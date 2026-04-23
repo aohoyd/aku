@@ -70,6 +70,10 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		return a.handleViewFocused(msgs.DetailDescribe)
 	case command == "view-logs-focused":
 		return a.handleViewFocused(msgs.DetailLogs)
+	case command == "view-helm-values-user":
+		return a.handleViewHelmValues(msgs.DetailValues)
+	case command == "view-helm-values-all":
+		return a.handleViewHelmValues(msgs.DetailValuesAll)
 	// Cursor navigation — mode-aware
 	case command == "cursor-up":
 		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
@@ -972,6 +976,7 @@ func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 
 	a.keyTrie.Reset()
 	a.layout.AddSplit(p, ns)
+	a.layout.FocusResources()
 	newSplit := a.layout.FocusedSplit()
 	populateCmd := a.subscribeAndPopulate(newSplit, p, newSplit.EffectiveNamespace())
 
@@ -1062,6 +1067,40 @@ func (a App) handleViewFocused(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
 	a.layout.RightPanel().SetMode(mode)
 	var descCmd tea.Cmd
 	a, descCmd = a.refreshDetailPanel()
+	a.layout.FocusDetails()
+	a.statusBar.SetHints(a.currentHints())
+	return a, descCmd
+}
+
+// handleViewHelmValues switches the detail panel into a Helm values mode
+// (DetailValues for user-supplied, DetailValuesAll for the full coalesced set).
+// Only valid for helmrelease rows; for any other plugin it is a no-op.
+func (a App) handleViewHelmValues(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
+	focused, _, ok := a.focusedSelection()
+	if !ok {
+		return a, nil
+	}
+	if focused.Plugin().Name() != "helmreleases" {
+		return a, nil
+	}
+	// Match the pattern used by other helm actions (see `edit`,
+	// `helm-rollback`): surface an explicit status when no helm client is
+	// configured rather than silently falling through to the manifest path.
+	if a.helmClient == nil {
+		cmd := a.statusBar.SetError("helm: no client")
+		return a, cmd
+	}
+
+	a.lastDetailKey = ""
+
+	// Switching away from log mode (defensive — values views are YAML).
+	a = a.stopLogStream()
+	a.layout.SetLogMode(false)
+
+	a.layout.ShowRightPanel()
+	panel := a.layout.RightPanel()
+	panel.SetMode(mode)
+	a, descCmd := a.refreshDetailPanel()
 	a.layout.FocusDetails()
 	a.statusBar.SetHints(a.currentHints())
 	return a, descCmd

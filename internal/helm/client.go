@@ -6,8 +6,10 @@ import (
 	"slices"
 	"time"
 
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/release"
+	"helm.sh/helm/v4/pkg/action"
+	"helm.sh/helm/v4/pkg/kube"
+	release "helm.sh/helm/v4/pkg/release/v1"
+	releaseiface "helm.sh/helm/v4/pkg/release"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest"
@@ -39,7 +41,13 @@ type RevisionInfo struct {
 type Client interface {
 	ListReleases(namespace string) ([]ReleaseInfo, error)
 	GetRelease(name, namespace string) (*ReleaseInfo, error)
-	GetValues(name, namespace string) (map[string]any, error)
+	// GetValues returns the values for the named release in the given
+	// namespace. When all is false, only user-supplied overrides are
+	// returned (equivalent to `helm get values <release>`). When all is
+	// true, the full coalesced set — chart defaults merged with user
+	// overrides — is returned (equivalent to `helm get values <release>
+	// --all`).
+	GetValues(name, namespace string, all bool) (map[string]any, error)
 	History(name, namespace string) ([]RevisionInfo, error)
 	Upgrade(name, namespace string, values map[string]any) error
 	Rollback(name, namespace string, revision int) error
@@ -84,10 +92,18 @@ func (c *liveClient) newActionConfig(namespace string) (*action.Configuration, e
 		},
 	}
 	cfg := new(action.Configuration)
-	if err := cfg.Init(flags, namespace, "", func(string, ...any) {}); err != nil {
+	if err := cfg.Init(flags, namespace, ""); err != nil {
 		return nil, fmt.Errorf("helm config: %w", err)
 	}
 	return cfg, nil
+}
+
+func toRelease(r releaseiface.Releaser) (*release.Release, error) {
+	rel, ok := r.(*release.Release)
+	if !ok {
+		return nil, fmt.Errorf("unexpected release type %T", r)
+	}
+	return rel, nil
 }
 
 func releaseToInfo(r *release.Release) ReleaseInfo {
@@ -103,7 +119,7 @@ func releaseToInfo(r *release.Release) ReleaseInfo {
 	}
 	if r.Info != nil {
 		info.Status = string(r.Info.Status)
-		info.Updated = r.Info.LastDeployed.Time
+		info.Updated = r.Info.LastDeployed
 	}
 	return info
 }
@@ -122,9 +138,13 @@ func (c *liveClient) ListReleases(namespace string) ([]ReleaseInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("helm list: %w", err)
 	}
-	result := make([]ReleaseInfo, len(releases))
-	for i, r := range releases {
-		result[i] = releaseToInfo(r)
+	result := make([]ReleaseInfo, 0, len(releases))
+	for _, r := range releases {
+		rel, err := toRelease(r)
+		if err != nil {
+			return nil, fmt.Errorf("helm list: %w", err)
+		}
+		result = append(result, releaseToInfo(rel))
 	}
 	return result, nil
 }
@@ -139,16 +159,28 @@ func (c *liveClient) GetRelease(name, namespace string) (*ReleaseInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("helm get: %w", err)
 	}
-	info := releaseToInfo(r)
+	rel, err := toRelease(r)
+	if err != nil {
+		return nil, fmt.Errorf("helm get: %w", err)
+	}
+	info := releaseToInfo(rel)
 	return &info, nil
 }
 
-func (c *liveClient) GetValues(name, namespace string) (map[string]any, error) {
+func (c *liveClient) GetValues(name, namespace string, all bool) (map[string]any, error) {
 	cfg, err := c.newActionConfig(namespace)
 	if err != nil {
 		return nil, err
 	}
+	return runGetValues(cfg, name, all)
+}
+
+// runGetValues is a thin seam around action.NewGetValues so the propagation
+// of the `all` flag onto action.GetValues.AllValues can be unit-tested
+// without instantiating a live Helm action configuration.
+func runGetValues(cfg *action.Configuration, name string, all bool) (map[string]any, error) {
 	gv := action.NewGetValues(cfg)
+	gv.AllValues = all
 	vals, err := gv.Run(name)
 	if err != nil {
 		return nil, fmt.Errorf("helm get values: %w", err)
@@ -163,9 +195,17 @@ func (c *liveClient) History(name, namespace string) ([]RevisionInfo, error) {
 	}
 	hist := action.NewHistory(cfg)
 	hist.Max = 256
-	releases, err := hist.Run(name)
+	raw, err := hist.Run(name)
 	if err != nil {
 		return nil, fmt.Errorf("helm history: %w", err)
+	}
+	releases := make([]*release.Release, 0, len(raw))
+	for _, r := range raw {
+		rel, err := toRelease(r)
+		if err != nil {
+			return nil, fmt.Errorf("helm history: %w", err)
+		}
+		releases = append(releases, rel)
 	}
 	slices.SortFunc(releases, func(a, b *release.Release) int {
 		return cmp.Compare(b.Version, a.Version)
@@ -181,7 +221,7 @@ func (c *liveClient) History(name, namespace string) ([]RevisionInfo, error) {
 		}
 		if r.Info != nil {
 			ri.Status = string(r.Info.Status)
-			ri.Updated = r.Info.LastDeployed.Time
+			ri.Updated = r.Info.LastDeployed
 			ri.Description = r.Info.Description
 		}
 		result[i] = ri
@@ -195,7 +235,11 @@ func (c *liveClient) Upgrade(name, namespace string, values map[string]any) erro
 		return err
 	}
 	get := action.NewGet(cfg)
-	rel, err := get.Run(name)
+	r, err := get.Run(name)
+	if err != nil {
+		return fmt.Errorf("helm get for upgrade: %w", err)
+	}
+	rel, err := toRelease(r)
 	if err != nil {
 		return fmt.Errorf("helm get for upgrade: %w", err)
 	}
@@ -218,6 +262,7 @@ func (c *liveClient) Upgrade(name, namespace string, values map[string]any) erro
 	upgrade := action.NewUpgrade(cfg)
 	upgrade.Namespace = namespace
 	upgrade.ReuseValues = false
+	upgrade.WaitStrategy = kube.StatusWatcherStrategy
 	if _, err := upgrade.Run(name, ch, values); err != nil {
 		return fmt.Errorf("helm upgrade: %w", err)
 	}
@@ -231,6 +276,7 @@ func (c *liveClient) Rollback(name, namespace string, revision int) error {
 	}
 	rb := action.NewRollback(cfg)
 	rb.Version = revision
+	rb.WaitStrategy = kube.StatusWatcherStrategy
 	if err := rb.Run(name); err != nil {
 		return fmt.Errorf("helm rollback: %w", err)
 	}
@@ -243,6 +289,7 @@ func (c *liveClient) Uninstall(name, namespace string) error {
 		return err
 	}
 	uninstall := action.NewUninstall(cfg)
+	uninstall.WaitStrategy = kube.StatusWatcherStrategy
 	if _, err := uninstall.Run(name); err != nil {
 		return fmt.Errorf("helm uninstall: %w", err)
 	}

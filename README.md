@@ -22,6 +22,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 
 **Views**
 - YAML view with syntax highlighting (managedFields stripped)
+- Helm release values view: user-supplied (`v v`) or full coalesced (`v a`) in the YAML panel
 - Describe view with events and environment variable resolution
 - Live log streaming with time range presets, container selection, and autoscroll
 - Log syntax highlighting (JSON, log levels, IPs, URLs, UUIDs, timestamps, paths, key=value)
@@ -205,7 +206,7 @@ syntax:
 | `Ctrl+n` | Namespace picker |
 | `:` | Resource picker |
 | `?` | Help overlay |
-| `y` | YAML view |
+| `y` | YAML view (resets values variant to manifest for helm releases) |
 | `d` | Describe view |
 | `e` | Edit resource |
 | `Z` | Toggle zoom |
@@ -236,6 +237,7 @@ syntax:
 | `w` | Toggle word wrap |
 | `x` | Resolve env variables |
 | `r` | Refresh |
+| `y` | Return to manifest YAML (resets `Values (user)`/`Values (all)` variant on helm releases) |
 
 ### Logs View
 
@@ -257,6 +259,8 @@ syntax:
 | `R` | Deployments, Pods | Rollout restart |
 | `R` | Helm releases | Rollback |
 | `C` | Helm releases | Set chart |
+| `v v` | Helm releases | View user values |
+| `v a` | Helm releases | View all (coalesced) values |
 | `x` | Pods, Secrets, Containers, Deployments, StatefulSets, DaemonSets | Resolve/show env variables (list and detail) |
 | `pf` | Pods, Containers | Port forward |
 | `ss` | Pods, Containers | Exec |

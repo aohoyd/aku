@@ -12,6 +12,7 @@ import (
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugins/helmreleases"
 	"github.com/aohoyd/aku/internal/portforward"
 	"github.com/aohoyd/aku/internal/render"
 	corev1 "k8s.io/api/core/v1"
@@ -164,6 +165,40 @@ func TestSplitCommand(t *testing.T) {
 	}
 	if focused.Plugin().Name() != "deployments" {
 		t.Fatalf("expected focused plugin to be 'deployments', got %q", focused.Plugin().Name())
+	}
+}
+
+func TestSplitResetsFocusFromDetails(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	deploymentsPlugin := &mockPlugin{
+		name: "deployments",
+		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+
+	plugin.Register(podsPlugin)
+	plugin.Register(deploymentsPlugin)
+
+	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.ShowRightPanel()
+	app.layout.FocusDetails()
+
+	if !app.layout.FocusedDetails() {
+		t.Fatal("precondition: expected focus on details before split")
+	}
+
+	model, _ := app.executeCommand("split-deployments")
+	app = model.(App)
+
+	if app.layout.FocusedDetails() {
+		t.Fatal("expected focus to move off details after split")
+	}
+	if !app.layout.FocusedResources() {
+		t.Fatal("expected focus on resources after split")
 	}
 }
 
@@ -4485,5 +4520,158 @@ func TestFocusNextSplitCycles(t *testing.T) {
 	app = model.(App)
 	if app.layout.FocusIndex() != 1 {
 		t.Fatalf("expected focus at index 1 after second focus-next-split, got %d", app.layout.FocusIndex())
+	}
+}
+
+func TestViewHelmValuesUserCommand_HelmReleaseRow(t *testing.T) {
+	hc := &stubHelmClient{values: map[string]any{"replicaCount": 3}}
+	app := setupHelmAppWithRelease(t, hc, "myrel", "default", msgs.DetailYAML)
+
+	model, cmd := app.executeCommand("view-helm-values-user")
+	app = model.(App)
+
+	if app.layout.RightPanel().Mode() != msgs.DetailValues {
+		t.Fatalf("expected DetailValues mode, got %v", app.layout.RightPanel().Mode())
+	}
+	if !app.layout.RightPanelVisible() {
+		t.Fatal("expected right panel visible after view-helm-values-user")
+	}
+	if cmd == nil {
+		t.Fatal("expected a tea.Cmd to fetch values")
+	}
+	loaded, ok := cmd().(msgs.HelmValuesLoadedMsg)
+	if !ok {
+		t.Fatalf("expected HelmValuesLoadedMsg, got %T", cmd())
+	}
+	if loaded.Mode != msgs.DetailValues {
+		t.Errorf("expected mode DetailValues in fetch msg, got %v", loaded.Mode)
+	}
+	if hc.lastAll {
+		t.Errorf("expected GetValues called with all=false for user mode")
+	}
+}
+
+func TestViewHelmValuesAllCommand_HelmReleaseRow(t *testing.T) {
+	hc := &stubHelmClient{values: map[string]any{"replicaCount": 3}}
+	app := setupHelmAppWithRelease(t, hc, "myrel", "default", msgs.DetailYAML)
+
+	model, cmd := app.executeCommand("view-helm-values-all")
+	app = model.(App)
+
+	if app.layout.RightPanel().Mode() != msgs.DetailValuesAll {
+		t.Fatalf("expected DetailValuesAll mode, got %v", app.layout.RightPanel().Mode())
+	}
+	if cmd == nil {
+		t.Fatal("expected a tea.Cmd to fetch values")
+	}
+	if _, ok := cmd().(msgs.HelmValuesLoadedMsg); !ok {
+		t.Fatalf("expected HelmValuesLoadedMsg, got %T", cmd())
+	}
+	if !hc.lastAll {
+		t.Errorf("expected GetValues called with all=true for all mode")
+	}
+}
+
+func TestViewHelmValuesUserCommand_NonHelmRowIsNoOp(t *testing.T) {
+	app := newTestApp()
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	plugin.Register(podsPlugin)
+	app.layout.AddSplit(podsPlugin, "default")
+
+	obj := &unstructured.Unstructured{}
+	obj.SetName("test-pod")
+	obj.SetNamespace("default")
+	app.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{obj})
+	app.layout.ShowRightPanel()
+	app.layout.RightPanel().SetMode(msgs.DetailYAML)
+
+	model, cmd := app.executeCommand("view-helm-values-user")
+	app = model.(App)
+
+	if cmd != nil {
+		t.Fatalf("expected nil cmd for non-helmrelease row, got %T", cmd)
+	}
+	if got := app.layout.RightPanel().Mode(); got != msgs.DetailYAML {
+		t.Fatalf("expected mode unchanged (DetailYAML), got %v", got)
+	}
+}
+
+// TestViewYAMLFocusedSwitchesFromValuesMode covers the `y` reset semantic:
+// pressing `y` while showing user values must return to the manifest view.
+func TestViewYAMLFocusedSwitchesFromValuesMode(t *testing.T) {
+	hc := &stubHelmClient{values: map[string]any{"x": 1}}
+	app := setupHelmAppWithRelease(t, hc, "myrel", "default", msgs.DetailValues)
+
+	model, _ := app.executeCommand("view-yaml-focused")
+	app = model.(App)
+
+	if got := app.layout.RightPanel().Mode(); got != msgs.DetailYAML {
+		t.Fatalf("expected DetailYAML mode after view-yaml-focused, got %v", got)
+	}
+}
+
+// TestViewYAMLSwitchesFromValuesMode covers the `view-yaml` (non-focused) path.
+func TestViewYAMLSwitchesFromValuesMode(t *testing.T) {
+	hc := &stubHelmClient{values: map[string]any{"x": 1}}
+	app := setupHelmAppWithRelease(t, hc, "myrel", "default", msgs.DetailValuesAll)
+
+	model, _ := app.executeCommand("view-yaml")
+	app = model.(App)
+
+	if got := app.layout.RightPanel().Mode(); got != msgs.DetailYAML {
+		t.Fatalf("expected DetailYAML mode after view-yaml, got %v", got)
+	}
+}
+
+// TestViewHelmValuesUserCommand_NoSelectionIsNoOp covers the early-return
+// path in handleViewHelmValues when there is no selected object (empty
+// resource list).
+func TestViewHelmValuesUserCommand_NoSelectionIsNoOp(t *testing.T) {
+	hc := &stubHelmClient{}
+	a := newTestApp()
+	a.helmClient = hc
+	p := helmreleases.NewWithClient(hc)
+	plugin.Register(p)
+	a.layout.AddSplit(p, "default")
+	// No objects seeded: focusedSelection returns ok=false.
+
+	model, cmd := a.executeCommand("view-helm-values-user")
+	if _, ok := model.(App); !ok {
+		t.Fatalf("expected App model, got %T", model)
+	}
+	if cmd != nil {
+		t.Fatalf("expected nil cmd when no selection, got %T", cmd)
+	}
+	if hc.lastName != "" {
+		t.Errorf("GetValues should not be called when no selection, got name=%q", hc.lastName)
+	}
+}
+
+// TestViewHelmValuesUserCommand_NilHelmClient verifies that pressing v v on a
+// helmrelease row when no helm client is configured surfaces a status-bar error.
+func TestViewHelmValuesUserCommand_NilHelmClient(t *testing.T) {
+	a := newTestApp()
+	a.helmClient = nil
+	p := helmreleases.NewWithClient(nil)
+	plugin.Register(p)
+	a.layout.AddSplit(p, "default")
+	obj := &unstructured.Unstructured{}
+	obj.SetName("rel")
+	obj.SetNamespace("default")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{obj})
+	a.layout.ShowRightPanel()
+	a.layout.RightPanel().SetMode(msgs.DetailYAML)
+
+	model, cmd := a.executeCommand("view-helm-values-user")
+	app := model.(App)
+	if cmd == nil {
+		t.Fatal("expected an error-bar cmd when helm client is nil, got nil")
+	}
+	// Mode should NOT be switched to DetailValues since we bailed out before SetMode.
+	if got := app.layout.RightPanel().Mode(); got != msgs.DetailYAML {
+		t.Fatalf("expected mode unchanged (DetailYAML) on nil helm client, got %v", got)
 	}
 }

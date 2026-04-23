@@ -10,13 +10,20 @@ import (
 )
 
 type fakeHelmClient struct {
-	values    map[string]any
+	values     map[string]any
 	upgradeErr error
+	// lastGetValuesAll records the most recent value of the `all` flag
+	// passed to GetValues so tests can assert that editValuesCommand always
+	// requests user-only values (all=false).
+	lastGetValuesAll bool
+	getValuesCalls   int
 }
 
 func (f *fakeHelmClient) ListReleases(namespace string) ([]ReleaseInfo, error) { return nil, nil }
 func (f *fakeHelmClient) GetRelease(name, namespace string) (*ReleaseInfo, error) { return nil, nil }
-func (f *fakeHelmClient) GetValues(name, namespace string) (map[string]any, error) {
+func (f *fakeHelmClient) GetValues(name, namespace string, all bool) (map[string]any, error) {
+	f.lastGetValuesAll = all
+	f.getValuesCalls++
 	return f.values, nil
 }
 func (f *fakeHelmClient) History(name, namespace string) ([]RevisionInfo, error) { return nil, nil }
@@ -76,6 +83,15 @@ func TestEditValuesCancelAfterUpgradeError(t *testing.T) {
 	countBytes, _ := os.ReadFile(counterPath)
 	if string(countBytes) != "2" {
 		t.Fatalf("expected editor to be called 2 times, got %s", countBytes)
+	}
+	// Edit values workflow must always request user-only values; full
+	// coalesced values would include chart defaults that would then be
+	// re-uploaded on Upgrade and clobber the chart-default merge layer.
+	if client.lastGetValuesAll {
+		t.Fatalf("editValuesCommand must call GetValues with all=false, got all=true")
+	}
+	if client.getValuesCalls == 0 {
+		t.Fatalf("expected at least one GetValues call")
 	}
 }
 

@@ -34,6 +34,12 @@ func New(client *k8s.Client, store *k8s.Store, resolver helm.ChartResolver) *Plu
 	return p
 }
 
+// NewWithClient constructs a Plugin with an explicit Helm client. Used by
+// tests that need to inject a stub client without bringing up the k8s wiring.
+func NewWithClient(hc helm.Client) *Plugin {
+	return &Plugin{helmClient: hc}
+}
+
 func (p *Plugin) Name() string                     { return "helmreleases" }
 func (p *Plugin) ShortName() string                { return "release" }
 func (p *Plugin) GVR() schema.GroupVersionResource { return syntheticGVR }
@@ -65,6 +71,32 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 	manifest, _, _ := unstructured.NestedString(obj.Object, "_manifest")
 	return render.YAML(map[string]any{"manifest": manifest})
+}
+
+func (p *Plugin) Values(obj *unstructured.Unstructured) (render.Content, error) {
+	return p.fetchValues(obj, false)
+}
+
+func (p *Plugin) ValuesAll(obj *unstructured.Unstructured) (render.Content, error) {
+	return p.fetchValues(obj, true)
+}
+
+func (p *Plugin) fetchValues(obj *unstructured.Unstructured, all bool) (render.Content, error) {
+	if p.helmClient == nil {
+		return render.Content{}, fmt.Errorf("helm client unavailable")
+	}
+	vals, err := p.helmClient.GetValues(obj.GetName(), obj.GetNamespace(), all)
+	if err != nil {
+		return render.Content{}, err
+	}
+	if len(vals) == 0 {
+		msg := "# No user-supplied values\n"
+		if all {
+			msg = "# No values\n"
+		}
+		return render.Content{Raw: msg, Display: msg}, nil
+	}
+	return render.YAML(vals)
 }
 
 func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (render.Content, error) {

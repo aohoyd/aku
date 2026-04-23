@@ -14,6 +14,9 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 )
 
+// marshalValues serialises a Helm values map to YAML for the $EDITOR buffer,
+// returning a friendly placeholder comment for the empty case so the editor
+// does not show `null` or `{}` for releases without user-supplied values.
 func marshalValues(values map[string]any) ([]byte, error) {
 	if len(values) == 0 {
 		return []byte("# No user-supplied values\n"), nil
@@ -36,7 +39,7 @@ func (e *editValuesCommand) SetStdout(w io.Writer) { e.stdout = w }
 func (e *editValuesCommand) SetStderr(w io.Writer) { e.stderr = w }
 
 func (e *editValuesCommand) Run() error {
-	values, err := e.helmClient.GetValues(e.releaseName, e.namespace)
+	values, err := e.helmClient.GetValues(e.releaseName, e.namespace, false)
 	if err != nil {
 		return fmt.Errorf("get values: %w", err)
 	}
@@ -99,7 +102,7 @@ func (e *editValuesCommand) Run() error {
 
 		if err := e.helmClient.Upgrade(e.releaseName, e.namespace, newValues); err != nil {
 			// Re-fetch latest values from the server.
-			freshValues, getErr := e.helmClient.GetValues(e.releaseName, e.namespace)
+			freshValues, getErr := e.helmClient.GetValues(e.releaseName, e.namespace, false)
 			if getErr == nil {
 				if freshYAML, marshalErr := marshalValues(freshValues); marshalErr == nil {
 					baseContent = string(freshYAML)

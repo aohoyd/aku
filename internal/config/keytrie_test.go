@@ -299,6 +299,48 @@ func TestNavigationBindingsAreHidden(t *testing.T) {
 	}
 }
 
+func TestKeyTrieHelmValuesChordUser(t *testing.T) {
+	bs := NewBindingSet(DefaultBindings())
+	trie := bs.TrieFor("resources", "helmreleases")
+
+	cmd, _, resolved := trie.Press("v")
+	if resolved {
+		t.Fatal("'v' should not resolve immediately (it's a prefix)")
+	}
+	if cmd != "" {
+		t.Fatalf("mid-sequence should have empty command, got '%s'", cmd)
+	}
+
+	cmd, _, resolved = trie.Press("v")
+	if !resolved || cmd != "view-helm-values-user" {
+		t.Fatalf("expected resolved 'view-helm-values-user', got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
+func TestKeyTrieHelmValuesChordAll(t *testing.T) {
+	bs := NewBindingSet(DefaultBindings())
+	trie := bs.TrieFor("resources", "helmreleases")
+
+	trie.Press("v")
+	cmd, _, resolved := trie.Press("a")
+	if !resolved || cmd != "view-helm-values-all" {
+		t.Fatalf("expected resolved 'view-helm-values-all', got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
+func TestKeyTrieHelmValuesChordInactiveOutsideHelmreleases(t *testing.T) {
+	bs := NewBindingSet(DefaultBindings())
+	// In a non-helmreleases context, the 'v' chord should not exist.
+	// Since "v" is not a top-level binding outside helmreleases, pressing
+	// it should resolve to an empty command (unknown root key).
+	trie := bs.TrieFor("resources", "pods")
+
+	cmd, _, resolved := trie.Press("v")
+	if !resolved || cmd != "" {
+		t.Fatalf("'v' should not match in pods context, got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
 func TestDefaultKeyMapCommandBarHidden(t *testing.T) {
 	trie := DefaultKeyTrie()
 	hints := trie.CurrentHints()

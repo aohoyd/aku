@@ -18,6 +18,7 @@ import (
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/apiresources"
 	"github.com/aohoyd/aku/internal/plugins/generic"
+	"github.com/aohoyd/aku/internal/plugins/helmreleases"
 	"github.com/aohoyd/aku/internal/portforward"
 	"github.com/aohoyd/aku/internal/render"
 	"github.com/aohoyd/aku/internal/ui"
@@ -484,6 +485,14 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if strings.HasPrefix(msg.ActionID, "helm-") {
 			model, helmCmd := a.refreshHelmSplits()
+			// After an `e`-edit upgrade (helm-edit-values:<release>), the right
+			// panel may still be showing the previous values. If we're focused
+			// on a helmrelease and the panel is in YAML mode with a non-Manifest
+			// variant, also re-fetch values so the panel reflects the upgrade.
+			if strings.HasPrefix(msg.ActionID, "helm-edit-values:") {
+				app := model.(App)
+				return app.maybeRefetchValuesAfterEdit(clearCmd, helmCmd)
+			}
 			return model, tea.Batch(clearCmd, helmCmd)
 		}
 		return a, clearCmd
@@ -650,6 +659,9 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return a, nil
+
+	case msgs.HelmValuesLoadedMsg:
+		return a.handleHelmValuesLoaded(msg)
 
 	case msgs.HelmChartRefSetMsg:
 		return a.handleHelmChartRefSet(msg)
@@ -1103,6 +1115,40 @@ func (a App) refreshDetailPanelOpts(preserve bool) (App, tea.Cmd) {
 		if err == nil {
 			panel.SetContent(content, refresh)
 		}
+	case msgs.DetailValues, msgs.DetailValuesAll:
+		a.lastDetailKey = a.detailKey()
+		hp, ok := focused.Plugin().(*helmreleases.Plugin)
+		if !ok {
+			// Defensive fallback: chord is helmreleases-scoped so this shouldn't fire.
+			content, err := focused.Plugin().YAML(sel)
+			if err == nil {
+				panel.SetContent(content, refresh)
+			}
+			return a, nil
+		}
+		placeholder := "# loading values...\n"
+		panel.SetContent(render.Content{Raw: placeholder, Display: placeholder}, refresh)
+		mode := panel.Mode()
+		selCopy := sel.DeepCopy()
+		fetchCmd := func() tea.Msg {
+			var (
+				content render.Content
+				err     error
+			)
+			if mode == msgs.DetailValuesAll {
+				content, err = hp.ValuesAll(selCopy)
+			} else {
+				content, err = hp.Values(selCopy)
+			}
+			return msgs.HelmValuesLoadedMsg{
+				ReleaseName: selCopy.GetName(),
+				Namespace:   selCopy.GetNamespace(),
+				Mode:        mode,
+				Content:     content,
+				Err:         err,
+			}
+		}
+		return a, fetchCmd
 	case msgs.DetailDescribe:
 		a.lastDetailKey = a.detailKey()
 		spinCmd := panel.SetLoading(true)
@@ -1577,6 +1623,47 @@ func (a App) handleHelmRollback(msg msgs.HelmRollbackRequestedMsg) (tea.Model, t
 	}
 }
 
+// handleHelmValuesLoaded stamps async-fetched helm values onto the right panel.
+// Stale messages are dropped: the (release, namespace, variant) tuple in the
+// message must still match the focused panel, otherwise the user has moved on
+// (cursor change, mode switch, or a different variant request) and the result
+// would clobber unrelated content.
+func (a App) handleHelmValuesLoaded(msg msgs.HelmValuesLoadedMsg) (tea.Model, tea.Cmd) {
+	if !a.layout.RightPanelVisible() || a.layout.IsLogMode() {
+		return a, nil
+	}
+	panel := a.layout.RightPanel()
+	if panel == nil {
+		return a, nil
+	}
+	if panel.Mode() != msg.Mode {
+		return a, nil
+	}
+	focused := a.layout.FocusedSplit()
+	if focused == nil || focused.Plugin().Name() != "helmreleases" {
+		return a, nil
+	}
+	sel := focused.Selected()
+	if sel == nil {
+		return a, nil
+	}
+	curName := sel.GetName()
+	curNs := sel.GetNamespace()
+	if curNs == "" {
+		curNs = focused.Namespace()
+	}
+	if curName != msg.ReleaseName || curNs != msg.Namespace {
+		return a, nil
+	}
+	if msg.Err != nil {
+		body := "# error: " + msg.Err.Error() + "\n"
+		panel.SetContent(render.Content{Raw: body, Display: body}, false)
+		return a, nil
+	}
+	panel.SetContent(msg.Content, false)
+	return a, nil
+}
+
 func (a App) handleHelmChartRefSet(msg msgs.HelmChartRefSetMsg) (tea.Model, tea.Cmd) {
 	if a.config != nil {
 		a.config.SetChartRef(msg.Namespace, msg.ReleaseName, msg.ChartRef)
@@ -1586,6 +1673,32 @@ func (a App) handleHelmChartRefSet(msg msgs.HelmChartRefSetMsg) (tea.Model, tea.
 		return a, cmd
 	}
 	return a, helm.EditValuesCmd(a.helmClient, msg.ReleaseName, msg.Namespace)
+}
+
+// maybeRefetchValuesAfterEdit dispatches an extra values re-fetch when the
+// detail panel was showing a Helm values variant (Values (user) or Values
+// (all)) at the moment a `helm-edit-values:` upgrade completed. clearCmd and
+// helmCmd are the upstream side-effects of the action result handler that
+// must always run; valuesCmd is appended only when all of the early-return
+// guards pass. Extracted to flatten the deeply nested chain in Update.
+func (a App) maybeRefetchValuesAfterEdit(clearCmd, helmCmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if !a.layout.RightPanelVisible() || a.layout.IsLogMode() {
+		return a, tea.Batch(clearCmd, helmCmd)
+	}
+	panel := a.layout.RightPanel()
+	if panel == nil {
+		return a, tea.Batch(clearCmd, helmCmd)
+	}
+	mode := panel.Mode()
+	if mode != msgs.DetailValues && mode != msgs.DetailValuesAll {
+		return a, tea.Batch(clearCmd, helmCmd)
+	}
+	focused := a.layout.FocusedSplit()
+	if focused == nil || focused.Plugin().Name() != "helmreleases" {
+		return a, tea.Batch(clearCmd, helmCmd)
+	}
+	app, valuesCmd := a.reloadDetailPanel()
+	return app, tea.Batch(clearCmd, helmCmd, valuesCmd)
 }
 
 func (a App) refreshHelmSplits() (tea.Model, tea.Cmd) {

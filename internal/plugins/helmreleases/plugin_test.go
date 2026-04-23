@@ -10,7 +10,10 @@ import (
 )
 
 type mockClient struct {
-	releases []helm.ReleaseInfo
+	releases    []helm.ReleaseInfo
+	values      map[string]any
+	valuesErr   error
+	lastAllFlag bool
 }
 
 func (m *mockClient) ListReleases(namespace string) ([]helm.ReleaseInfo, error) {
@@ -33,7 +36,10 @@ func (m *mockClient) GetRelease(name, namespace string) (*helm.ReleaseInfo, erro
 	}
 	return nil, nil
 }
-func (m *mockClient) GetValues(_, _ string) (map[string]any, error)    { return nil, nil }
+func (m *mockClient) GetValues(_, _ string, all bool) (map[string]any, error) {
+	m.lastAllFlag = all
+	return m.values, m.valuesErr
+}
 func (m *mockClient) History(_, _ string) ([]helm.RevisionInfo, error) { return nil, nil }
 func (m *mockClient) Upgrade(_, _ string, _ map[string]any) error      { return nil }
 func (m *mockClient) Rollback(_, _ string, _ int) error                { return nil }
@@ -162,5 +168,73 @@ func TestDrillDownManifestCanRefresh(t *testing.T) {
 	}
 	if refreshed[0].GetKind() != "Service" {
 		t.Fatalf("expected Service, got %s", refreshed[0].GetKind())
+	}
+}
+
+func newReleaseObj(name, namespace string) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{}
+	obj.SetName(name)
+	obj.SetNamespace(namespace)
+	return obj
+}
+
+func TestPluginValuesUserNonEmpty(t *testing.T) {
+	mc := &mockClient{values: map[string]any{"replicaCount": 5, "image": "nginx"}}
+	p := newTestPlugin(mc)
+	content, err := p.Values(newReleaseObj("rel", "default"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if mc.lastAllFlag {
+		t.Errorf("expected GetValues called with all=false")
+	}
+	if content.Raw == "" {
+		t.Fatal("expected non-empty Raw")
+	}
+	if content.Display == content.Raw {
+		t.Errorf("expected styled Display (ANSI codes) different from Raw — render.YAML appears bypassed")
+	}
+}
+
+func TestPluginValuesAllPropagatesFlag(t *testing.T) {
+	mc := &mockClient{values: map[string]any{"k": "v"}}
+	p := newTestPlugin(mc)
+	if _, err := p.ValuesAll(newReleaseObj("rel", "default")); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !mc.lastAllFlag {
+		t.Errorf("expected GetValues called with all=true")
+	}
+}
+
+func TestPluginValuesEmptyUserPlaceholder(t *testing.T) {
+	mc := &mockClient{values: map[string]any{}}
+	p := newTestPlugin(mc)
+	content, err := p.Values(newReleaseObj("rel", "default"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if content.Raw != "# No user-supplied values\n" {
+		t.Errorf("expected user-values placeholder, got %q", content.Raw)
+	}
+}
+
+func TestPluginValuesAllEmptyPlaceholder(t *testing.T) {
+	mc := &mockClient{values: map[string]any{}}
+	p := newTestPlugin(mc)
+	content, err := p.ValuesAll(newReleaseObj("rel", "default"))
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if content.Raw != "# No values\n" {
+		t.Errorf("expected all-values placeholder, got %q", content.Raw)
+	}
+}
+
+func TestPluginValuesNilHelmClient(t *testing.T) {
+	p := New(nil, nil, nil)
+	_, err := p.Values(newReleaseObj("rel", "default"))
+	if err == nil {
+		t.Fatal("expected error when helmClient is nil")
 	}
 }
