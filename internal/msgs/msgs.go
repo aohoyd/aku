@@ -118,11 +118,6 @@ type PortForwardStartedMsg struct {
 	Handle    PortForwardHandle
 }
 
-// PortForwardStoppedMsg is emitted when a port-forward is stopped.
-type PortForwardStoppedMsg struct {
-	ID string
-}
-
 // PortForwardStatusMsg carries a status update for a port-forward entry.
 type PortForwardStatusMsg struct {
 	ID     string

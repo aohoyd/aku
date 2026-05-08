@@ -117,9 +117,10 @@ type App struct {
 	pfHandles         map[string]msgs.PortForwardHandle
 	config            *config.Config
 	pendingRun        *config.RunConfig            // external command waiting for confirm
-	pendingBulkDelete []*unstructured.Unstructured // bulk delete targets waiting for confirm
-	pendingDelete     *unstructured.Unstructured   // single delete target waiting for confirm
+	pendingDelete     []*unstructured.Unstructured // delete targets (always-list) waiting for confirm
 	pendingDebug      *pendingDebugAction          // debug action waiting for confirm
+	pendingRestart    []k8s.RestartTarget          // rollout restart targets waiting for confirm
+	pendingRestartGVR schema.GroupVersionResource  // GVR matching pendingRestart
 
 	// Log stream
 	logStreamCancel   context.CancelFunc
@@ -318,9 +319,10 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.activeOverlay != overlayNone {
 				a.activeOverlay = overlayNone
 				a.pendingRun = nil
-				a.pendingBulkDelete = nil
 				a.pendingDelete = nil
 				a.pendingDebug = nil
+				a.pendingRestart = nil
+				a.pendingRestartGVR = schema.GroupVersionResource{}
 				return a, nil
 			}
 			// Fall through to handleKey → executeCommand for structural panels
@@ -439,22 +441,29 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgs.ConfirmResultMsg:
 		a.activeOverlay = overlayNone
-		if a.pendingBulkDelete != nil {
-			objs := a.pendingBulkDelete
-			a.pendingBulkDelete = nil
+		if a.pendingRestart != nil {
+			targets := a.pendingRestart
+			gvr := a.pendingRestartGVR
+			a.pendingRestart = nil
+			a.pendingRestartGVR = schema.GroupVersionResource{}
 			if msg.Action == msgs.ConfirmYes || msg.Action == msgs.ConfirmForce {
 				if focused := a.layout.FocusedSplit(); focused != nil {
 					focused.ClearSelection()
 				}
-				return a.executeBulkDelete(objs, msg.Action == msgs.ConfirmForce)
+				if a.k8sClient != nil {
+					return a, k8s.RestartCmd(a.k8sClient.Dynamic, gvr, targets)
+				}
 			}
 			return a, nil
 		}
 		if a.pendingDelete != nil {
-			obj := a.pendingDelete
+			objs := a.pendingDelete
 			a.pendingDelete = nil
 			if msg.Action == msgs.ConfirmYes || msg.Action == msgs.ConfirmForce {
-				return a.executeSingleDelete(obj, msg.Action == msgs.ConfirmForce)
+				if focused := a.layout.FocusedSplit(); focused != nil {
+					focused.ClearSelection()
+				}
+				return a.executeDelete(objs, msg.Action == msgs.ConfirmForce)
 			}
 			return a, nil
 		}
@@ -683,10 +692,6 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, tea.Batch(clearCmd, watchPortForwardReady(msg.ID, msg.Handle))
 		}
 		return a, clearCmd
-
-	case msgs.PortForwardStoppedMsg:
-		a = a.syncIndicators()
-		return a, nil
 
 	case msgs.PortForwardStatusMsg:
 		a.pfRegistry.UpdateStatus(msg.ID, msg.Status)

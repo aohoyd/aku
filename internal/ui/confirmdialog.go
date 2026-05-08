@@ -38,6 +38,12 @@ func (c ConfirmDialog) Active() bool {
 	return c.overlay.Active()
 }
 
+// Message returns the prompt text the dialog was constructed with. Used by
+// tests to assert against the actual stored message rather than re-deriving it.
+func (c ConfirmDialog) Message() string {
+	return c.overlay.Content()
+}
+
 // SetWidth updates the dialog width on terminal resize.
 func (c *ConfirmDialog) SetWidth(w int) {
 	c.overlay.SetSize(w, 24)

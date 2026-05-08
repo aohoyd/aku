@@ -299,45 +299,87 @@ func TestNavigationBindingsAreHidden(t *testing.T) {
 	}
 }
 
-func TestKeyTrieHelmValuesChordUser(t *testing.T) {
+func TestKeyTrieHelmValuesUser(t *testing.T) {
 	bs := NewBindingSet(DefaultBindings())
 	trie := bs.TrieFor("resources", "helmreleases")
 
 	cmd, _, resolved := trie.Press("v")
-	if resolved {
-		t.Fatal("'v' should not resolve immediately (it's a prefix)")
-	}
-	if cmd != "" {
-		t.Fatalf("mid-sequence should have empty command, got '%s'", cmd)
-	}
-
-	cmd, _, resolved = trie.Press("v")
 	if !resolved || cmd != "view-helm-values-user" {
 		t.Fatalf("expected resolved 'view-helm-values-user', got resolved=%v cmd='%s'", resolved, cmd)
 	}
 }
 
-func TestKeyTrieHelmValuesChordAll(t *testing.T) {
+func TestKeyTrieHelmValuesAll(t *testing.T) {
 	bs := NewBindingSet(DefaultBindings())
 	trie := bs.TrieFor("resources", "helmreleases")
 
-	trie.Press("v")
-	cmd, _, resolved := trie.Press("a")
+	cmd, _, resolved := trie.Press("V")
 	if !resolved || cmd != "view-helm-values-all" {
 		t.Fatalf("expected resolved 'view-helm-values-all', got resolved=%v cmd='%s'", resolved, cmd)
 	}
 }
 
-func TestKeyTrieHelmValuesChordInactiveOutsideHelmreleases(t *testing.T) {
+func TestKeyTrieHelmValuesInactiveOutsideHelmreleases(t *testing.T) {
 	bs := NewBindingSet(DefaultBindings())
-	// In a non-helmreleases context, the 'v' chord should not exist.
-	// Since "v" is not a top-level binding outside helmreleases, pressing
-	// it should resolve to an empty command (unknown root key).
+	// In a non-helmreleases context, neither 'v' nor 'V' should resolve to
+	// any helm-values command — they should fall through to empty.
 	trie := bs.TrieFor("resources", "pods")
 
 	cmd, _, resolved := trie.Press("v")
 	if !resolved || cmd != "" {
 		t.Fatalf("'v' should not match in pods context, got resolved=%v cmd='%s'", resolved, cmd)
+	}
+
+	trie = bs.TrieFor("resources", "pods")
+	cmd, _, resolved = trie.Press("V")
+	if !resolved || cmd != "" {
+		t.Fatalf("'V' should not match in pods context, got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
+// TestKeyTrieRRollbackOnHelmreleases is a regression test ensuring that the
+// `R` binding on a `helmreleases` plugin still resolves to `helm-rollback`.
+// This binding is separate from the `rollout-restart` `R` binding (which is
+// scoped to deployments/statefulsets/daemonsets via `For`) and must not be
+// affected when the rollout-restart `For` list changes.
+func TestKeyTrieRRollbackOnHelmreleases(t *testing.T) {
+	bs := NewBindingSet(DefaultBindings())
+	trie := bs.TrieFor("resources", "helmreleases")
+
+	cmd, _, resolved := trie.Press("R")
+	if !resolved || cmd != "helm-rollback" {
+		t.Fatalf("expected 'R' on helmreleases to resolve to 'helm-rollback', got resolved=%v cmd=%q", resolved, cmd)
+	}
+}
+
+// TestKeyTrieRDoesNotFireOnPods is a regression test ensuring that the `R`
+// binding for `rollout-restart` does NOT fire on a `pods` plugin. Pods are
+// not in the `For` list (only deployments/statefulsets/daemonsets are), so
+// pressing `R` in a pods context should resolve to an empty command.
+func TestKeyTrieRDoesNotFireOnPods(t *testing.T) {
+	bs := NewBindingSet(DefaultBindings())
+	trie := bs.TrieFor("resources", "pods")
+
+	cmd, _, resolved := trie.Press("R")
+	if !resolved || cmd != "" {
+		t.Fatalf("'R' on pods should not resolve to any command, got resolved=%v cmd=%q", resolved, cmd)
+	}
+}
+
+// TestKeyTrieRRolloutRestartScope is a regression test ensuring that the `R`
+// binding resolves to `rollout-restart` for each of the three resources in
+// the binding's `For` list. A scope misconfiguration that accidentally
+// dropped any of these would be caught here.
+func TestKeyTrieRRolloutRestartScope(t *testing.T) {
+	for _, plugin := range []string{"deployments", "statefulsets", "daemonsets"} {
+		t.Run(plugin, func(t *testing.T) {
+			bs := NewBindingSet(DefaultBindings())
+			trie := bs.TrieFor("resources", plugin)
+			cmd, _, resolved := trie.Press("R")
+			if !resolved || cmd != "rollout-restart" {
+				t.Fatalf("'R' on %s should resolve to 'rollout-restart', got resolved=%v cmd=%q", plugin, resolved, cmd)
+			}
+		})
 	}
 }
 

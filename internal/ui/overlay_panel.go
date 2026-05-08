@@ -82,6 +82,10 @@ func (o *Overlay) SetTitle(t string) { o.title = t }
 // SetContent sets the overlay content text rendered inside the box.
 func (o *Overlay) SetContent(s string) { o.content = s }
 
+// Content returns the overlay content text. Used by tests to assert on the
+// stored message without parsing the full View output.
+func (o Overlay) Content() string { return o.content }
+
 // SetFooter sets the overlay footer text.
 func (o *Overlay) SetFooter(f string) { o.footer = f }
 

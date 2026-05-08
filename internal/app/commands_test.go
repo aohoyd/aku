@@ -3,16 +3,19 @@ package app
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/aohoyd/aku/internal/config"
+	"github.com/aohoyd/aku/internal/helm"
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/helmreleases"
+	"github.com/aohoyd/aku/internal/plugins/portforwards"
 	"github.com/aohoyd/aku/internal/portforward"
 	"github.com/aohoyd/aku/internal/render"
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -4673,5 +4678,733 @@ func TestViewHelmValuesUserCommand_NilHelmClient(t *testing.T) {
 	// Mode should NOT be switched to DetailValues since we bailed out before SetMode.
 	if got := app.layout.RightPanel().Mode(); got != msgs.DetailYAML {
 		t.Fatalf("expected mode unchanged (DetailYAML) on nil helm client, got %v", got)
+	}
+}
+
+// deploymentsGVRForRestart is the GVR used by the restart confirm-branch tests.
+var deploymentsGVRForRestart = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+
+// setupRestartPendingApp returns an App with one focused split (deployments
+// plugin) populated by a single object, and a k8s client wired to a fake
+// dynamic client pre-seeded with a "web" Deployment so that exercising the
+// returned cmd in the ConfirmYes branch does not panic. Tests then stash a
+// pendingRestart payload on top.
+func setupRestartPendingApp(t *testing.T) App {
+	t.Helper()
+	app := newTestApp()
+
+	// Seed a fake dynamic client with a Deployment named "web" in "default"
+	// so that the cmd produced by the ConfirmYes branch can be invoked end-to-end.
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "DeploymentList"},
+		&unstructured.UnstructuredList{},
+	)
+	dep := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]any{"name": "web", "namespace": "default"},
+		"spec": map[string]any{
+			"template": map[string]any{
+				"metadata": map[string]any{},
+				"spec": map[string]any{
+					"containers": []any{map[string]any{"name": "app", "image": "x:v1"}},
+				},
+			},
+		},
+	}}
+	fakeDyn := dynamicfake.NewSimpleDynamicClient(scheme, dep)
+	app.k8sClient = &k8s.Client{Dynamic: fakeDyn, Namespace: "default"}
+
+	deploymentsPlugin := &mockPlugin{
+		name: "deployments",
+		gvr:  deploymentsGVRForRestart,
+	}
+	plugin.Register(deploymentsPlugin)
+	app.layout.AddSplit(deploymentsPlugin, "default")
+
+	obj := &unstructured.Unstructured{}
+	obj.SetName("web")
+	obj.SetNamespace("default")
+	obj.SetUID("uid-web")
+	app.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{obj})
+	// Mark the row under the cursor as selected so we can assert
+	// ClearSelection() runs in the ConfirmYes branch.
+	app.layout.FocusedSplit().ToggleSelect()
+	return app
+}
+
+func TestConfirmResultMsg_PendingRestart_Yes(t *testing.T) {
+	app := setupRestartPendingApp(t)
+	app.activeOverlay = overlayConfirm
+	app.pendingRestart = []k8s.RestartTarget{{Name: "web", Namespace: "default"}}
+	app.pendingRestartGVR = deploymentsGVRForRestart
+
+	if !app.layout.FocusedSplit().HasSelection() {
+		t.Fatal("precondition: focused split should report a selection before ConfirmYes")
+	}
+
+	model, cmd := app.update(msgs.ConfirmResultMsg{Action: msgs.ConfirmYes})
+	got := model.(App)
+
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from ConfirmYes with pendingRestart set")
+	}
+	if got.pendingRestart != nil {
+		t.Fatalf("expected pendingRestart to be cleared, got %v", got.pendingRestart)
+	}
+	if got.activeOverlay != overlayNone {
+		t.Fatalf("expected overlay to be cleared, got %v", got.activeOverlay)
+	}
+	if focused := got.layout.FocusedSplit(); focused != nil && focused.HasSelection() {
+		t.Fatal("expected ClearSelection() to be called on the focused split")
+	}
+
+	// Exercise the cmd end-to-end against the seeded fake dynamic client and
+	// validate that it produces an ActionResultMsg with the expected ActionID.
+	rawMsg := cmd()
+	res, ok := rawMsg.(msgs.ActionResultMsg)
+	if !ok {
+		t.Fatalf("expected ActionResultMsg from cmd(), got %T", rawMsg)
+	}
+	if res.Err != nil {
+		t.Fatalf("unexpected error from restart cmd: %v", res.Err)
+	}
+	if res.ActionID != "restart:web" {
+		t.Errorf("expected ActionID=restart:web, got %q", res.ActionID)
+	}
+}
+
+func TestConfirmResultMsg_PendingRestart_Force(t *testing.T) {
+	app := setupRestartPendingApp(t)
+	app.activeOverlay = overlayConfirm
+	app.pendingRestart = []k8s.RestartTarget{{Name: "web", Namespace: "default"}}
+	app.pendingRestartGVR = deploymentsGVRForRestart
+
+	if !app.layout.FocusedSplit().HasSelection() {
+		t.Fatal("precondition: focused split should report a selection before ConfirmForce")
+	}
+
+	model, cmd := app.update(msgs.ConfirmResultMsg{Action: msgs.ConfirmForce})
+	got := model.(App)
+
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from ConfirmForce with pendingRestart set (force == yes for restart)")
+	}
+	if got.pendingRestart != nil {
+		t.Fatalf("expected pendingRestart to be cleared, got %v", got.pendingRestart)
+	}
+	if focused := got.layout.FocusedSplit(); focused != nil && focused.HasSelection() {
+		t.Fatal("expected ClearSelection() to be called on the focused split for ConfirmForce")
+	}
+}
+
+func TestConfirmResultMsg_PendingRestart_No(t *testing.T) {
+	app := setupRestartPendingApp(t)
+	app.activeOverlay = overlayConfirm
+	app.pendingRestart = []k8s.RestartTarget{{Name: "web", Namespace: "default"}}
+	app.pendingRestartGVR = deploymentsGVRForRestart
+
+	model, cmd := app.update(msgs.ConfirmResultMsg{Action: msgs.ConfirmCancel})
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd from ConfirmCancel with pendingRestart set")
+	}
+	if got.pendingRestart != nil {
+		t.Fatalf("expected pendingRestart to be cleared after cancel, got %v", got.pendingRestart)
+	}
+	if got.activeOverlay != overlayNone {
+		t.Fatalf("expected overlay to be cleared after cancel, got %v", got.activeOverlay)
+	}
+}
+
+// setupRolloutRestartDispatchApp builds an App with a deployments split holding
+// `count` objects. The cursor sits on the first object; tests can toggle
+// selection or call select-all to exercise multi-select.
+func setupRolloutRestartDispatchApp(t *testing.T, count int) (App, []*unstructured.Unstructured) {
+	t.Helper()
+	app := newTestApp()
+	app.k8sClient = &k8s.Client{Namespace: "default"}
+
+	deploymentsPlugin := &mockPlugin{
+		name: "deployments",
+		gvr:  deploymentsGVRForRestart,
+	}
+	plugin.Register(deploymentsPlugin)
+	app.layout.AddSplit(deploymentsPlugin, "default")
+
+	objs := make([]*unstructured.Unstructured, 0, count)
+	for i := 0; i < count; i++ {
+		obj := &unstructured.Unstructured{}
+		obj.SetName(fmt.Sprintf("web-%d", i))
+		obj.SetNamespace("default")
+		obj.SetUID(types.UID(fmt.Sprintf("uid-web-%d", i)))
+		objs = append(objs, obj)
+	}
+	app.layout.FocusedSplit().SetObjects(objs)
+	return app, objs
+}
+
+func TestRolloutRestart_SingleSelect_Dispatch(t *testing.T) {
+	app, objs := setupRolloutRestartDispatchApp(t, 1)
+
+	model, cmd := app.executeCommand("rollout-restart")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatalf("expected nil cmd from rollout-restart dispatch (overlay opens), got %v", cmd)
+	}
+	if got.activeOverlay != overlayConfirm {
+		t.Fatalf("expected overlay to be overlayConfirm, got %v", got.activeOverlay)
+	}
+	if len(got.pendingRestart) != 1 {
+		t.Fatalf("expected pendingRestart length 1, got %d", len(got.pendingRestart))
+	}
+	if got.pendingRestart[0].Name != objs[0].GetName() {
+		t.Fatalf("expected pendingRestart name %q, got %q", objs[0].GetName(), got.pendingRestart[0].Name)
+	}
+	if got.pendingRestart[0].Namespace != objs[0].GetNamespace() {
+		t.Fatalf("expected pendingRestart namespace %q, got %q", objs[0].GetNamespace(), got.pendingRestart[0].Namespace)
+	}
+	if got.pendingRestartGVR != deploymentsGVRForRestart {
+		t.Fatalf("expected pendingRestartGVR %v, got %v", deploymentsGVRForRestart, got.pendingRestartGVR)
+	}
+
+	// The confirm message stored in the dialog should mention the deployment
+	// name and use singular form.
+	gotMsg := got.confirmDialog.Message()
+	wantMsg := buildRestartConfirmMessage("deployments", []string{objs[0].GetName()})
+	if gotMsg != wantMsg {
+		t.Fatalf("confirm dialog message mismatch:\nwant: %q\ngot:  %q", wantMsg, gotMsg)
+	}
+	if !strings.Contains(gotMsg, objs[0].GetName()) {
+		t.Fatalf("expected confirm message to contain %q, got %q", objs[0].GetName(), gotMsg)
+	}
+	if !strings.Contains(gotMsg, "1 deployment?") {
+		t.Fatalf("expected singular form 'Rollout restart 1 deployment?', got %q", gotMsg)
+	}
+}
+
+func TestRolloutRestart_MultiSelect_Dispatch(t *testing.T) {
+	app, objs := setupRolloutRestartDispatchApp(t, 3)
+	app.layout.FocusedSplit().SelectAll()
+
+	model, cmd := app.executeCommand("rollout-restart")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatalf("expected nil cmd from rollout-restart multi-select dispatch, got %v", cmd)
+	}
+	if got.activeOverlay != overlayConfirm {
+		t.Fatalf("expected overlay to be overlayConfirm, got %v", got.activeOverlay)
+	}
+	if len(got.pendingRestart) != 3 {
+		t.Fatalf("expected pendingRestart length 3, got %d", len(got.pendingRestart))
+	}
+
+	// Read the message stored on the dialog and assert all three names appear.
+	names := make([]string, len(objs))
+	for i, o := range objs {
+		names[i] = o.GetName()
+	}
+	gotMsg := got.confirmDialog.Message()
+	wantMsg := buildRestartConfirmMessage("deployments", names)
+	if gotMsg != wantMsg {
+		t.Fatalf("confirm dialog message mismatch:\nwant: %q\ngot:  %q", wantMsg, gotMsg)
+	}
+	for _, n := range names {
+		if !strings.Contains(gotMsg, n) {
+			t.Fatalf("expected confirm message to contain %q, got %q", n, gotMsg)
+		}
+	}
+	if !strings.Contains(gotMsg, "3 deployments?") {
+		t.Fatalf("expected plural form 'Rollout restart 3 deployments?', got %q", gotMsg)
+	}
+}
+
+func TestRolloutRestart_NoK8sClient_NoOp(t *testing.T) {
+	app, _ := setupRolloutRestartDispatchApp(t, 1)
+	app.k8sClient = nil
+	prevOverlay := app.activeOverlay
+
+	_, cmd := app.executeCommand("rollout-restart")
+
+	// The handler should report the missing-client error to the user (consistent
+	// with edit/scale/exec). The returned cmd is the status-bar error timer,
+	// not a restart command.
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd reporting missing k8s client")
+	}
+	// Use the post-cmd App snapshot via SetError side effects: we re-fetch state
+	// from the model returned alongside cmd. The dispatch must NOT have set
+	// pending state nor opened the confirm overlay.
+	model, _ := app.executeCommand("rollout-restart")
+	got := model.(App)
+	if got.pendingRestart != nil {
+		t.Fatalf("expected pendingRestart to remain nil with no k8sClient, got %v", got.pendingRestart)
+	}
+	if got.activeOverlay != prevOverlay {
+		t.Fatalf("expected activeOverlay unchanged (%v), got %v", prevOverlay, got.activeOverlay)
+	}
+}
+
+// TestRolloutRestart_NoFocusedSplit verifies the early-exit path when there is
+// no focused split: pendingRestart stays nil, no overlay opens, no cmd is
+// emitted.
+func TestRolloutRestart_NoFocusedSplit(t *testing.T) {
+	plugin.Reset()
+	app := newTestApp()
+	app.k8sClient = &k8s.Client{Namespace: "default"}
+	// No splits added; FocusedSplit() returns nil.
+
+	model, cmd := app.executeCommand("rollout-restart")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatalf("expected nil cmd when no focused split, got %T", cmd)
+	}
+	if got.pendingRestart != nil {
+		t.Fatalf("expected pendingRestart to remain nil, got %v", got.pendingRestart)
+	}
+	if got.activeOverlay == overlayConfirm {
+		t.Fatal("expected no confirm overlay when no focused split")
+	}
+}
+
+// TestRolloutRestart_NoObjects verifies that calling rollout-restart on an
+// empty split (no objects, no cursor selection) leaves pendingRestart nil and
+// does not open the confirm dialog.
+func TestRolloutRestart_NoObjects(t *testing.T) {
+	app, _ := setupRolloutRestartDispatchApp(t, 0)
+
+	model, cmd := app.executeCommand("rollout-restart")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatalf("expected nil cmd when split has no objects, got %T", cmd)
+	}
+	if got.pendingRestart != nil {
+		t.Fatalf("expected pendingRestart to remain nil, got %v", got.pendingRestart)
+	}
+	if got.activeOverlay == overlayConfirm {
+		t.Fatal("expected no confirm overlay when split has no objects")
+	}
+}
+
+func TestRolloutRestart_TruncationOver20(t *testing.T) {
+	app, objs := setupRolloutRestartDispatchApp(t, 25)
+	app.layout.FocusedSplit().SelectAll()
+
+	model, _ := app.executeCommand("rollout-restart")
+	got := model.(App)
+
+	if len(got.pendingRestart) != 25 {
+		t.Fatalf("expected pendingRestart length 25, got %d", len(got.pendingRestart))
+	}
+
+	_ = objs
+	gotMsg := got.confirmDialog.Message()
+	if !strings.HasPrefix(gotMsg, "Rollout restart 25 deployments?") {
+		t.Fatalf("expected dialog to begin with 'Rollout restart 25 deployments?', got %q", gotMsg)
+	}
+	if !strings.Contains(gotMsg, "... and 5 more") {
+		t.Fatalf("expected truncation marker '... and 5 more' in confirm message, got %q", gotMsg)
+	}
+	if !strings.Contains(gotMsg, "web-0") {
+		t.Fatalf("expected confirm message to contain at least one web-* name, got %q", gotMsg)
+	}
+	// The displayed list is trimmed to 20 entries; count the bullet prefixes.
+	displayedCount := strings.Count(gotMsg, "\n  - ")
+	if displayedCount != 20 {
+		t.Fatalf("expected 20 displayed names before trailer, got %d in %q", displayedCount, gotMsg)
+	}
+}
+
+func TestBuildRestartConfirmMessage_Singular(t *testing.T) {
+	got := buildRestartConfirmMessage("deployments", []string{"web"})
+	want := "Rollout restart 1 deployment?\n\n  - web"
+	if got != want {
+		t.Fatalf("buildRestartConfirmMessage singular mismatch:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestBuildRestartConfirmMessage_Plural(t *testing.T) {
+	got := buildRestartConfirmMessage("deployments", []string{"web", "api", "worker"})
+	want := "Rollout restart 3 deployments?\n\n  - web\n  - api\n  - worker"
+	if got != want {
+		t.Fatalf("buildRestartConfirmMessage plural mismatch:\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+// TestBuildRestartConfirmMessage_PluginNames covers all three supported plugin
+// names for both N=1 (singular) and N>1 (plural) forms. The singularization
+// rule is a naive `strings.TrimSuffix(pluginName, "s")`; this guards against
+// regressions in case the rule is changed without updating special cases.
+func TestBuildRestartConfirmMessage_PluginNames(t *testing.T) {
+	cases := []struct {
+		plugin string
+		names  []string
+		want   string
+	}{
+		{plugin: "deployments", names: []string{"a"}, want: "Rollout restart 1 deployment?\n\n  - a"},
+		{plugin: "deployments", names: []string{"a", "b"}, want: "Rollout restart 2 deployments?\n\n  - a\n  - b"},
+		{plugin: "statefulsets", names: []string{"a"}, want: "Rollout restart 1 statefulset?\n\n  - a"},
+		{plugin: "statefulsets", names: []string{"a", "b"}, want: "Rollout restart 2 statefulsets?\n\n  - a\n  - b"},
+		{plugin: "daemonsets", names: []string{"a"}, want: "Rollout restart 1 daemonset?\n\n  - a"},
+		{plugin: "daemonsets", names: []string{"a", "b"}, want: "Rollout restart 2 daemonsets?\n\n  - a\n  - b"},
+	}
+	for _, c := range cases {
+		t.Run(fmt.Sprintf("%s_N%d", c.plugin, len(c.names)), func(t *testing.T) {
+			got := buildRestartConfirmMessage(c.plugin, c.names)
+			if got != c.want {
+				t.Fatalf("buildRestartConfirmMessage(%q, %v) mismatch:\nwant: %q\ngot:  %q", c.plugin, c.names, c.want, got)
+			}
+		})
+	}
+}
+
+// uninstallableHelmClient is a stub implementing helm.Client whose Uninstall
+// can be configured to fail by name. Only Uninstall is meaningful; the rest of
+// the interface returns zero values.
+type uninstallableHelmClient struct {
+	failNames map[string]error
+	calls     []string
+}
+
+func (s *uninstallableHelmClient) ListReleases(_ string) ([]helm.ReleaseInfo, error) {
+	return nil, nil
+}
+func (s *uninstallableHelmClient) GetRelease(_, _ string) (*helm.ReleaseInfo, error) {
+	return nil, nil
+}
+func (s *uninstallableHelmClient) GetValues(_, _ string, _ bool) (map[string]any, error) {
+	return nil, nil
+}
+func (s *uninstallableHelmClient) History(_, _ string) ([]helm.RevisionInfo, error) {
+	return nil, nil
+}
+func (s *uninstallableHelmClient) Upgrade(_, _ string, _ map[string]any) error { return nil }
+func (s *uninstallableHelmClient) Rollback(_, _ string, _ int) error           { return nil }
+func (s *uninstallableHelmClient) Uninstall(name, _ string) error {
+	s.calls = append(s.calls, name)
+	if err, ok := s.failNames[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// deletableSchemeForPods returns a scheme with the Pod list kind registered for
+// the fake dynamic client used by the executeDelete tests.
+func deletableSchemeForPods() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	scheme.AddKnownTypeWithName(
+		schema.GroupVersionKind{Version: "v1", Kind: "PodList"},
+		&unstructured.UnstructuredList{},
+	)
+	return scheme
+}
+
+// makePodObj builds a minimal unstructured Pod for the fake dynamic client.
+func makePodObj(name, ns string) *unstructured.Unstructured {
+	o := &unstructured.Unstructured{}
+	o.SetAPIVersion("v1")
+	o.SetKind("Pod")
+	o.SetName(name)
+	o.SetNamespace(ns)
+	return o
+}
+
+// TestExecuteDelete is a table-driven test that exercises executeDelete across
+// the three plugin paths (k8s default, helm, portforwards) with N=1 and N>1
+// inputs and a partial-failure case for k8s. Asserts ActionID strings and
+// error formats.
+func TestExecuteDelete(t *testing.T) {
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+	type wantResult struct {
+		actionID string
+		errPart  string // substring expected in err.Error(); empty means no error
+		nilCmd   bool
+	}
+
+	type tc struct {
+		name      string
+		pluginKey string // "k8s", "helm", "portforward"
+		count     int
+		failNames map[string]bool // for k8s + helm partial-failure cases
+		want      wantResult
+	}
+
+	cases := []tc{
+		{
+			name:      "k8s_N1",
+			pluginKey: "k8s",
+			count:     1,
+			want:      wantResult{actionID: "delete:obj-0"},
+		},
+		{
+			name:      "k8s_N3",
+			pluginKey: "k8s",
+			count:     3,
+			want:      wantResult{actionID: "delete:3-resources"},
+		},
+		{
+			name:      "k8s_N3_one_failure",
+			pluginKey: "k8s",
+			count:     3,
+			failNames: map[string]bool{"obj-1": true},
+			want:      wantResult{errPart: "bulk delete: 1/3 failed: obj-1: "},
+		},
+		{
+			name:      "helm_N1",
+			pluginKey: "helm",
+			count:     1,
+			want:      wantResult{actionID: "helm-uninstall:obj-0"},
+		},
+		{
+			name:      "helm_N2",
+			pluginKey: "helm",
+			count:     2,
+			want:      wantResult{actionID: "helm-uninstall:2"},
+		},
+		{
+			name:      "helm_N1_failure",
+			pluginKey: "helm",
+			count:     1,
+			failNames: map[string]bool{"obj-0": true},
+			want:      wantResult{errPart: "delete obj-0: helm boom"},
+		},
+		{
+			name:      "helm_N2_one_failure",
+			pluginKey: "helm",
+			count:     2,
+			failNames: map[string]bool{"obj-1": true},
+			want:      wantResult{errPart: "bulk delete: 1/2 failed: obj-1: helm boom"},
+		},
+		{
+			name:      "portforward_N1",
+			pluginKey: "portforward",
+			count:     1,
+			want:      wantResult{nilCmd: true},
+		},
+		{
+			name:      "portforward_N2",
+			pluginKey: "portforward",
+			count:     2,
+			want:      wantResult{nilCmd: true},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			plugin.Reset()
+			app := newTestApp()
+
+			// Build target objects with stable names: obj-0, obj-1, ...
+			targets := make([]*unstructured.Unstructured, c.count)
+			for i := 0; i < c.count; i++ {
+				targets[i] = makePodObj(fmt.Sprintf("obj-%d", i), "default")
+			}
+
+			switch c.pluginKey {
+			case "k8s":
+				// Pre-seed the fake dynamic client with the targets so Delete
+				// succeeds (or so the patched failure reactor has something to
+				// fail against). Convert *Unstructured slice to runtime.Object
+				// slice for the constructor.
+				scheme := deletableSchemeForPods()
+				objsForFake := make([]runtime.Object, len(targets))
+				for i, t := range targets {
+					objsForFake[i] = t
+				}
+				fakeDyn := dynamicfake.NewSimpleDynamicClient(scheme, objsForFake...)
+				if len(c.failNames) > 0 {
+					fakeDyn.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+						da := action.(k8stesting.DeleteAction)
+						if c.failNames[da.GetName()] {
+							return true, nil, fmt.Errorf("permission denied")
+						}
+						return false, nil, nil
+					})
+				}
+				app.k8sClient = &k8s.Client{Dynamic: fakeDyn, Namespace: "default"}
+
+				p := &mockPlugin{name: "pods", gvr: podsGVR}
+				plugin.Register(p)
+				app.layout.AddSplit(p, "default")
+				app.layout.FocusedSplit().SetObjects(targets)
+
+			case "helm":
+				hc := &uninstallableHelmClient{failNames: map[string]error{}}
+				for n := range c.failNames {
+					hc.failNames[n] = fmt.Errorf("helm boom")
+				}
+				app.helmClient = hc
+				p := helmreleases.NewWithClient(hc)
+				plugin.Register(p)
+				app.layout.AddSplit(p, "default")
+				app.layout.FocusedSplit().SetObjects(targets)
+
+			case "portforward":
+				reg := portforward.NewRegistry()
+				// Each target's name will be looked up by id; seed entries so
+				// Remove finds them. Registry generates its own IDs (pf-N), so
+				// we override the targets to match those generated IDs.
+				targets = targets[:0]
+				for i := 0; i < c.count; i++ {
+					id := reg.Add(portforward.Entry{
+						PodName:      fmt.Sprintf("pod-%d", i),
+						PodNamespace: "default",
+						LocalPort:    10000 + i,
+						RemotePort:   80,
+						Status:       portforward.StatusReady,
+					})
+					o := makePodObj(id, "default")
+					targets = append(targets, o)
+				}
+				app.pfRegistry = reg
+				p := portforwards.New(reg)
+				plugin.Register(p)
+				app.layout.AddSplit(p, "default")
+				app.layout.FocusedSplit().SetObjects(targets)
+			}
+
+			model, cmd := app.executeDelete(targets, false)
+			got := model.(App)
+
+			if c.want.nilCmd {
+				if cmd != nil {
+					t.Fatalf("expected nil cmd, got %T", cmd)
+				}
+				// For portforwards: registry should now be empty.
+				if c.pluginKey == "portforward" && got.pfRegistry.Count() != 0 {
+					t.Fatalf("expected portforward registry to be empty after delete, got %d", got.pfRegistry.Count())
+				}
+				return
+			}
+
+			if cmd == nil {
+				t.Fatalf("expected non-nil cmd")
+			}
+			result := cmd()
+			res, ok := result.(msgs.ActionResultMsg)
+			if !ok {
+				t.Fatalf("expected ActionResultMsg, got %T", result)
+			}
+
+			if c.want.errPart != "" {
+				if res.Err == nil {
+					t.Fatalf("expected error containing %q, got nil err and ActionID=%q", c.want.errPart, res.ActionID)
+				}
+				if !strings.Contains(res.Err.Error(), c.want.errPart) {
+					t.Fatalf("expected err to contain %q, got %q", c.want.errPart, res.Err.Error())
+				}
+				return
+			}
+
+			if res.Err != nil {
+				t.Fatalf("unexpected error: %v", res.Err)
+			}
+			if res.ActionID != c.want.actionID {
+				t.Errorf("ActionID mismatch: want %q, got %q", c.want.actionID, res.ActionID)
+			}
+		})
+	}
+}
+
+// TestExecuteDelete_K8s_N1_FailureWraps verifies that a single-resource k8s
+// delete failure surfaces a wrapped error in the format
+// `delete <name>: <wrapped err>` (symmetric with the bulk format).
+func TestExecuteDelete_K8s_N1_FailureWraps(t *testing.T) {
+	plugin.Reset()
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	target := makePodObj("only-one", "default")
+
+	scheme := deletableSchemeForPods()
+	fakeDyn := dynamicfake.NewSimpleDynamicClient(scheme, target)
+	fakeDyn.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("forbidden by RBAC")
+	})
+	app.k8sClient = &k8s.Client{Dynamic: fakeDyn, Namespace: "default"}
+
+	p := &mockPlugin{name: "pods", gvr: podsGVR}
+	plugin.Register(p)
+	app.layout.AddSplit(p, "default")
+	app.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{target})
+
+	_, cmd := app.executeDelete([]*unstructured.Unstructured{target}, false)
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd")
+	}
+	res, ok := cmd().(msgs.ActionResultMsg)
+	if !ok {
+		t.Fatalf("expected ActionResultMsg, got %T", cmd())
+	}
+	if res.Err == nil {
+		t.Fatal("expected non-nil err on N=1 failure")
+	}
+	want := "delete only-one: forbidden by RBAC"
+	if res.Err.Error() != want {
+		t.Errorf("err mismatch: want %q, got %q", want, res.Err.Error())
+	}
+}
+
+// TestExecuteDelete_PortForward_PartialUnknownID seeds the registry with one
+// known port-forward, then issues a delete against (known, unknown). The
+// registry count should decrement only for the known entry, confirming
+// pfRegistry.Remove silently no-ops on unknown IDs without affecting the
+// rest of the deletion sweep.
+func TestExecuteDelete_PortForward_PartialUnknownID(t *testing.T) {
+	plugin.Reset()
+	app := newTestApp()
+
+	reg := portforward.NewRegistry()
+	knownID := reg.Add(portforward.Entry{
+		PodName:      "pod-known",
+		PodNamespace: "default",
+		LocalPort:    11000,
+		RemotePort:   80,
+		Status:       portforward.StatusReady,
+	})
+	beforeCount := reg.Count()
+	if beforeCount != 1 {
+		t.Fatalf("precondition: expected 1 entry in registry, got %d", beforeCount)
+	}
+
+	app.pfRegistry = reg
+	p := portforwards.New(reg)
+	plugin.Register(p)
+	app.layout.AddSplit(p, "default")
+
+	known := makePodObj(knownID, "default")
+	unknown := makePodObj("pf-does-not-exist", "default")
+	targets := []*unstructured.Unstructured{known, unknown}
+	app.layout.FocusedSplit().SetObjects(targets)
+
+	model, cmd := app.executeDelete(targets, false)
+	got := model.(App)
+	if cmd != nil {
+		t.Fatalf("expected nil cmd from portforward delete, got %T", cmd)
+	}
+	if got.pfRegistry.Count() != 0 {
+		t.Fatalf("expected registry count 0 after removing known + unknown id, got %d", got.pfRegistry.Count())
+	}
+}
+
+// TestExecuteDelete_NoFocusedSplit verifies the early-exit path when there is
+// no focused split: helper returns the App unchanged and a nil cmd.
+func TestExecuteDelete_NoFocusedSplit(t *testing.T) {
+	plugin.Reset()
+	app := newTestApp()
+	// No splits added. FocusedSplit() returns nil.
+	model, cmd := app.executeDelete([]*unstructured.Unstructured{makePodObj("x", "default")}, false)
+	if cmd != nil {
+		t.Fatalf("expected nil cmd when no focused split, got %T", cmd)
+	}
+	if _, ok := model.(App); !ok {
+		t.Fatalf("expected App model, got %T", model)
 	}
 }

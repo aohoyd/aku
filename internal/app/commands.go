@@ -513,7 +513,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 				nameList = strings.Join(names[:20], "\n  ") + fmt.Sprintf("\n  ... and %d more", len(names)-20)
 			}
 			msg := fmt.Sprintf("Delete %d %s?\n\n  %s", len(objs), resource, nameList)
-			a.pendingBulkDelete = objs
+			a.pendingDelete = objs
 			a.confirmDialog = ui.NewConfirmDialog(msg, a.width)
 			a.activeOverlay = overlayConfirm
 			return a, nil
@@ -535,7 +535,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		} else {
 			msg = fmt.Sprintf("Delete %s %s/%s?", resource, selected.GetNamespace(), selected.GetName())
 		}
-		a.pendingDelete = selected
+		a.pendingDelete = []*unstructured.Unstructured{selected}
 		a.confirmDialog = ui.NewConfirmDialog(msg, a.width)
 		a.activeOverlay = overlayConfirm
 		return a, nil
@@ -594,8 +594,39 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		a.activeOverlay = overlayPortForward
 		return a, nil
 	case command == "rollout-restart":
-		cmd := a.statusBar.SetError("rollout-restart: not yet implemented")
-		return a, cmd
+		focused := a.layout.FocusedSplit()
+		if focused == nil {
+			return a, nil
+		}
+		if a.k8sClient == nil {
+			cmd := a.statusBar.SetError("rollout-restart: no k8s client")
+			return a, cmd
+		}
+		var objs []*unstructured.Unstructured
+		if focused.HasSelection() {
+			objs = focused.SelectedObjects()
+		} else if _, selected, ok := a.focusedSelection(); ok {
+			objs = []*unstructured.Unstructured{selected}
+		}
+		if len(objs) == 0 {
+			return a, nil
+		}
+		p := focused.Plugin()
+		targets := make([]k8s.RestartTarget, 0, len(objs))
+		names := make([]string, 0, len(objs))
+		for _, obj := range objs {
+			targets = append(targets, k8s.RestartTarget{
+				Name:      obj.GetName(),
+				Namespace: obj.GetNamespace(),
+			})
+			names = append(names, obj.GetName())
+		}
+		a.pendingRestart = targets
+		a.pendingRestartGVR = p.GVR()
+		msg := buildRestartConfirmMessage(p.Name(), names)
+		a.confirmDialog = ui.NewConfirmDialog(msg, a.width)
+		a.activeOverlay = overlayConfirm
+		return a, nil
 	case command == "edit":
 		focused, selected, ok := a.focusedSelection()
 		if !ok {
@@ -1165,9 +1196,10 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	// Dismiss any open overlays
 	a.activeOverlay = overlayNone
 	a.pendingRun = nil
-	a.pendingBulkDelete = nil
 	a.pendingDelete = nil
 	a.pendingDebug = nil
+	a.pendingRestart = nil
+	a.pendingRestartGVR = schema.GroupVersionResource{}
 
 	// Reset UI state
 	if a.layout.AnyZoomed() {
@@ -1281,85 +1313,50 @@ func (a App) handleNamespaceSwitch(ns string) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(populateCmd, cmd)
 }
 
-func (a App) executeSingleDelete(obj *unstructured.Unstructured, force bool) (tea.Model, tea.Cmd) {
+// executeDelete handles deletion of one or more resources. The same helper
+// covers both single-select (N=1) and multi-select (N>1) paths. Behavior
+// branches by the focused plugin's name: helm releases use the helm client,
+// port-forwards use the in-process registry (no async cmd), everything else
+// goes through the k8s dynamic client. ActionID strings preserve the existing
+// format: N=1 success → `<verb>:<name>`; N>1 success → `<verb>:%d-resources`
+// (or `helm-uninstall:%d` for helm). Failures aggregate via the same
+// `bulk delete: %d/%d failed: ...` format used previously by the bulk path.
+func (a App) executeDelete(targets []*unstructured.Unstructured, force bool) (tea.Model, tea.Cmd) {
 	focused := a.layout.FocusedSplit()
-	if focused == nil {
-		return a, nil
-	}
-	// Stop port-forward
-	if focused.Plugin().Name() == "portforwards" && a.pfRegistry != nil {
-		id := obj.GetName()
-		a.pfRegistry.Remove(id)
-		delete(a.pfHandles, id)
-		a = a.syncIndicators()
-		if sp, ok := focused.Plugin().(plugin.SelfPopulating); ok {
-			focused.SetObjects(sp.Objects())
-		}
-		return a, func() tea.Msg {
-			return msgs.PortForwardStoppedMsg{ID: id}
-		}
-	}
-	// Uninstall Helm release
-	if focused.Plugin().Name() == "helmreleases" && a.helmClient != nil {
-		name := obj.GetName()
-		ns := obj.GetNamespace()
-		return a, func() tea.Msg {
-			if err := a.helmClient.Uninstall(name, ns); err != nil {
-				return msgs.ActionResultMsg{Err: err}
-			}
-			return msgs.ActionResultMsg{ActionID: "helm-uninstall:" + name}
-		}
-	}
-	// Delete using dynamic client
-	if a.k8sClient != nil {
-		p := focused.Plugin()
-		return a, func() tea.Msg {
-			opts := metav1.DeleteOptions{}
-			if force {
-				opts.GracePeriodSeconds = new(int64)
-			}
-			var err error
-			if p.IsClusterScoped() {
-				err = a.k8sClient.Dynamic.Resource(p.GVR()).Delete(
-					context.Background(), obj.GetName(), opts)
-			} else {
-				err = a.k8sClient.Dynamic.Resource(p.GVR()).Namespace(obj.GetNamespace()).Delete(
-					context.Background(), obj.GetName(), opts)
-			}
-			if err != nil {
-				return msgs.ActionResultMsg{Err: err}
-			}
-			return msgs.ActionResultMsg{ActionID: "delete:" + obj.GetName()}
-		}
-	}
-	return a, nil
-}
-
-func (a App) executeBulkDelete(targets []*unstructured.Unstructured, force bool) (tea.Model, tea.Cmd) {
-	focused := a.layout.FocusedSplit()
-	if focused == nil {
+	if focused == nil || len(targets) == 0 {
 		return a, nil
 	}
 	p := focused.Plugin()
+	n := len(targets)
 
 	// Helm releases
 	if p.Name() == "helmreleases" && a.helmClient != nil {
 		helmClient := a.helmClient
 		return a, func() tea.Msg {
 			var errs []string
+			var firstErr error
 			for _, obj := range targets {
 				if err := helmClient.Uninstall(obj.GetName(), obj.GetNamespace()); err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
 					errs = append(errs, obj.GetName()+": "+err.Error())
 				}
 			}
 			if len(errs) > 0 {
-				return msgs.ActionResultMsg{Err: fmt.Errorf("bulk delete: %d/%d failed: %s", len(errs), len(targets), strings.Join(errs, "; "))}
+				if n == 1 {
+					return msgs.ActionResultMsg{Err: fmt.Errorf("delete %s: %w", targets[0].GetName(), firstErr)}
+				}
+				return msgs.ActionResultMsg{Err: fmt.Errorf("bulk delete: %d/%d failed: %s", len(errs), n, strings.Join(errs, "; "))}
 			}
-			return msgs.ActionResultMsg{ActionID: fmt.Sprintf("helm-uninstall:%d", len(targets))}
+			if n == 1 {
+				return msgs.ActionResultMsg{ActionID: "helm-uninstall:" + targets[0].GetName()}
+			}
+			return msgs.ActionResultMsg{ActionID: fmt.Sprintf("helm-uninstall:%d", n)}
 		}
 	}
 
-	// Port-forwards
+	// Port-forwards: synchronous, no async cmd.
 	if p.Name() == "portforwards" && a.pfRegistry != nil {
 		for _, obj := range targets {
 			a.pfRegistry.Remove(obj.GetName())
@@ -1386,6 +1383,7 @@ func (a App) executeBulkDelete(targets []*unstructured.Unstructured, force bool)
 			opts.GracePeriodSeconds = new(int64)
 		}
 		var errs []string
+		var firstErr error
 		for _, obj := range targets {
 			var err error
 			if clusterScoped {
@@ -1394,13 +1392,22 @@ func (a App) executeBulkDelete(targets []*unstructured.Unstructured, force bool)
 				err = client.Dynamic.Resource(gvr).Namespace(obj.GetNamespace()).Delete(context.Background(), obj.GetName(), opts)
 			}
 			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
 				errs = append(errs, obj.GetName()+": "+err.Error())
 			}
 		}
 		if len(errs) > 0 {
-			return msgs.ActionResultMsg{Err: fmt.Errorf("bulk delete: %d/%d failed: %s", len(errs), len(targets), strings.Join(errs, "; "))}
+			if n == 1 {
+				return msgs.ActionResultMsg{Err: fmt.Errorf("delete %s: %w", targets[0].GetName(), firstErr)}
+			}
+			return msgs.ActionResultMsg{Err: fmt.Errorf("bulk delete: %d/%d failed: %s", len(errs), n, strings.Join(errs, "; "))}
 		}
-		return msgs.ActionResultMsg{ActionID: fmt.Sprintf("delete:%d-resources", len(targets))}
+		if n == 1 {
+			return msgs.ActionResultMsg{ActionID: "delete:" + targets[0].GetName()}
+		}
+		return msgs.ActionResultMsg{ActionID: fmt.Sprintf("delete:%d-resources", n)}
 	}
 }
 
@@ -1955,4 +1962,23 @@ func fetchHelmHistoryCmd(hc helm.Client, name, ns string, timeout time.Duration)
 			return msgs.HelmHistoryLoadedMsg{ReleaseName: name, Namespace: ns, Err: ctx.Err()}
 		}
 	}
+}
+
+// buildRestartConfirmMessage returns the confirmation prompt for a rollout
+// restart. pluginName is the (plural) plugin identifier such as "deployments";
+// for N=1 it is singularized by stripping a trailing "s". The list of names is
+// truncated to 20 entries with a "... and X more" trailer.
+func buildRestartConfirmMessage(pluginName string, names []string) string {
+	resource := pluginName
+	if len(names) == 1 {
+		resource = strings.TrimSuffix(pluginName, "s")
+	}
+	displayed := names
+	var trailer string
+	if len(names) > 20 {
+		displayed = names[:20]
+		trailer = fmt.Sprintf("\n  ... and %d more", len(names)-20)
+	}
+	nameList := strings.Join(displayed, "\n  - ")
+	return fmt.Sprintf("Rollout restart %d %s?\n\n  - %s%s", len(names), resource, nameList, trailer)
 }

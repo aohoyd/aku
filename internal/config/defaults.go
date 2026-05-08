@@ -116,7 +116,7 @@ func DefaultBindings() []Binding {
 		{Key: "s", Help: "scale", Command: "scale", Scope: "resources",
 			For: []string{"deployments", "statefulsets"}, Visible: true},
 		{Key: "R", Help: "rollout restart", Command: "rollout-restart",
-			For: []string{"pods", "deployments"}, Visible: true},
+			For: []string{"deployments", "statefulsets", "daemonsets"}, Visible: true},
 		{Key: "R", Help: "rollback", Command: "helm-rollback",
 			For: []string{"helmreleases"}, Visible: true},
 		{Key: "C", Help: "set chart", Command: "helm-set-chart",

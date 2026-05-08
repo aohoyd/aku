@@ -22,7 +22,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 
 **Views**
 - YAML view with syntax highlighting (managedFields stripped)
-- Helm release values view: user-supplied (`v v`) or full coalesced (`v a`) in the YAML panel
+- Helm release values view: user-supplied (`v`) or full coalesced (`V`) in the YAML panel
 - Describe view with events and environment variable resolution
 - Live log streaming with time range presets, container selection, and autoscroll
 - Log syntax highlighting (JSON, log levels, IPs, URLs, UUIDs, timestamps, paths, key=value)
@@ -37,8 +37,8 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Port forwarding with live status tracking
 - Update container images across workloads
 - Scale deployments, statefulsets, and replicasets
-- Rollout restart for deployments and pods
-- Multi-select resources for bulk delete
+- Rollout restart for deployments, statefulsets, and daemonsets (supports multi-select)
+- Multi-select resources for bulk delete and rollout restart
 - Helm values editing, rollback to any revision, and chart reference updates
 
 **Navigation**
@@ -256,11 +256,11 @@ syntax:
 | `l` | Pods, Containers | View logs |
 | `s` | Deployments, StatefulSets, ReplicaSets | Scale replicas |
 | `i` | Pods, Deployments, StatefulSets, DaemonSets | Set image |
-| `R` | Deployments, Pods | Rollout restart |
+| `R` | Deployments, StatefulSets, DaemonSets | Rollout restart |
 | `R` | Helm releases | Rollback |
 | `C` | Helm releases | Set chart |
-| `v v` | Helm releases | View user values |
-| `v a` | Helm releases | View all (coalesced) values |
+| `v` | Helm releases | View user values |
+| `V` | Helm releases | View all (coalesced) values |
 | `x` | Pods, Secrets, Containers, Deployments, StatefulSets, DaemonSets | Resolve/show env variables (list and detail) |
 | `pf` | Pods, Containers | Port forward |
 | `ss` | Pods, Containers | Exec |
