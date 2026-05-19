@@ -40,6 +40,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Rollout restart for deployments, statefulsets, and daemonsets (supports multi-select)
 - Multi-select resources for bulk delete and rollout restart
 - Helm values editing, rollback to any revision, and chart reference updates
+- Save log buffer to file (and optionally open in `$EDITOR`)
 
 **Navigation**
 - Vim-style keybindings with multi-key sequences (`gg`, `gp`, `gd`, etc.)
@@ -170,6 +171,8 @@ bindings:
 
 Available scopes: `resources`, `details` (matches all detail views), `yaml`, `describe`, `logs`.
 
+For the full list of command names, see the `defaults.go` keymap source (`internal/config/defaults.go`).
+
 ### theme.yaml
 
 ```yaml
@@ -248,6 +251,12 @@ syntax:
 | `c` | Select container |
 | `t` | Time range |
 | `Enter` | Insert marker |
+| `Ctrl+s` | Save log buffer to file |
+| `Ctrl+Shift+s` | Save and open in `$EDITOR` |
+
+Saved logs go to `$XDG_STATE_HOME/aku/logs/<cluster>/<ns>-<pod>-<container>-<YYYY-MM-DDTHH-MM-SS.mmm>.log` (default `~/.local/state/aku/logs/...`). The editor used by `Ctrl+Shift+s` is resolved from `$KUBE_EDITOR`, then `$EDITOR`, then `vi`.
+
+`Ctrl+Shift+s` requires a terminal with the Kitty keyboard protocol (Kitty, WezTerm, Ghostty, iTerm2 with the option enabled). On other terminals, remap the `save-and-open-logs` command via `keymap.yaml`.
 
 ### Resource-Specific
 

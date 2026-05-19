@@ -2810,3 +2810,60 @@ func TestLogView_ScrollEnd_AllLinesFitInViewport(t *testing.T) {
 		t.Fatalf("expected xOffset 0 when all lines fit, got %d", lv.logVP.xOffset)
 	}
 }
+
+func TestLogView_PodNamespaceRoundTrip(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.SetPodName("my-pod")
+	lv.SetNamespace("my-ns")
+	if got := lv.PodName(); got != "my-pod" {
+		t.Fatalf("PodName: expected %q, got %q", "my-pod", got)
+	}
+	if got := lv.Namespace(); got != "my-ns" {
+		t.Fatalf("Namespace: expected %q, got %q", "my-ns", got)
+	}
+}
+
+func TestLogView_RawLines_Empty(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	if got := lv.RawLines(); len(got) != 0 {
+		t.Fatalf("expected empty RawLines, got %d entries", len(got))
+	}
+}
+
+func TestLogView_RawLines_AfterAppend(t *testing.T) {
+	lv := NewLogView(80, 24, 100, "15m", 900)
+	lv.AppendLine("one")
+	lv.AppendLine("two")
+	lv.AppendLine("three")
+	got := lv.RawLines()
+	want := []string{"one", "two", "three"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d lines, got %d", len(want), len(got))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RawLines[%d]: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+}
+
+func TestLogView_RawLines_AfterRingBufferWrap(t *testing.T) {
+	const cap = 3
+	lv := NewLogView(80, 24, cap, "15m", 900)
+	lv.AppendLine("a")
+	lv.AppendLine("b")
+	lv.AppendLine("c")
+	lv.AppendLine("d") // evicts "a"
+	lv.AppendLine("e") // evicts "b"
+
+	got := lv.RawLines()
+	want := []string{"c", "d", "e"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d lines after wrap, got %d (%v)", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RawLines[%d]: expected %q, got %q", i, want[i], got[i])
+		}
+	}
+}

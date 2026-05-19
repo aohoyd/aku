@@ -27,6 +27,8 @@ type LogView struct {
 	// Stream metadata
 	activeContainer string
 	containers      []string
+	podName         string
+	namespace       string
 
 	// UI toggles
 	autoscroll  bool // default true
@@ -1237,6 +1239,32 @@ func (lv LogView) ActiveContainer() string {
 // SetActiveContainer sets the active container for log streaming.
 func (lv *LogView) SetActiveContainer(name string) {
 	lv.activeContainer = name
+}
+
+// PodName returns the name of the pod whose logs are being viewed.
+func (lv LogView) PodName() string {
+	return lv.podName
+}
+
+// SetPodName records the pod name that the active log stream belongs to.
+func (lv *LogView) SetPodName(name string) {
+	lv.podName = name
+}
+
+// Namespace returns the namespace of the pod whose logs are being viewed.
+func (lv LogView) Namespace() string {
+	return lv.namespace
+}
+
+// SetNamespace records the namespace that the active log stream belongs to.
+func (lv *LogView) SetNamespace(ns string) {
+	lv.namespace = ns
+}
+
+// RawLines returns a copy of the raw (uncolored) log lines currently in the
+// ring buffer, oldest first.
+func (lv LogView) RawLines() []string {
+	return lv.buffer.RawAll()
 }
 
 // SetTimeRangeLabel sets the displayed time range label in the title.

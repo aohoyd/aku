@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -5406,5 +5408,282 @@ func TestExecuteDelete_NoFocusedSplit(t *testing.T) {
 	}
 	if _, ok := model.(App); !ok {
 		t.Fatalf("expected App model, got %T", model)
+	}
+}
+
+func TestCurrentLogContext(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(a *App)
+		wantOK     bool
+		wantCluster string
+		wantNS     string
+		wantPod    string
+		wantCtr    string
+		wantLines  int
+	}{
+		{
+			name:   "empty buffer returns ok=false",
+			setup:  func(a *App) {},
+			wantOK: false,
+		},
+		{
+			name: "missing namespace returns ok=false",
+			setup: func(a *App) {
+				lv := a.layout.LogView()
+				lv.AppendLine("hello")
+				lv.SetPodName("p")
+				lv.SetActiveContainer("c")
+			},
+			wantOK: false,
+		},
+		{
+			name: "missing pod returns ok=false",
+			setup: func(a *App) {
+				lv := a.layout.LogView()
+				lv.AppendLine("hello")
+				lv.SetNamespace("default")
+				lv.SetActiveContainer("c")
+			},
+			wantOK: false,
+		},
+		{
+			name: "missing container returns ok=false",
+			setup: func(a *App) {
+				lv := a.layout.LogView()
+				lv.AppendLine("hello")
+				lv.SetNamespace("default")
+				lv.SetPodName("p")
+			},
+			wantOK: false,
+		},
+		{
+			name: "nil k8sClient falls back to unknown-cluster",
+			setup: func(a *App) {
+				lv := a.layout.LogView()
+				lv.AppendLine("a")
+				lv.AppendLine("b")
+				lv.SetNamespace("ns1")
+				lv.SetPodName("pod1")
+				lv.SetActiveContainer("ctr1")
+			},
+			wantOK:      true,
+			wantCluster: "unknown-cluster",
+			wantNS:      "ns1",
+			wantPod:     "pod1",
+			wantCtr:     "ctr1",
+			wantLines:   2,
+		},
+		{
+			name: "k8sClient with empty Context falls back to unknown-cluster",
+			setup: func(a *App) {
+				a.k8sClient = &k8s.Client{}
+				lv := a.layout.LogView()
+				lv.AppendLine("a")
+				lv.SetNamespace("ns1")
+				lv.SetPodName("pod1")
+				lv.SetActiveContainer("ctr1")
+			},
+			wantOK:      true,
+			wantCluster: "unknown-cluster",
+			wantNS:      "ns1",
+			wantPod:     "pod1",
+			wantCtr:     "ctr1",
+			wantLines:   1,
+		},
+		{
+			name: "k8sClient with Context populates cluster",
+			setup: func(a *App) {
+				a.k8sClient = &k8s.Client{Context: "prod"}
+				lv := a.layout.LogView()
+				lv.AppendLine("a")
+				lv.SetNamespace("ns1")
+				lv.SetPodName("pod1")
+				lv.SetActiveContainer("ctr1")
+			},
+			wantOK:      true,
+			wantCluster: "prod",
+			wantNS:      "ns1",
+			wantPod:     "pod1",
+			wantCtr:     "ctr1",
+			wantLines:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := newTestApp()
+			tt.setup(&a)
+			cluster, ns, pod, ctr, lines, ok := a.currentLogContext()
+			if ok != tt.wantOK {
+				t.Fatalf("ok: got %v, want %v", ok, tt.wantOK)
+			}
+			if !tt.wantOK {
+				return
+			}
+			if cluster != tt.wantCluster {
+				t.Errorf("cluster: got %q, want %q", cluster, tt.wantCluster)
+			}
+			if ns != tt.wantNS {
+				t.Errorf("ns: got %q, want %q", ns, tt.wantNS)
+			}
+			if pod != tt.wantPod {
+				t.Errorf("pod: got %q, want %q", pod, tt.wantPod)
+			}
+			if ctr != tt.wantCtr {
+				t.Errorf("container: got %q, want %q", ctr, tt.wantCtr)
+			}
+			if len(lines) != tt.wantLines {
+				t.Errorf("lines: got %d, want %d", len(lines), tt.wantLines)
+			}
+		})
+	}
+}
+
+func TestSaveLogsCommand_NotInLogMode(t *testing.T) {
+	a := newTestApp()
+	// Not in log mode -> no-op, returns nil cmd.
+	model, cmd := a.executeCommand("save-logs")
+	if _, ok := model.(App); !ok {
+		t.Fatalf("expected App model, got %T", model)
+	}
+	if cmd != nil {
+		t.Fatalf("expected nil cmd when not in log mode, got non-nil")
+	}
+}
+
+func TestSaveLogsCommand_NoLinesShowsError(t *testing.T) {
+	a := newTestApp()
+	a.layout.SetLogMode(true)
+	// LogView has no lines -> SetError("No log lines to save"), returns its cmd.
+	model, cmd := a.executeCommand("save-logs")
+	got, ok := model.(App)
+	if !ok {
+		t.Fatalf("expected App model, got %T", model)
+	}
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from SetError")
+	}
+	// SetError and SetWarning both return non-nil tea.Cmd, so a non-nil cmd
+	// alone does not prove the error path ran. Assert the actual message
+	// landed in the status bar's error field — and that the warning field
+	// stayed empty, ruling out an accidental swap to SetWarning.
+	if errText := got.statusBar.ErrText(); errText != "No log lines to save" {
+		t.Errorf("status bar errText: got %q, want %q", errText, "No log lines to save")
+	}
+	if w := got.statusBar.WarningText(); w != "" {
+		t.Errorf("status bar warning should be empty, got %q", w)
+	}
+}
+
+func TestSaveLogsCommand_WritesFile(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+
+	a := newTestApp()
+	a.layout.SetLogMode(true)
+	a.k8sClient = &k8s.Client{Context: "prod"}
+	lv := a.layout.LogView()
+	lv.AppendLine("line-1")
+	lv.AppendLine("line-2")
+	lv.SetNamespace("default")
+	lv.SetPodName("pod-x")
+	lv.SetActiveContainer("ctr")
+
+	model, cmd := a.executeCommand("save-logs")
+	if _, ok := model.(App); !ok {
+		t.Fatalf("expected App model, got %T", model)
+	}
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd (status bar warning)")
+	}
+
+	// Verify a file landed under base/aku/logs/prod/.
+	clusterDir := filepath.Join(base, "aku", "logs", "prod")
+	entries, err := os.ReadDir(clusterDir)
+	if err != nil {
+		t.Fatalf("ReadDir %s: %v", clusterDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 file in %s, got %d", clusterDir, len(entries))
+	}
+	got, err := os.ReadFile(filepath.Join(clusterDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "line-1\nline-2\n" {
+		t.Errorf("file content: got %q", string(got))
+	}
+}
+
+func TestSaveAndOpenLogsCommand_NotInLogMode(t *testing.T) {
+	a := newTestApp()
+	model, cmd := a.executeCommand("save-and-open-logs")
+	if _, ok := model.(App); !ok {
+		t.Fatalf("expected App model, got %T", model)
+	}
+	if cmd != nil {
+		t.Fatal("expected nil cmd when not in log mode")
+	}
+}
+
+func TestSaveAndOpenLogsCommand_WritesFileAndReturnsExecCmd(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+
+	a := newTestApp()
+	a.layout.SetLogMode(true)
+	a.k8sClient = &k8s.Client{Context: "stg"}
+	lv := a.layout.LogView()
+	lv.AppendLine("hello")
+	lv.AppendLine("world")
+	lv.SetNamespace("ns")
+	lv.SetPodName("pod")
+	lv.SetActiveContainer("c")
+
+	model, cmd := a.executeCommand("save-and-open-logs")
+	if _, ok := model.(App); !ok {
+		t.Fatalf("expected App model, got %T", model)
+	}
+	if cmd == nil {
+		t.Fatal("expected a tea.Exec cmd to suspend TUI")
+	}
+
+	clusterDir := filepath.Join(base, "aku", "logs", "stg")
+	entries, err := os.ReadDir(clusterDir)
+	if err != nil {
+		t.Fatalf("ReadDir %s: %v", clusterDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(entries))
+	}
+	// The file must contain the buffered log lines verbatim, one per line
+	// with a trailing newline — same contract as save-logs.
+	got, err := os.ReadFile(filepath.Join(clusterDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != "hello\nworld\n" {
+		t.Errorf("file content: got %q, want %q", string(got), "hello\nworld\n")
+	}
+}
+
+func TestSaveAndOpenLogsCommand_NoLinesShowsError(t *testing.T) {
+	a := newTestApp()
+	a.layout.SetLogMode(true)
+	// LogView has no lines -> ok=false branch -> SetError, no editor exec.
+	model, cmd := a.executeCommand("save-and-open-logs")
+	got, ok := model.(App)
+	if !ok {
+		t.Fatalf("expected App model, got %T", model)
+	}
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd from SetError")
+	}
+	if errText := got.statusBar.ErrText(); errText != "No log lines to save" {
+		t.Errorf("status bar errText: got %q, want %q", errText, "No log lines to save")
+	}
+	if w := got.statusBar.WarningText(); w != "" {
+		t.Errorf("status bar warning should be empty, got %q", w)
 	}
 }

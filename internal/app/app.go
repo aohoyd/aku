@@ -1276,6 +1276,8 @@ func (a App) restartLogForCursor() (tea.Model, tea.Cmd) {
 	lv := a.layout.LogView()
 	lv.SetContainers(containers)
 	lv.SetActiveContainer(containerName)
+	lv.SetPodName(podName)
+	lv.SetNamespace(ns)
 
 	a, cmd := a.startLogStream(podName, containerName, ns, a.defaultLogOptions())
 	return a, cmd

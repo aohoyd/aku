@@ -57,6 +57,20 @@ func (s *StatusBar) SetError(err string) tea.Cmd {
 	})
 }
 
+// ErrText returns the current error text. Empty when no error is set or
+// after the error has been cleared. Intended for tests that need to assert
+// the message passed to SetError.
+func (s *StatusBar) ErrText() string {
+	return s.errText
+}
+
+// WarningText returns the current warning text. Empty when no warning is
+// set or after the warning has been cleared. Intended for tests that need
+// to assert the message passed to SetWarning.
+func (s *StatusBar) WarningText() string {
+	return s.warning
+}
+
 func (s *StatusBar) SetWarning(w string) tea.Cmd {
 	s.warning = w
 	if w == "" {

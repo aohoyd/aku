@@ -14,6 +14,7 @@ import (
 	"github.com/aohoyd/aku/internal/helm"
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/layout"
+	"github.com/aohoyd/aku/internal/logs"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/portforward"
@@ -777,6 +778,49 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case command == "save-logs":
+		if !a.layout.IsLogMode() {
+			return a, nil
+		}
+		cluster, ns, pod, container, lines, ok := a.currentLogContext()
+		if !ok {
+			cmd := a.statusBar.SetError("No log lines to save")
+			return a, cmd
+		}
+		path, err := logs.BuildPath(cluster, ns, pod, container, time.Now())
+		if err != nil {
+			cmd := a.statusBar.SetError(fmt.Sprintf("Save failed: %s", err))
+			return a, cmd
+		}
+		if err := logs.Write(path, lines); err != nil {
+			cmd := a.statusBar.SetError(fmt.Sprintf("Save failed: %s", err))
+			return a, cmd
+		}
+		// SetWarning is reused for success confirmation: no SetInfo channel exists
+		// and the 5s timeout fits a transient acknowledgement.
+		cmd := a.statusBar.SetWarning(fmt.Sprintf("Saved %d lines → %s", len(lines), path))
+		return a, cmd
+
+	case command == "save-and-open-logs":
+		if !a.layout.IsLogMode() {
+			return a, nil
+		}
+		cluster, ns, pod, container, lines, ok := a.currentLogContext()
+		if !ok {
+			cmd := a.statusBar.SetError("No log lines to save")
+			return a, cmd
+		}
+		path, err := logs.BuildPath(cluster, ns, pod, container, time.Now())
+		if err != nil {
+			cmd := a.statusBar.SetError(fmt.Sprintf("Save failed: %s", err))
+			return a, cmd
+		}
+		if err := logs.Write(path, lines); err != nil {
+			cmd := a.statusBar.SetError(fmt.Sprintf("Save failed: %s", err))
+			return a, cmd
+		}
+		return a, logs.OpenCmd(path)
+
 	case command == "select-container":
 		if !a.layout.IsLogMode() {
 			return a, nil
@@ -891,6 +935,30 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 
 	cmd := a.statusBar.SetError(fmt.Sprintf("unknown command: %s", command))
 	return a, cmd
+}
+
+// currentLogContext returns the metadata needed to save the current log view's
+// contents to disk. It returns ok=false when there are no buffered lines or any
+// of ns/pod/container are missing. When no k8s client is attached, cluster
+// falls back to "unknown-cluster" so the on-disk layout still has a directory
+// level for the cluster.
+func (a *App) currentLogContext() (cluster, ns, pod, container string, lines []string, ok bool) {
+	lv := a.layout.LogView()
+	lines = lv.RawLines()
+	if len(lines) == 0 {
+		return "", "", "", "", nil, false
+	}
+	ns = lv.Namespace()
+	pod = lv.PodName()
+	container = lv.ActiveContainer()
+	if ns == "" || pod == "" || container == "" {
+		return "", "", "", "", nil, false
+	}
+	cluster = "unknown-cluster"
+	if a.k8sClient != nil && a.k8sClient.Context != "" {
+		cluster = a.k8sClient.Context
+	}
+	return cluster, ns, pod, container, lines, true
 }
 
 // closeRightPanel performs full right-panel teardown: stops log stream,

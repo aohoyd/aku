@@ -107,6 +107,8 @@ func DefaultBindings() []Binding {
 		{Key: "c", Help: "container", Command: "select-container", Scope: "logs", Visible: true},
 		{Key: "t", Help: "time range", Command: "select-time-range", Scope: "logs", Visible: true},
 		{Key: "enter", Help: "mark", Command: "log-insert-marker", Scope: "logs"},
+		{Key: "ctrl+s", Help: "save logs", Command: "save-logs", Scope: "logs", Visible: true},
+		{Key: "ctrl+shift+s", Help: "save & open logs", Command: "save-and-open-logs", Scope: "logs", Visible: true},
 
 		// ── Resource-specific ──
 		{Key: "l", Help: "logs", Command: "view-logs-focused",
