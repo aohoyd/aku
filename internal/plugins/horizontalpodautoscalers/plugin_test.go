@@ -9,7 +9,7 @@ import (
 )
 
 func TestHPAPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 7 {
 		t.Fatalf("expected 7 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestHPAPluginColumns(t *testing.T) {
 }
 
 func TestHPAPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "autoscaling/v2",
@@ -60,7 +60,7 @@ func TestHPAPluginRow(t *testing.T) {
 }
 
 func TestHPAPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "autoscaling/v2",

@@ -5,12 +5,13 @@ import (
 	"testing"
 
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func TestSecretsPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 4 {
 		t.Fatalf("expected 4 columns, got %d", len(cols))
@@ -18,7 +19,7 @@ func TestSecretsPluginColumns(t *testing.T) {
 }
 
 func TestSecretsPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeSecret("my-secret", "Opaque", map[string]any{
 		"username": "dXNlcg==",
 		"password": "cGFzc3dvcmQxMjM=",
@@ -36,7 +37,7 @@ func TestSecretsPluginRow(t *testing.T) {
 }
 
 func TestSecretsPluginUncoverable(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	_, ok := p.(plugin.Uncoverable)
 	if !ok {
 		t.Fatal("expected Plugin to implement plugin.Uncoverable")
@@ -44,7 +45,7 @@ func TestSecretsPluginUncoverable(t *testing.T) {
 }
 
 func TestSecretsPluginDescribeUncovered(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	unc, ok := p.(plugin.Uncoverable)
 	if !ok {
 		t.Fatal("expected Plugin to implement plugin.Uncoverable")
@@ -56,7 +57,7 @@ func TestSecretsPluginDescribeUncovered(t *testing.T) {
 	obj.Object["metadata"].(map[string]any)["namespace"] = "default"
 	obj.Object["metadata"].(map[string]any)["labels"] = map[string]any{"app": "web"}
 
-	c, err := unc.DescribeUncovered(t.Context(), obj)
+	c, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(nil), obj)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestSecretsPluginDescribeUncovered(t *testing.T) {
 }
 
 func TestSecretsPluginDescribeMasked(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 
 	obj := makeSecret("my-secret", "Opaque", map[string]any{
 		"password": "cGFzc3dvcmQxMjM=",
@@ -93,7 +94,7 @@ func TestSecretsPluginDescribeMasked(t *testing.T) {
 }
 
 func TestSecretsPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{

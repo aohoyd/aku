@@ -10,7 +10,7 @@ import (
 )
 
 func TestEventsPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 6 {
 		t.Fatalf("expected 6 columns, got %d", len(cols))
@@ -24,7 +24,7 @@ func TestEventsPluginColumns(t *testing.T) {
 }
 
 func TestEventsPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -72,7 +72,7 @@ func TestEventsPluginRow(t *testing.T) {
 }
 
 func TestEventsPluginSortable(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	sortable, ok := p.(plugin.Sortable)
 	if !ok {
 		t.Fatal("Plugin should implement plugin.Sortable")
@@ -119,7 +119,7 @@ func TestDefaultSort(t *testing.T) {
 }
 
 func TestEventsPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",

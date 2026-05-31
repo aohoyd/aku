@@ -9,7 +9,7 @@ import (
 )
 
 func TestClusterRoleBindingPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 3 {
 		t.Fatalf("expected 3 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestClusterRoleBindingPluginColumns(t *testing.T) {
 }
 
 func TestClusterRoleBindingPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "rbac.authorization.k8s.io/v1",
@@ -55,7 +55,7 @@ func TestClusterRoleBindingPluginRow(t *testing.T) {
 }
 
 func TestClusterRoleBindingPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "rbac.authorization.k8s.io/v1",

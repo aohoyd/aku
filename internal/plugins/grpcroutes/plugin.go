@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -18,7 +17,7 @@ var gvr = schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Versio
 type Plugin struct{}
 
 // New creates a new GRPCRoute plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

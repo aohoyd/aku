@@ -9,7 +9,7 @@ import (
 )
 
 func TestResourceQuotaPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 2 {
 		t.Fatalf("expected 2 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestResourceQuotaPluginColumns(t *testing.T) {
 }
 
 func TestResourceQuotaPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeResourceQuota("my-quota")
 	row := p.Row(obj)
 	if row[0] != "my-quota" {
@@ -26,7 +26,7 @@ func TestResourceQuotaPluginRow(t *testing.T) {
 }
 
 func TestResourceQuotaPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",

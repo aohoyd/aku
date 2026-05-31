@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	corev1 "k8s.io/api/core/v1"
@@ -22,7 +21,7 @@ var gvr = schema.GroupVersionResource{Group: "node.k8s.io", Version: "v1", Resou
 type Plugin struct{}
 
 // New creates a new RuntimeClasses plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

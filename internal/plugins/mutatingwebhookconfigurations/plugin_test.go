@@ -9,7 +9,7 @@ import (
 )
 
 func TestMutatingWebhookConfigurationPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 4 {
 		t.Fatalf("expected 4 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestMutatingWebhookConfigurationPluginColumns(t *testing.T) {
 }
 
 func TestMutatingWebhookConfigurationPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "admissionregistration.k8s.io/v1",
@@ -54,7 +54,7 @@ func TestMutatingWebhookConfigurationPluginRow(t *testing.T) {
 }
 
 func TestMutatingWebhookConfigurationPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "admissionregistration.k8s.io/v1",

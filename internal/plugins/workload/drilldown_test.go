@@ -9,7 +9,7 @@ import (
 )
 
 func newTestStore(gvr schema.GroupVersionResource, namespace string, objs []*unstructured.Unstructured) *k8s.Store {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	for _, obj := range objs {
 		store.CacheUpsert(gvr, namespace, obj)
 	}
@@ -51,7 +51,7 @@ func TestFindOwnedNilStore(t *testing.T) {
 
 func TestFindOwnedEmptyUID(t *testing.T) {
 	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	result := FindOwned(store, rsGVR, "default", "")
 	if result != nil {
 		t.Fatal("expected nil for empty ownerUID")
@@ -85,7 +85,7 @@ func TestFindPodsByNodeName(t *testing.T) {
 	pod2 := makePodOnNode("pod-2", "kube-system", "node-1")
 	pod3 := makePodOnNode("pod-3", "default", "node-2")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(PodsGVR, "", pod1)
 	store.CacheUpsert(PodsGVR, "", pod2)
 	store.CacheUpsert(PodsGVR, "", pod3)
@@ -126,7 +126,7 @@ func TestFindPodsByVolumeClaim(t *testing.T) {
 	pod1 := makePodWithPVC("pod-1", "default", "my-pvc")
 	pod2 := makePodWithPVC("pod-2", "default", "other-pvc")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(PodsGVR, "default", pod1)
 	store.CacheUpsert(PodsGVR, "default", pod2)
 
@@ -155,7 +155,7 @@ func makePVC(name, namespace string) *unstructured.Unstructured {
 func TestFindPVCByClaimRef(t *testing.T) {
 	pvc := makePVC("my-pvc", "default")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(PVCsGVR, "default", pvc)
 
 	result := FindPVCByClaimRef(store, "default", "my-pvc")
@@ -165,7 +165,7 @@ func TestFindPVCByClaimRef(t *testing.T) {
 }
 
 func TestFindPVCByClaimRefNotFound(t *testing.T) {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	result := FindPVCByClaimRef(store, "default", "nonexistent")
 	if len(result) != 0 {
 		t.Fatalf("expected 0 PVCs, got %d", len(result))

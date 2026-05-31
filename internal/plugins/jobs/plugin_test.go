@@ -7,6 +7,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/render"
 	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,7 +35,7 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 }
 
 func TestJobPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 4 {
 		t.Fatalf("expected 4 columns, got %d", len(cols))
@@ -42,7 +43,7 @@ func TestJobPluginColumns(t *testing.T) {
 }
 
 func TestJobPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "batch/v1",
@@ -71,7 +72,7 @@ func TestJobPluginRow(t *testing.T) {
 }
 
 func TestJobPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "batch/v1",
@@ -142,7 +143,7 @@ func TestJobPluginDescribe(t *testing.T) {
 
 func TestJobDrillDown(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 
 	plugin.Reset()
 	mockPods := &mockPlugin{name: "pods"}
@@ -156,14 +157,14 @@ func TestJobDrillDown(t *testing.T) {
 	}}
 	store.CacheUpsert(podsGVR, "default", pod)
 
-	p := &Plugin{store: store}
+	p := &Plugin{}
 	job := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{
 			"name": "my-job", "namespace": "default", "uid": "job-uid-1",
 		},
 	}}
 
-	childPlugin, children := p.DrillDown(job)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(store), job)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin, got nil")
 	}
@@ -176,11 +177,11 @@ func TestJobDrillDown(t *testing.T) {
 }
 
 func TestJobDrillDownNilStore(t *testing.T) {
-	p := &Plugin{store: nil}
+	p := &Plugin{}
 	job := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "my-job", "namespace": "default", "uid": "job-uid-1"},
 	}}
-	childPlugin, children := p.DrillDown(job)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), job)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil, nil for nil store")
 	}

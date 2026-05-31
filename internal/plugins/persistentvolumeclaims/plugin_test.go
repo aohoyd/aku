@@ -7,6 +7,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/render"
 	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,7 +35,7 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 }
 
 func TestPVCPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 7 {
 		t.Fatalf("expected 7 columns, got %d", len(cols))
@@ -42,7 +43,7 @@ func TestPVCPluginColumns(t *testing.T) {
 }
 
 func TestPVCPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makePVC("data-pvc", "Bound", "pv-001", "10Gi", []string{"ReadWriteOnce"}, "standard")
 	row := p.Row(obj)
 	if row[0] != "data-pvc" {
@@ -57,7 +58,7 @@ func TestPVCPluginRow(t *testing.T) {
 }
 
 func TestPVCPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{
@@ -105,7 +106,7 @@ func TestPVCPluginDescribe(t *testing.T) {
 
 func TestPVCDrillDown(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 
 	plugin.Reset()
 	mockPods := &mockPlugin{name: "pods"}
@@ -128,16 +129,14 @@ func TestPVCDrillDown(t *testing.T) {
 	}}
 	store.CacheUpsert(podsGVR, "default", pod)
 
-	p := &Plugin{
-		store: store,
-	}
+	p := &Plugin{}
 	pvc := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{
 			"name": "data-pvc", "namespace": "default",
 		},
 	}}
 
-	childPlugin, children := p.DrillDown(pvc)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(store), pvc)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin, got nil")
 	}
@@ -150,13 +149,11 @@ func TestPVCDrillDown(t *testing.T) {
 }
 
 func TestPVCDrillDownNilStore(t *testing.T) {
-	p := &Plugin{
-		store: nil,
-	}
+	p := &Plugin{}
 	pvc := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "data-pvc", "namespace": "default"},
 	}}
-	childPlugin, children := p.DrillDown(pvc)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), pvc)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil, nil for nil store")
 	}

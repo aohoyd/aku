@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -19,7 +18,7 @@ var gvr = schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1
 type Plugin struct{}
 
 // New creates a new Leases plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

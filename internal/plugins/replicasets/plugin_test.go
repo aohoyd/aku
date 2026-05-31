@@ -6,6 +6,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/render"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -33,7 +34,7 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 
 func TestReplicaSetDrillDown(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 
 	plugin.Reset()
 	mockPods := &mockPlugin{name: "pods"}
@@ -47,14 +48,14 @@ func TestReplicaSetDrillDown(t *testing.T) {
 	}}
 	store.CacheUpsert(podsGVR, "default", pod)
 
-	p := &Plugin{store: store}
+	p := &Plugin{}
 	rs := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{
 			"name": "rs-1", "namespace": "default", "uid": "rs-uid-1",
 		},
 	}}
 
-	childPlugin, children := p.DrillDown(rs)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(store), rs)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin, got nil")
 	}
@@ -67,11 +68,11 @@ func TestReplicaSetDrillDown(t *testing.T) {
 }
 
 func TestReplicaSetDrillDownNilStore(t *testing.T) {
-	p := &Plugin{store: nil}
+	p := &Plugin{}
 	rs := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "rs-1", "namespace": "default", "uid": "rs-uid-1"},
 	}}
-	childPlugin, children := p.DrillDown(rs)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), rs)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil, nil for nil store")
 	}

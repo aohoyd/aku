@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -21,7 +20,7 @@ var gvr = schema.GroupVersionResource{Group: "discovery.k8s.io", Version: "v1", 
 type Plugin struct{}
 
 // New creates a new EndpointSlices plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

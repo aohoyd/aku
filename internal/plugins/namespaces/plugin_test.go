@@ -10,7 +10,7 @@ import (
 )
 
 func TestPluginName(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	if p.Name() != "namespaces" {
 		t.Fatalf("expected 'namespaces', got '%s'", p.Name())
 	}
@@ -26,7 +26,7 @@ func TestPluginName(t *testing.T) {
 }
 
 func TestPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 3 {
 		t.Fatalf("expected 3 columns, got %d", len(cols))
@@ -37,7 +37,7 @@ func TestPluginColumns(t *testing.T) {
 }
 
 func TestPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -61,7 +61,7 @@ func TestPluginRow(t *testing.T) {
 }
 
 func TestPluginRowDefaultPhase(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -80,7 +80,7 @@ func TestPluginRowDefaultPhase(t *testing.T) {
 }
 
 func TestPluginDescribeDocument(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{
@@ -120,9 +120,9 @@ func TestPluginDescribeDocument(t *testing.T) {
 func TestPluginGoTo(t *testing.T) {
 	plugin.Reset()
 	// Register a mock pods plugin so GoTo can find it
-	plugin.Register(New(nil, nil)) // just need something registered as "pods" won't be found without it
+	plugin.Register(New()) // just need something registered as "pods" won't be found without it
 
-	p := New(nil, nil)
+	p := New()
 	goToer, ok := p.(plugin.GoToer)
 	if !ok {
 		t.Fatal("Plugin should implement GoToer")

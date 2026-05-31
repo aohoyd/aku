@@ -9,7 +9,7 @@ import (
 )
 
 func TestCSRPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 5 {
 		t.Fatalf("expected 5 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestCSRPluginColumns(t *testing.T) {
 }
 
 func TestCSRPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeCSR("my-csr", "kubernetes.io/kube-apiserver-client", "system:admin", "Approved")
 	row := p.Row(obj)
 
@@ -36,7 +36,7 @@ func TestCSRPluginRow(t *testing.T) {
 }
 
 func TestCSRPluginRowNoCondition(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "certificates.k8s.io/v1",
@@ -58,7 +58,7 @@ func TestCSRPluginRowNoCondition(t *testing.T) {
 }
 
 func TestCSRPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "certificates.k8s.io/v1",

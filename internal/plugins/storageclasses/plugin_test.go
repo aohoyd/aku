@@ -9,7 +9,7 @@ import (
 )
 
 func TestStorageClassPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 5 {
 		t.Fatalf("expected 5 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestStorageClassPluginColumns(t *testing.T) {
 }
 
 func TestStorageClassPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "storage.k8s.io/v1",
@@ -48,7 +48,7 @@ func TestStorageClassPluginRow(t *testing.T) {
 }
 
 func TestStorageClassPluginRowDefaults(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "storage.k8s.io/v1",
@@ -71,7 +71,7 @@ func TestStorageClassPluginRowDefaults(t *testing.T) {
 }
 
 func TestStorageClassPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "storage.k8s.io/v1",

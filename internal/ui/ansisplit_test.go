@@ -695,8 +695,8 @@ func TestStyleToSGR_NoStyle(t *testing.T) {
 
 func TestInjectHighlights_PlainSingleMatch(t *testing.T) {
 	line := "hello world"
-	hiSGR := "\x1b[43m"  // yellow bg
-	selSGR := "\x1b[42m" // green bg
+	hiSGR := "\x1b[43m"                              // yellow bg
+	selSGR := "\x1b[42m"                             // green bg
 	matches := []highlightRange{{start: 6, end: 11}} // "world"
 
 	result := injectHighlights(line, matches, -1, hiSGR, selSGR)
@@ -939,8 +939,8 @@ func TestInjectHighlights_NoMatches(t *testing.T) {
 // ---------- injectHighlights: correctness comparison with lipgloss.StyleRanges ----------
 
 func TestInjectHighlights_MatchesStyleRanges_PlainASCII(t *testing.T) {
-	hiStyle := lipgloss.NewStyle().Background(lipgloss.Color("3"))   // yellow bg
-	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("2"))  // green bg
+	hiStyle := lipgloss.NewStyle().Background(lipgloss.Color("3"))  // yellow bg
+	selStyle := lipgloss.NewStyle().Background(lipgloss.Color("2")) // green bg
 	hiSGR := styleToSGR(hiStyle)
 	selSGR := styleToSGR(selStyle)
 
@@ -1593,7 +1593,7 @@ func TestWrapLines_ANSIContent(t *testing.T) {
 func TestWrapLines_MappingMultipleLines(t *testing.T) {
 	// width=10, contWidth=8 (10-2)
 	lines := []string{
-		"short",            // fits in width=10, 1 visual row
+		"short",           // fits in width=10, 1 visual row
 		"abcdefghijklmno", // 15 chars: row0=10, row1=5 (fits in contWidth=8) => 2 visual rows
 		"x",               // fits, 1 visual row
 	}

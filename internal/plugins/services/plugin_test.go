@@ -9,7 +9,7 @@ import (
 )
 
 func TestServicePluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 6 {
 		t.Fatalf("expected 6 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestServicePluginColumns(t *testing.T) {
 }
 
 func TestServicePluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeService("my-svc", "ClusterIP", "10.0.0.1", "80/TCP")
 	row := p.Row(obj)
 	if row[0] != "my-svc" {
@@ -29,14 +29,14 @@ func TestServicePluginRow(t *testing.T) {
 }
 
 func TestServicePluginName(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	if p.Name() != "services" {
 		t.Fatalf("expected 'services', got '%s'", p.Name())
 	}
 }
 
 func TestServicePluginDescribeDocument(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{

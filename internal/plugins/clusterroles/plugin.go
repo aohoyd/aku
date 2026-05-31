@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
@@ -18,15 +17,11 @@ import (
 var gvr = schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles"}
 
 // Plugin implements plugin.ResourcePlugin and plugin.DrillDowner for Kubernetes ClusterRoles.
-type Plugin struct {
-	store *k8s.Store
-}
+type Plugin struct{}
 
 // New creates a new ClusterRoles plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{
-		store: store,
-	}
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "clusterroles" }
@@ -96,17 +91,18 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 }
 
 // DrillDown implements plugin.DrillDowner.
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
-	if p.store == nil {
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return nil, nil
 	}
 	pp, ok := plugin.ByName("clusterrolebindings")
 	if !ok {
 		return nil, nil
 	}
-	p.store.Subscribe(workload.ClusterRoleBindingsGVR, "")
+	store.Subscribe(workload.ClusterRoleBindingsGVR, "")
 	name := obj.GetName()
-	bindings := workload.FindClusterRoleBindingsByRoleRef(p.store, name, "ClusterRole")
+	bindings := workload.FindClusterRoleBindingsByRoleRef(store, name, "ClusterRole")
 	return pp, bindings
 }
 

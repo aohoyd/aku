@@ -19,7 +19,7 @@ type fakeHelmClient struct {
 	getValuesCalls   int
 }
 
-func (f *fakeHelmClient) ListReleases(namespace string) ([]ReleaseInfo, error) { return nil, nil }
+func (f *fakeHelmClient) ListReleases(namespace string) ([]ReleaseInfo, error)    { return nil, nil }
 func (f *fakeHelmClient) GetRelease(name, namespace string) (*ReleaseInfo, error) { return nil, nil }
 func (f *fakeHelmClient) GetValues(name, namespace string, all bool) (map[string]any, error) {
 	f.lastGetValuesAll = all
@@ -31,7 +31,7 @@ func (f *fakeHelmClient) Upgrade(name, namespace string, values map[string]any) 
 	return f.upgradeErr
 }
 func (f *fakeHelmClient) Rollback(name, namespace string, revision int) error { return nil }
-func (f *fakeHelmClient) Uninstall(name, namespace string) error               { return nil }
+func (f *fakeHelmClient) Uninstall(name, namespace string) error              { return nil }
 
 func writeHelmEditorScript(t *testing.T, counterPath, modifiedContent string) string {
 	t.Helper()

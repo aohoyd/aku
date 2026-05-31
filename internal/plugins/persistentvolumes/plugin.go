@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
@@ -18,13 +17,11 @@ import (
 var gvr = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "persistentvolumes"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes PersistentVolumes.
-type Plugin struct {
-	store *k8s.Store
-}
+type Plugin struct{}
 
 // New creates a new PersistentVolumes plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{store: store}
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "persistentvolumes" }
@@ -132,8 +129,9 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 }
 
 // DrillDown implements plugin.DrillDowner.
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
-	if p.store == nil {
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return nil, nil
 	}
 	pvcPlugin, ok := plugin.ByName("persistentvolumeclaims")
@@ -145,8 +143,8 @@ func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugi
 	if claimName == "" {
 		return nil, nil
 	}
-	p.store.Subscribe(workload.PVCsGVR, claimNs)
-	pvcs := workload.FindPVCByClaimRef(p.store, claimNs, claimName)
+	store.Subscribe(workload.PVCsGVR, claimNs)
+	pvcs := workload.FindPVCByClaimRef(store, claimNs, claimName)
 	return pvcPlugin, pvcs
 }
 

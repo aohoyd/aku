@@ -148,14 +148,93 @@ func TestUpdateSplitObjectsNamespaceFiltering(t *testing.T) {
 		{Object: map[string]any{"metadata": map[string]any{"name": "pod-a"}}},
 	}
 
-	// Update only "staging" namespace — split 0 ("default") should be empty
-	l.UpdateSplitObjects(podsPlugin(), "staging", objs)
+	// Update only "staging" namespace — split 0 ("default") should be empty.
+	// Empty ctxName matches the transitional empty-pane-context rule.
+	l.UpdateSplitObjects(podsPlugin(), "staging", "", objs)
 
 	if l.SplitAt(0).Len() != 0 {
 		t.Fatal("split 0 (default) should not have received staging objects")
 	}
 	if l.SplitAt(1).Len() != 1 {
 		t.Fatal("split 1 (staging) should have received objects")
+	}
+}
+
+// TestUpdateSplitObjectsContextFiltering verifies UpdateSplitObjects only
+// updates panes whose context matches the originating context under strict
+// equality. The core simultaneous-multi-cluster correctness guarantee: a prod
+// update repaints only the prod pane and leaves the staging-pinned pane (and an
+// empty-context pane) untouched.
+func TestUpdateSplitObjectsContextFiltering(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default") // split 0: context "prod"
+	l.AddSplit(podsPlugin(), "default") // split 1: context "staging"
+	l.AddSplit(podsPlugin(), "default") // split 2: context "" (matches nothing)
+
+	l.SplitAt(0).SetContext("prod")
+	l.SplitAt(1).SetContext("staging")
+	// split 2 keeps the default empty context
+
+	objs := []*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-a"}}},
+	}
+
+	// Update only the "prod" context.
+	l.UpdateSplitObjects(podsPlugin(), "default", "prod", objs)
+
+	if l.SplitAt(0).Len() != 1 {
+		t.Fatalf("split 0 (prod) should have received objects, got %d", l.SplitAt(0).Len())
+	}
+	if l.SplitAt(1).Len() != 0 {
+		t.Fatalf("split 1 (staging) should NOT have received prod objects, got %d", l.SplitAt(1).Len())
+	}
+	// Strict equality: an empty-context pane matches no real context.
+	if l.SplitAt(2).Len() != 0 {
+		t.Fatalf("split 2 (empty context) should match nothing under strict equality, got %d", l.SplitAt(2).Len())
+	}
+}
+
+// TestUpdateSplitObjectsEmptyPaneContextMatchesNonEmptyMsg verifies that under
+// strict equality a pane with an empty context matches no real store context
+// (empty no longer wildcard-matches as it did under the transitional rule).
+func TestUpdateSplitObjectsEmptyPaneContextMatchesNonEmptyMsg(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default") // context "" by default
+
+	objs := []*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-a"}}},
+	}
+
+	// Store context is a real name, pane context is empty: strict equality means
+	// it must NOT match.
+	l.UpdateSplitObjects(podsPlugin(), "default", "my-real-context", objs)
+
+	if l.SplitAt(0).Len() != 0 {
+		t.Fatalf("empty-context pane should match nothing under strict equality, got %d", l.SplitAt(0).Len())
+	}
+}
+
+// TestUpdateSplitObjectsTwoPanesDifferentClusters is the explicit side-by-side
+// multi-cluster guarantee: with two panes on different clusters, a "prod"
+// update repaints only the prod pane and leaves the staging pane untouched.
+func TestUpdateSplitObjectsTwoPanesDifferentClusters(t *testing.T) {
+	l := New(120, 40, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default")
+	l.SplitAt(0).SetContext("prod")
+	l.AddSplit(podsPlugin(), "default")
+	l.SplitAt(1).SetContext("staging")
+
+	objs := []*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "prod-a"}}},
+		{Object: map[string]any{"metadata": map[string]any{"name": "prod-b"}}},
+	}
+	l.UpdateSplitObjects(podsPlugin(), "default", "prod", objs)
+
+	if l.SplitAt(0).Len() != 2 {
+		t.Fatalf("expected prod pane to show 2 objects, got %d", l.SplitAt(0).Len())
+	}
+	if l.SplitAt(1).Len() != 0 {
+		t.Fatalf("expected staging pane untouched, got %d objects", l.SplitAt(1).Len())
 	}
 }
 
@@ -506,7 +585,7 @@ func TestUpdateSplitObjectsSkipsDrillDown(t *testing.T) {
 		{Object: map[string]any{"metadata": map[string]any{"name": "pod-2"}}},
 		{Object: map[string]any{"metadata": map[string]any{"name": "pod-3"}}},
 	}
-	l.UpdateSplitObjects(podsPlugin(), "default", allPods)
+	l.UpdateSplitObjects(podsPlugin(), "default", "", allPods)
 
 	// Drilldown split should NOT have been updated
 	if l.SplitAt(0).Len() != 1 {

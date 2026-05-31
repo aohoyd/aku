@@ -9,7 +9,7 @@ import (
 )
 
 func TestPriorityClassPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 4 {
 		t.Fatalf("expected 4 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestPriorityClassPluginColumns(t *testing.T) {
 }
 
 func TestPriorityClassPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "scheduling.k8s.io/v1",
@@ -44,7 +44,7 @@ func TestPriorityClassPluginRow(t *testing.T) {
 }
 
 func TestPriorityClassPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "scheduling.k8s.io/v1",

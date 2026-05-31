@@ -9,7 +9,7 @@ import (
 )
 
 func TestLimitRangePluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 2 {
 		t.Fatalf("expected 2 columns, got %d", len(cols))
@@ -29,7 +29,7 @@ func TestLimitRangePluginColumns(t *testing.T) {
 }
 
 func TestLimitRangePluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -51,7 +51,7 @@ func TestLimitRangePluginRow(t *testing.T) {
 }
 
 func TestLimitRangePluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",

@@ -14,7 +14,7 @@ import (
 )
 
 func TestStoreCacheUpsertAndList(t *testing.T) {
-	s := NewStore(nil, nil)
+	s := NewStore(nil, "", nil)
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
 	obj := &unstructured.Unstructured{}
@@ -32,7 +32,7 @@ func TestStoreCacheUpsertAndList(t *testing.T) {
 }
 
 func TestStoreCacheDelete(t *testing.T) {
-	s := NewStore(nil, nil)
+	s := NewStore(nil, "", nil)
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
 	obj := &unstructured.Unstructured{}
@@ -47,7 +47,7 @@ func TestStoreCacheDelete(t *testing.T) {
 }
 
 func TestStoreListEmpty(t *testing.T) {
-	s := NewStore(nil, nil)
+	s := NewStore(nil, "", nil)
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	items := s.List(gvr, "default")
 	if items != nil {
@@ -56,7 +56,7 @@ func TestStoreListEmpty(t *testing.T) {
 }
 
 func TestStoreMultipleGVRs(t *testing.T) {
-	s := NewStore(nil, nil)
+	s := NewStore(nil, "", nil)
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	svcsGVR := schema.GroupVersionResource{Version: "v1", Resource: "services"}
 
@@ -76,7 +76,7 @@ func TestStoreMultipleGVRs(t *testing.T) {
 }
 
 func TestStoreUnsubscribeClearsCache(t *testing.T) {
-	s := NewStore(nil, nil)
+	s := NewStore(nil, "", nil)
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
 	obj := &unstructured.Unstructured{}
@@ -91,7 +91,7 @@ func TestStoreUnsubscribeClearsCache(t *testing.T) {
 }
 
 func TestStoreUnsubscribeAll(t *testing.T) {
-	s := NewStore(nil, nil)
+	s := NewStore(nil, "", nil)
 	gvr1 := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	gvr2 := schema.GroupVersionResource{Version: "v1", Resource: "services"}
 
@@ -111,8 +111,10 @@ func TestStoreUnsubscribeAll(t *testing.T) {
 
 func TestStoreNotify(t *testing.T) {
 	var received bool
-	s := NewStore(nil, func(msg tea.Msg) {
+	var got tea.Msg
+	s := NewStore(nil, "prod-ctx", func(msg tea.Msg) {
 		received = true
+		got = msg
 	})
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
@@ -124,10 +126,33 @@ func TestStoreNotify(t *testing.T) {
 	if !received {
 		t.Fatal("send function should have been called")
 	}
+
+	upd, ok := got.(ResourceUpdatedMsg)
+	if !ok {
+		t.Fatalf("expected ResourceUpdatedMsg, got %T", got)
+	}
+	if upd.Context != "prod-ctx" {
+		t.Fatalf("expected msg.Context %q, got %q", "prod-ctx", upd.Context)
+	}
+	if upd.GVR != gvr {
+		t.Fatalf("expected msg.GVR %v, got %v", gvr, upd.GVR)
+	}
+	if upd.Namespace != "default" {
+		t.Fatalf("expected msg.Namespace %q, got %q", "default", upd.Namespace)
+	}
+}
+
+// TestStoreContextAccessor verifies the store reports the context name it was
+// constructed with.
+func TestStoreContextAccessor(t *testing.T) {
+	s := NewStore(nil, "staging-ctx", nil)
+	if s.Context() != "staging-ctx" {
+		t.Fatalf("expected Context() %q, got %q", "staging-ctx", s.Context())
+	}
 }
 
 func TestStoreCacheAllNamespacesNoCollision(t *testing.T) {
-	s := NewStore(nil, nil)
+	s := NewStore(nil, "", nil)
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
 	// Two pods with same name in different namespaces, stored under all-ns watch key ""
@@ -157,7 +182,7 @@ func TestStoreCacheAllNamespacesNoCollision(t *testing.T) {
 }
 
 func TestStoreCacheDeleteAllNamespaces(t *testing.T) {
-	s := NewStore(nil, nil)
+	s := NewStore(nil, "", nil)
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
 	pod1 := &unstructured.Unstructured{}
@@ -182,7 +207,7 @@ func TestStoreCacheDeleteAllNamespaces(t *testing.T) {
 }
 
 func TestStoreDeepCopy(t *testing.T) {
-	s := NewStore(nil, nil)
+	s := NewStore(nil, "", nil)
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
 	obj := &unstructured.Unstructured{}
@@ -202,7 +227,7 @@ func TestStoreDeepCopy(t *testing.T) {
 }
 
 func TestStoreConcurrentCacheOperations(t *testing.T) {
-	s := NewStore(nil, func(msg tea.Msg) {})
+	s := NewStore(nil, "", func(msg tea.Msg) {})
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
 	const goroutines = 20
@@ -255,7 +280,7 @@ func TestStoreSubscribeUnsubscribeNoLeak(t *testing.T) {
 	// panic or fail on nil client. We manually insert a cancel entry to
 	// simulate the subscribe path without needing a real client.
 	// Instead, we directly test Subscribe+Unsubscribe on cache-only paths.
-	s := NewStore(nil, func(msg tea.Msg) {})
+	s := NewStore(nil, "", func(msg tea.Msg) {})
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 
 	// Force GC and stabilize goroutine count
@@ -287,5 +312,48 @@ func TestStoreSubscribeUnsubscribeNoLeak(t *testing.T) {
 	// Allow a small margin for runtime goroutines
 	if after > before+5 {
 		t.Fatalf("possible goroutine leak: before=%d, after=%d", before, after)
+	}
+}
+
+// TestStoreSubscribeNilClientNoInformer verifies that Subscribe on a store with
+// a nil dynamic client does not launch an informer goroutine (which would
+// dereference the nil client on a background goroutine and panic
+// asynchronously). It must instead behave like a cache-only store: return the
+// currently-cached items and start no informer. Degraded clusters and many unit
+// tests build a Store this way.
+func TestStoreSubscribeNilClientNoInformer(t *testing.T) {
+	s := NewStore(nil, "", nil)
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+	// Seed one cached object so we can confirm Subscribe returns the cache.
+	obj := &unstructured.Unstructured{}
+	obj.SetName("cached-pod")
+	obj.SetNamespace("default")
+	s.CacheUpsert(gvr, "default", obj)
+
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond)
+	before := runtime.NumGoroutine()
+
+	// This must not panic and must not start an informer goroutine.
+	items := s.Subscribe(gvr, "default")
+	if len(items) != 1 || items[0].GetName() != "cached-pod" {
+		t.Fatalf("expected the cached pod back from Subscribe, got %v", items)
+	}
+
+	// No informer should have been registered for the nil-client store.
+	s.mu.RLock()
+	_, hasInformer := s.informers[watchKey{GVR: gvr, Namespace: "default"}]
+	s.mu.RUnlock()
+	if hasInformer {
+		t.Fatal("Subscribe on a nil-client store must not register an informer")
+	}
+
+	// Give any erroneously-launched informer goroutine a chance to appear.
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > before+2 {
+		t.Fatalf("Subscribe on a nil-client store started goroutines: before=%d, after=%d", before, after)
 	}
 }

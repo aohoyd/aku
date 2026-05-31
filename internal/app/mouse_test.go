@@ -345,9 +345,9 @@ func TestMouseWheelInsideOverlayScrollsOverlay(t *testing.T) {
 // these exercise the resource/container/time-range dispatch paths.
 func TestMouseWheelRoutesToActiveOverlayPicker(t *testing.T) {
 	cases := []struct {
-		name    string
-		openFn  func(a *App)
-		cursor  func(a App) int
+		name   string
+		openFn func(a *App)
+		cursor func(a App) int
 	}{
 		{
 			name: "resourcePicker",

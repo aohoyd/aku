@@ -38,14 +38,20 @@ type MouseConfig struct {
 	Enabled bool `yaml:"enabled,omitempty"`
 }
 
+// ContextsConfig holds configuration for multi-cluster context discovery.
+type ContextsConfig struct {
+	Directories []string `yaml:"directories,omitempty"`
+}
+
 // Config holds the application configuration.
 type Config struct {
-	Charts map[string]map[string]string `yaml:"charts,omitempty"`
-	API    APIConfig                    `yaml:"api,omitempty"`
-	Debug  DebugConfig                  `yaml:"debug,omitempty"`
-	Exec   ExecConfig                   `yaml:"exec,omitempty"`
-	Logs   LogsConfig                   `yaml:"logs,omitempty"`
-	Mouse  MouseConfig                  `yaml:"mouse,omitempty"`
+	Charts   map[string]map[string]string `yaml:"charts,omitempty"`
+	API      APIConfig                    `yaml:"api,omitempty"`
+	Debug    DebugConfig                  `yaml:"debug,omitempty"`
+	Exec     ExecConfig                   `yaml:"exec,omitempty"`
+	Logs     LogsConfig                   `yaml:"logs,omitempty"`
+	Mouse    MouseConfig                  `yaml:"mouse,omitempty"`
+	Contexts ContextsConfig               `yaml:"contexts,omitempty"`
 }
 
 // DefaultConfig returns a config with default settings.
@@ -142,6 +148,15 @@ func (c *Config) HeartbeatInterval() time.Duration {
 		return time.Duration(c.API.HeartbeatSeconds) * time.Second
 	}
 	return 5 * time.Second
+}
+
+// ContextDirectories returns the configured directories to scan for kubeconfig
+// files. Returns nil if the config is nil or no directories are configured.
+func (c *Config) ContextDirectories() []string {
+	if c == nil {
+		return nil
+	}
+	return c.Contexts.Directories
 }
 
 // SetChartRef sets the chart reference for a release in a namespace.

@@ -98,6 +98,12 @@ func (s *StatusBar) SetContextName(name string) {
 	s.contextName = name
 }
 
+// ContextName returns the current context name displayed in the health badge.
+// Intended for tests that need to assert a context switch updated the bar.
+func (s *StatusBar) ContextName() string {
+	return s.contextName
+}
+
 func truncateContext(name string, max int) string {
 	if ansi.StringWidth(name) <= max {
 		return name

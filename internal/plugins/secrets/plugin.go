@@ -6,7 +6,6 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	corev1 "k8s.io/api/core/v1"
@@ -21,7 +20,7 @@ var gvr = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secre
 type Plugin struct{}
 
 // New creates a new Secrets plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 
@@ -63,8 +62,9 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 	return p.renderDescribe(obj, false)
 }
 
-// DescribeUncovered implements plugin.Uncoverable.
-func (p *Plugin) DescribeUncovered(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
+// DescribeUncovered implements plugin.Uncoverable. Secrets resolve their own
+// data and do not consult the cluster store, so the Cluster argument is unused.
+func (p *Plugin) DescribeUncovered(ctx context.Context, _ plugin.Cluster, obj *unstructured.Unstructured) (render.Content, error) {
 	return p.renderDescribe(obj, true)
 }
 

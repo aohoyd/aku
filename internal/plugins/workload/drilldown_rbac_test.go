@@ -82,7 +82,7 @@ func TestFindRoleBindingsByRoleRef(t *testing.T) {
 	rb2 := makeRoleBinding("rb-2", "default", "my-role", "Role")
 	rb3 := makeRoleBinding("rb-other", "default", "other-role", "Role")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(RoleBindingsGVR, "default", rb1)
 	store.CacheUpsert(RoleBindingsGVR, "default", rb2)
 	store.CacheUpsert(RoleBindingsGVR, "default", rb3)
@@ -103,7 +103,7 @@ func TestFindRoleBindingsByRoleRefNilStore(t *testing.T) {
 func TestFindRoleBindingsByRoleRefKindMismatch(t *testing.T) {
 	rb1 := makeRoleBinding("rb-1", "default", "my-role", "ClusterRole")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(RoleBindingsGVR, "default", rb1)
 
 	result := FindRoleBindingsByRoleRef(store, "default", "my-role", "Role")
@@ -119,7 +119,7 @@ func TestFindClusterRoleBindingsByRoleRef(t *testing.T) {
 	crb2 := makeClusterRoleBinding("crb-2", "my-cluster-role", "ClusterRole")
 	crb3 := makeClusterRoleBinding("crb-other", "other-role", "ClusterRole")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(ClusterRoleBindingsGVR, "", crb1)
 	store.CacheUpsert(ClusterRoleBindingsGVR, "", crb2)
 	store.CacheUpsert(ClusterRoleBindingsGVR, "", crb3)
@@ -144,7 +144,7 @@ func TestFindPVsByStorageClass(t *testing.T) {
 	pv2 := makePVWithStorageClass("pv-2", "standard")
 	pv3 := makePVWithStorageClass("pv-other", "premium")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(PersistentVolumesGVR, "", pv1)
 	store.CacheUpsert(PersistentVolumesGVR, "", pv2)
 	store.CacheUpsert(PersistentVolumesGVR, "", pv3)
@@ -163,7 +163,7 @@ func TestFindPVsByStorageClassNilStore(t *testing.T) {
 }
 
 func TestFindPVsByStorageClassEmpty(t *testing.T) {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	result := FindPVsByStorageClass(store, "")
 	if result != nil {
 		t.Fatal("expected nil for empty storageClassName")
@@ -177,7 +177,7 @@ func TestFindGatewaysByClassName(t *testing.T) {
 	gw2 := makeGateway("gw-2", "default", "my-class")
 	gw3 := makeGateway("gw-other", "default", "other-class")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(GatewaysGVR, "default", gw1)
 	store.CacheUpsert(GatewaysGVR, "default", gw2)
 	store.CacheUpsert(GatewaysGVR, "default", gw3)
@@ -202,7 +202,7 @@ func TestFindRoutesByGateway(t *testing.T) {
 	grpcRoute := makeRoute("grpc-route-1", "default", "my-gw", "default")
 	noMatch := makeRoute("http-route-other", "default", "other-gw", "default")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(HTTPRoutesGVR, "", httpRoute)
 	store.CacheUpsert(GRPCRoutesGVR, "", grpcRoute)
 	store.CacheUpsert(HTTPRoutesGVR, "", noMatch)
@@ -217,7 +217,7 @@ func TestFindRoutesByGatewayImplicitNamespace(t *testing.T) {
 	// parentRef without namespace should default to route's own namespace
 	route := makeRoute("http-route-1", "default", "my-gw", "")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(HTTPRoutesGVR, "", route)
 
 	result := FindRoutesByGateway(store, "default", "my-gw")
@@ -236,7 +236,7 @@ func TestFindRoutesByGatewayNilStore(t *testing.T) {
 func TestFindRoutesByGatewayNoMatch(t *testing.T) {
 	route := makeRoute("http-route-1", "default", "my-gw", "other-namespace")
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	store.CacheUpsert(HTTPRoutesGVR, "", route)
 
 	result := FindRoutesByGateway(store, "default", "my-gw")

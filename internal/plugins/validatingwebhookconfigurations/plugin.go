@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -22,7 +21,7 @@ var gvr = schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Ver
 type Plugin struct{}
 
 // New creates a new ValidatingWebhookConfigurations plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

@@ -6,9 +6,32 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// TestSeedGVRIndex populates the GVR index with common resources for testing.
-func TestSeedGVRIndex(t *testing.T) {
+// SetGVRForTest seeds a single GVR/Kind mapping into the Discovery index without
+// a live API server. It is used by tests in other packages that need a resolver
+// primed with a known mapping. It writes under the same lock Populate/readers
+// use, so it is safe to call alongside the concurrent read paths.
+func (d *Discovery) SetGVRForTest(apiVersion, kind string, gvr schema.GroupVersionResource) {
+	gv, err := schema.ParseGroupVersion(apiVersion)
+	if err != nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.gvrIndex == nil {
+		d.gvrIndex = map[string]schema.GroupVersionResource{}
+	}
+	if d.kindIndex == nil {
+		d.kindIndex = map[schema.GroupVersionResource]string{}
+	}
+	d.gvrIndex[gvrIndexKey(gv.Group, gv.Version, kind)] = gvr
+	d.kindIndex[gvr] = kind
+}
+
+// SeededTestDiscovery returns a *Discovery pre-populated with common resources
+// for testing.
+func SeededTestDiscovery(t *testing.T) *Discovery {
 	t.Helper()
+	d := NewDiscovery()
 	entries := []struct {
 		group, version, kind, resource string
 	}{
@@ -22,16 +45,16 @@ func TestSeedGVRIndex(t *testing.T) {
 		{"apps", "v1", "DaemonSet", "daemonsets"},
 		{"networking.k8s.io", "v1", "Ingress", "ingresses"},
 	}
+	resources := make([]APIResource, 0, len(entries))
 	for _, e := range entries {
-		gvr := schema.GroupVersionResource{Group: e.group, Version: e.version, Resource: e.resource}
-		gvrIndex.Store(
-			gvrIndexKey(e.group, e.version, e.kind),
-			gvr,
-		)
-		kindIndex.Store(gvr, e.kind)
+		resources = append(resources, APIResource{
+			Name:    e.resource,
+			Group:   e.group,
+			Version: e.version,
+			Kind:    e.kind,
+			GVR:     schema.GroupVersionResource{Group: e.group, Version: e.version, Resource: e.resource},
+		})
 	}
-	t.Cleanup(func() {
-		gvrIndex.Range(func(key, _ any) bool { gvrIndex.Delete(key); return true })
-		kindIndex.Range(func(key, _ any) bool { kindIndex.Delete(key); return true })
-	})
+	d.Populate(resources)
+	return d
 }

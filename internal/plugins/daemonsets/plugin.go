@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
@@ -21,13 +20,11 @@ var (
 )
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes DaemonSets.
-type Plugin struct {
-	store *k8s.Store
-}
+type Plugin struct{}
 
 // New creates a new DaemonSet plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{store: store}
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "daemonsets" }
@@ -78,14 +75,15 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 
 // DescribeUncovered implements plugin.Uncoverable. It resolves env references
 // in template containers by passing live ConfigMaps and Secrets from the store.
-func (p *Plugin) DescribeUncovered(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
-	if p.store == nil {
+func (p *Plugin) DescribeUncovered(ctx context.Context, cl plugin.Cluster, obj *unstructured.Unstructured) (render.Content, error) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return p.describe(obj, nil, nil)
 	}
 	ns := obj.GetNamespace()
-	p.store.Subscribe(configMapsGVR, ns)
-	p.store.Subscribe(secretsGVR, ns)
-	return p.describe(obj, p.store.List(configMapsGVR, ns), p.store.List(secretsGVR, ns))
+	store.Subscribe(configMapsGVR, ns)
+	store.Subscribe(secretsGVR, ns)
+	return p.describe(obj, store.List(configMapsGVR, ns), store.List(secretsGVR, ns))
 }
 
 func (p *Plugin) describe(obj *unstructured.Unstructured, configMaps, secrets []*unstructured.Unstructured) (render.Content, error) {
@@ -135,16 +133,17 @@ func (p *Plugin) describe(obj *unstructured.Unstructured, configMaps, secrets []
 }
 
 // DrillDown implements plugin.DrillDowner.
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
-	if p.store == nil {
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return nil, nil
 	}
 	pp, ok := plugin.ByName("pods")
 	if !ok {
 		return nil, nil
 	}
-	p.store.Subscribe(workload.PodsGVR, obj.GetNamespace())
-	pods := workload.FindOwnedPods(p.store, obj.GetNamespace(), string(obj.GetUID()))
+	store.Subscribe(workload.PodsGVR, obj.GetNamespace())
+	pods := workload.FindOwnedPods(store, obj.GetNamespace(), string(obj.GetUID()))
 	return pp, pods
 }
 

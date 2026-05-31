@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	corev1 "k8s.io/api/core/v1"
@@ -20,7 +19,7 @@ var gvr = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "event
 type Plugin struct{}
 
 // New creates a new Events plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

@@ -9,7 +9,7 @@ import (
 )
 
 func TestPDBPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 5 {
 		t.Fatalf("expected 5 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestPDBPluginColumns(t *testing.T) {
 }
 
 func TestPDBPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "policy/v1",
@@ -48,7 +48,7 @@ func TestPDBPluginRow(t *testing.T) {
 }
 
 func TestPDBPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "policy/v1",

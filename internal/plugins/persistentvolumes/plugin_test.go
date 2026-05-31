@@ -7,6 +7,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
 	"github.com/charmbracelet/x/ansi"
@@ -35,7 +36,7 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 }
 
 func TestPVPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 8 {
 		t.Fatalf("expected 8 columns, got %d", len(cols))
@@ -43,7 +44,7 @@ func TestPVPluginColumns(t *testing.T) {
 }
 
 func TestPVPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makePV("my-pv", "10Gi", []string{"ReadWriteOnce"}, "Retain", "Bound", "default", "my-pvc", "standard")
 	row := p.Row(obj)
 	if row[0] != "my-pv" {
@@ -70,7 +71,7 @@ func TestPVPluginRow(t *testing.T) {
 }
 
 func TestPVPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makePV("my-pv", "10Gi", []string{"ReadWriteOnce"}, "Retain", "Bound", "default", "my-pvc", "standard")
 	// Add mount options and hostPath for volume source type
 	obj.Object["spec"].(map[string]any)["mountOptions"] = []any{"/mnt/data"}
@@ -106,7 +107,7 @@ func TestPVPluginDescribe(t *testing.T) {
 }
 
 func TestPVDrillDown(t *testing.T) {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 
 	plugin.Reset()
 	mockPVC := &mockPlugin{name: "persistentvolumeclaims"}
@@ -119,12 +120,10 @@ func TestPVDrillDown(t *testing.T) {
 	}}
 	store.CacheUpsert(workload.PVCsGVR, "default", pvc1)
 
-	p := &Plugin{
-		store: store,
-	}
+	p := &Plugin{}
 	pv := makePV("my-pv", "10Gi", []string{"ReadWriteOnce"}, "Retain", "Bound", "default", "my-pvc", "standard")
 
-	childPlugin, children := p.DrillDown(pv)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(store), pv)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin, got nil")
 	}
@@ -137,26 +136,22 @@ func TestPVDrillDown(t *testing.T) {
 }
 
 func TestPVDrillDownNilStore(t *testing.T) {
-	p := &Plugin{
-		store: nil,
-	}
+	p := &Plugin{}
 	pv := makePV("my-pv", "10Gi", []string{"ReadWriteOnce"}, "Retain", "Bound", "default", "my-pvc", "standard")
-	childPlugin, children := p.DrillDown(pv)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), pv)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil, nil for nil store")
 	}
 }
 
 func TestPVDrillDownNoClaimRef(t *testing.T) {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 
 	plugin.Reset()
 	mockPVC := &mockPlugin{name: "persistentvolumeclaims"}
 	plugin.Register(mockPVC)
 
-	p := &Plugin{
-		store: store,
-	}
+	p := &Plugin{}
 	// PV without claimRef
 	pv := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -179,7 +174,7 @@ func TestPVDrillDownNoClaimRef(t *testing.T) {
 			},
 		},
 	}
-	childPlugin, children := p.DrillDown(pv)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(store), pv)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil, nil for PV without claimRef")
 	}

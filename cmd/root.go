@@ -9,10 +9,11 @@ import (
 	"strings"
 
 	"github.com/aohoyd/aku/internal/app"
+	"github.com/aohoyd/aku/internal/cluster"
 	"github.com/aohoyd/aku/internal/config"
 	"github.com/aohoyd/aku/internal/helm"
-	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/k8s"
+	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/apiresources"
@@ -340,23 +341,35 @@ func run(cmd *cobra.Command, args []string) error {
 		kubeconfigPath = filepath.Join(home, ".kube", "config")
 	}
 
-	// Create k8s client
+	// Scan kubeconfig files for contexts (configured dirs + the resolved
+	// default kubeconfig). The scan can never fail as a whole — every per-file
+	// failure is skipped silently — so there is no error to handle; a fully
+	// failed scan just yields no extra entries and the global cluster still
+	// connects via the base path.
+	entries := cluster.ScanKubeconfigs(cfg.ContextDirectories(), kubeconfigPath)
+
+	// Build the Cluster Session Manager. SetGlobal eagerly creates and connects
+	// the global cluster (context_ == "" means the kubeconfig current-context).
+	mgr := cluster.NewManager(entries, kubeconfigPath, cfg.APITimeout())
+	globalCluster, connectErr := mgr.SetGlobal(context_)
+	if connectErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not connect to Kubernetes: %v\n", connectErr)
+		// Continue without k8s - app will show empty lists (degraded global).
+	}
+
+	// Pull the global cluster's client for plugin registration. Built-in plugins
+	// are metadata-only and ignore it; helmreleases is the exception — it builds
+	// its helm client from the global client's config (see below).
 	var k8sClient *k8s.Client
-	var store *k8s.Store
-
-	k8sClient, err = k8s.NewClient(kubeconfigPath, context_, namespace)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not connect to Kubernetes: %v\n", err)
-		// Continue without k8s - app will show empty lists
+	if globalCluster != nil {
+		k8sClient = globalCluster.Client()
 	}
 
-	// Create store
-	if k8sClient != nil {
-		store = k8s.NewStore(k8sClient.Dynamic, nil) // send func set after program creation
-	}
-
-	// Register built-in plugins
-	for _, fn := range []func(*k8s.Client, *k8s.Store) plugin.ResourcePlugin{
+	// Register built-in plugins. These constructors are metadata-only and take no
+	// args; the cluster (store/discovery) reaches them at call time via
+	// plugin.Cluster. helmreleases is the exception (registered below) — it still
+	// builds its Helm client from the global client.
+	for _, fn := range []func() plugin.ResourcePlugin{
 		pods.New,
 		deployments.New,
 		statefulsets.New,
@@ -414,7 +427,7 @@ func run(cmd *cobra.Command, args []string) error {
 		validatingadmissionpolicies.New,
 		validatingadmissionpolicybindings.New,
 	} {
-		plugin.Register(fn(k8sClient, store))
+		plugin.Register(fn())
 	}
 
 	// API Resources (synthetic view)
@@ -425,7 +438,7 @@ func run(cmd *cobra.Command, args []string) error {
 		cfg.Charts = make(map[string]map[string]string)
 	}
 	chartResolver := helm.NewConfigChartResolver(cfg.Charts)
-	hrPlugin := helmreleases.New(k8sClient, store, chartResolver)
+	hrPlugin := helmreleases.New(k8sClient, chartResolver)
 	plugin.Register(hrPlugin)
 
 	// Port-forward registry and plugin
@@ -450,23 +463,31 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Create app
-	application := app.New(k8sClient, store, km, cfg, pfRegistry, hrPlugin.HelmClient(), specs, detailMode, orientation)
+	// Create app. The Manager is the single source of client/store/discovery;
+	// chartResolver lets the app build per-cluster helm clients lazily.
+	application := app.New(mgr, km, cfg, pfRegistry, chartResolver, specs, detailMode, orientation)
 
 	// Create program
 	p := tea.NewProgram(application)
 
-	// Wire send functions
-	if store != nil {
-		store.SetSend(p.Send)
-	}
-	if k8sClient != nil {
-		k8sClient.WarningHandler.SetSend(p.Send)
-	}
-	if _, err := p.Run(); err != nil {
+	// Wire the send function through the Manager. SetSend propagates to every
+	// already-created cluster's store + warning handler (the global cluster was
+	// created by SetGlobal above) and is recorded for clusters created later.
+	mgr.SetSend(p.Send)
+
+	teardown := func() {
+		mgr.ForEach(func(c *cluster.Cluster) {
+			if s := c.Store(); s != nil {
+				s.UnsubscribeAll()
+			}
+		})
 		pfRegistry.StopAll()
+	}
+
+	if _, err := p.Run(); err != nil {
+		teardown()
 		return fmt.Errorf("error: %w", err)
 	}
-	pfRegistry.StopAll()
+	teardown()
 	return nil
 }

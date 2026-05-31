@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -20,7 +19,7 @@ var gvr = schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1",
 type Plugin struct{}
 
 // New creates a new Ingress plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

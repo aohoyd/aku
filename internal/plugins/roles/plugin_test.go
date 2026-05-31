@@ -9,7 +9,7 @@ import (
 )
 
 func TestRolePluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 2 {
 		t.Fatalf("expected 2 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestRolePluginColumns(t *testing.T) {
 }
 
 func TestRolePluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "rbac.authorization.k8s.io/v1",
@@ -40,7 +40,7 @@ func TestRolePluginRow(t *testing.T) {
 }
 
 func TestRolePluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "rbac.authorization.k8s.io/v1",

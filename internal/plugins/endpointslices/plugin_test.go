@@ -9,7 +9,7 @@ import (
 )
 
 func TestEndpointSlicePluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 5 {
 		t.Fatalf("expected 5 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestEndpointSlicePluginColumns(t *testing.T) {
 }
 
 func TestEndpointSlicePluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "discovery.k8s.io/v1",
@@ -69,7 +69,7 @@ func TestEndpointSlicePluginRow(t *testing.T) {
 }
 
 func TestEndpointSlicePluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "discovery.k8s.io/v1",

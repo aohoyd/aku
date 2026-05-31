@@ -9,7 +9,7 @@ import (
 )
 
 func TestValidatingAdmissionPolicyBindingPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 3 {
 		t.Fatalf("expected 3 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestValidatingAdmissionPolicyBindingPluginColumns(t *testing.T) {
 }
 
 func TestValidatingAdmissionPolicyBindingPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "admissionregistration.k8s.io/v1",
@@ -44,7 +44,7 @@ func TestValidatingAdmissionPolicyBindingPluginRow(t *testing.T) {
 }
 
 func TestValidatingAdmissionPolicyBindingPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "admissionregistration.k8s.io/v1",

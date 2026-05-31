@@ -27,6 +27,8 @@ type ResourceList struct {
 	searchState        SearchState
 	sortState          SortState
 	namespace          string
+	context            string // kube-context this pane is scoped to ("" until app/layer sets it)
+	pinned             bool   // when true, global context switches do not retarget this pane
 	focused            bool
 	width              int
 	height             int
@@ -34,6 +36,7 @@ type ResourceList struct {
 	xOffset            int
 	navStack           NavStack
 	inlineSearch       string
+	contextFooter      string // when non-empty, rendered as a bottom-border footer; "" hides it
 	lastSearchCursor   int
 	selected           map[types.UID]struct{} // multi-select set
 	cachedColumnWidths []table.Column
@@ -256,6 +259,43 @@ func (r *ResourceList) SetNamespace(ns string) {
 	r.namespace = ns
 }
 
+// Context returns the kube-context this list is scoped to. An empty string
+// means the pane has no explicitly resolved context yet (set later by the
+// app/layout layer).
+func (r *ResourceList) Context() string {
+	return r.context
+}
+
+// SetContext updates the kube-context this list is scoped to.
+func (r *ResourceList) SetContext(ctx string) {
+	r.context = ctx
+}
+
+// ContextFooter returns the footer text shown on the pane's bottom border.
+// An empty string means no footer is rendered.
+func (r *ResourceList) ContextFooter() string {
+	return r.contextFooter
+}
+
+// SetContextFooter sets the footer text drawn on the pane's bottom border.
+// Passing "" hides the footer. The app owns the "differs from global context"
+// decision and passes the context name to show (or "" to hide); View() stays
+// dumb and renders the footer iff this text is non-empty.
+func (r *ResourceList) SetContextFooter(text string) {
+	r.contextFooter = text
+}
+
+// Pinned reports whether this pane is pinned to its context. A pinned pane is
+// not retargeted when the global context changes.
+func (r *ResourceList) Pinned() bool {
+	return r.pinned
+}
+
+// SetPinned marks this pane as pinned (or not) to its context.
+func (r *ResourceList) SetPinned(p bool) {
+	r.pinned = p
+}
+
 // EffectiveNamespace returns the namespace used for store operations.
 // Returns "" for cluster-scoped plugins (they watch all namespaces).
 func (r *ResourceList) EffectiveNamespace() string {
@@ -304,6 +344,12 @@ func (r *ResourceList) ResetForReload() {
 	if hasRoot {
 		r.plugin = root.Plugin
 		r.namespace = root.Namespace
+		// Preserve the pane's cluster across reload. The root snapshot carries the
+		// context the pane was bound to; only adopt it when non-empty so a pre-
+		// context snapshot can never blank out a resolved context.
+		if root.Context != "" {
+			r.context = root.Context
+		}
 		r.sortState = root.SortState
 		cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.width-2, r.sortState, nil)
 		r.contentWidth = cw
@@ -388,6 +434,7 @@ func (r *ResourceList) PushNav(childPlugin plugin.ResourcePlugin, children []*un
 	r.navStack.Push(NavSnapshot{
 		Plugin:           r.plugin,
 		Namespace:        r.namespace,
+		Context:          r.context,
 		Objects:          r.allObjects,
 		Cursor:           r.table.Cursor(),
 		SortState:        r.sortState,
@@ -410,6 +457,7 @@ func (r *ResourceList) PopNav() bool {
 	}
 	r.plugin = snap.Plugin
 	r.namespace = snap.Namespace
+	r.context = snap.Context
 	r.sortState = snap.SortState
 	r.filterState = snap.FilterState
 	r.searchState = snap.SearchState
@@ -537,7 +585,17 @@ func (r ResourceList) View() string {
 	styled := borderStyle.Width(r.width).Height(r.height).Render(content)
 
 	titleRendered := BuildPanelTitleWithPrefix(nsPrefix, baseTitle, r.filterState.DisplayPattern(), r.searchState.DisplayPattern(), r.width, r.inlineSearch)
-	return injectBorderTitle(styled, titleRendered, r.focused)
+	out := injectBorderTitle(styled, titleRendered, r.focused)
+
+	// Footer: when the pane's context differs from the global one, the app sets
+	// contextFooter to the context name to display on the bottom border. Reusing
+	// the bottom border line means this does not consume a content row, so the
+	// table height is unchanged (mirrors how the title reuses the top border).
+	if r.contextFooter != "" {
+		footerRendered := TitleIndicatorStyle.Render(" " + r.contextFooter + " ")
+		out = injectBorderFooter(out, footerRendered, r.focused)
+	}
+	return out
 }
 
 // --- Selection methods ---
@@ -911,6 +969,38 @@ func injectBorderTitle(styled, titleRendered string, focused bool) string {
 		titleRendered +
 		bc.Render(strings.Repeat(string(border.Top), dashCount)) +
 		bc.Render(string(border.TopRight))
+	return strings.Join(lines, "\n")
+}
+
+// injectBorderFooter replaces the bottom border line of a rendered lipgloss box
+// with a custom footer string. footerRendered must already be styled. Mirrors
+// injectBorderTitle exactly (same ANSI-aware width math via lipgloss.Width, same
+// focused/unfocused border color), but rewrites the last line using the rounded
+// border's Bottom* glyphs. Reusing the bottom border line means no content row
+// is consumed, so the table height is unchanged. If the footer is too wide to
+// fit, the box is returned unchanged (graceful skip), matching injectBorderTitle.
+func injectBorderFooter(styled, footerRendered string, focused bool) string {
+	lines := strings.Split(styled, "\n")
+	if len(lines) == 0 {
+		return styled
+	}
+	last := len(lines) - 1
+	lineWidth := lipgloss.Width(lines[last])
+	footerWidth := lipgloss.Width(footerRendered)
+	if footerWidth+2 >= lineWidth {
+		return styled
+	}
+	border := lipgloss.RoundedBorder()
+	borderColor := UnfocusedBorderColor
+	if focused {
+		borderColor = FocusedBorderColor
+	}
+	bc := lipgloss.NewStyle().Foreground(borderColor)
+	dashCount := max(lineWidth-1-footerWidth-1, 0)
+	lines[last] = bc.Render(string(border.BottomLeft)) +
+		footerRendered +
+		bc.Render(strings.Repeat(string(border.Bottom), dashCount)) +
+		bc.Render(string(border.BottomRight))
 	return strings.Join(lines, "\n")
 }
 

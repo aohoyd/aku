@@ -9,7 +9,7 @@ import (
 )
 
 func TestEndpointsPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 3 {
 		t.Fatalf("expected 3 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestEndpointsPluginColumns(t *testing.T) {
 }
 
 func TestEndpointsPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -53,7 +53,7 @@ func TestEndpointsPluginRow(t *testing.T) {
 }
 
 func TestEndpointsPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",

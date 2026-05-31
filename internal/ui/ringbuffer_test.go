@@ -247,7 +247,7 @@ func TestDualRingBuffer_WidthGet_WrapAround(t *testing.T) {
 	rb.Append("a", "A", "a", 10)
 	rb.Append("bb", "BB", "bb", 20)
 	rb.Append("ccc", "CCC", "ccc", 30)
-	rb.Append("dddd", "DDDD", "dddd", 40)   // evicts "a" (width 10)
+	rb.Append("dddd", "DDDD", "dddd", 40)    // evicts "a" (width 10)
 	rb.Append("eeeee", "EEEEE", "eeeee", 50) // evicts "bb" (width 20)
 
 	if rb.Len() != 3 {

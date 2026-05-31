@@ -7,6 +7,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/render"
 	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,7 +35,7 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 }
 
 func TestPluginName(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	if p.Name() != "statefulsets" {
 		t.Fatalf("expected 'statefulsets', got '%s'", p.Name())
 	}
@@ -47,7 +48,7 @@ func TestPluginName(t *testing.T) {
 }
 
 func TestPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 3 {
 		t.Fatalf("expected 3 columns, got %d", len(cols))
@@ -58,7 +59,7 @@ func TestPluginColumns(t *testing.T) {
 }
 
 func TestPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "apps/v1",
@@ -86,7 +87,7 @@ func TestPluginRow(t *testing.T) {
 }
 
 func TestPluginRowPartial(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "apps/v1",
@@ -114,7 +115,7 @@ func TestPluginRowPartial(t *testing.T) {
 }
 
 func TestPluginDescribeDocument(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{
@@ -193,7 +194,7 @@ func TestPluginDescribeDocument(t *testing.T) {
 }
 
 func TestPluginDescribeUncovered(t *testing.T) {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	cmGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
 	secGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
 
@@ -210,7 +211,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 		},
 	})
 
-	p := New(nil, store)
+	p := New()
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -254,7 +255,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 		t.Fatal("Plugin should implement Uncoverable")
 	}
 
-	c, err := unc.DescribeUncovered(t.Context(), obj)
+	c, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(store), obj)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -280,7 +281,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 }
 
 func TestPluginDescribeUncoveredNilStore(t *testing.T) {
-	p := &Plugin{store: nil}
+	p := &Plugin{}
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{"name": "x", "namespace": "default"},
@@ -288,14 +289,14 @@ func TestPluginDescribeUncoveredNilStore(t *testing.T) {
 		},
 	}
 	unc := plugin.ResourcePlugin(p).(plugin.Uncoverable)
-	if _, err := unc.DescribeUncovered(t.Context(), obj); err != nil {
+	if _, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(nil), obj); err != nil {
 		t.Fatalf("unexpected error with nil store: %v", err)
 	}
 }
 
 func TestStatefulSetDrillDown(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 
 	plugin.Reset()
 	mockPods := &mockPlugin{name: "pods"}
@@ -309,14 +310,14 @@ func TestStatefulSetDrillDown(t *testing.T) {
 	}}
 	store.CacheUpsert(podsGVR, "default", pod)
 
-	p := &Plugin{store: store}
+	p := &Plugin{}
 	sts := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{
 			"name": "my-sts", "namespace": "default", "uid": "sts-uid-1",
 		},
 	}}
 
-	childPlugin, children := p.DrillDown(sts)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(store), sts)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin, got nil")
 	}
@@ -329,11 +330,11 @@ func TestStatefulSetDrillDown(t *testing.T) {
 }
 
 func TestStatefulSetDrillDownNilStore(t *testing.T) {
-	p := &Plugin{store: nil}
+	p := &Plugin{}
 	sts := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "my-sts", "namespace": "default", "uid": "sts-uid-1"},
 	}}
-	childPlugin, children := p.DrillDown(sts)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), sts)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil, nil for nil store")
 	}

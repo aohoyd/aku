@@ -9,7 +9,7 @@ import (
 )
 
 func TestGatewayPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 5 {
 		t.Fatalf("expected 5 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestGatewayPluginColumns(t *testing.T) {
 }
 
 func TestGatewayPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeGateway("my-gateway", "istio", "10.0.0.1", "True")
 	row := p.Row(obj)
 
@@ -36,7 +36,7 @@ func TestGatewayPluginRow(t *testing.T) {
 }
 
 func TestGatewayPluginRowNoAddress(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",
@@ -58,7 +58,7 @@ func TestGatewayPluginRowNoAddress(t *testing.T) {
 }
 
 func TestGatewayPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",

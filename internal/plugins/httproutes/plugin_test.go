@@ -9,7 +9,7 @@ import (
 )
 
 func TestHTTPRoutePluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 4 {
 		t.Fatalf("expected 4 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestHTTPRoutePluginColumns(t *testing.T) {
 }
 
 func TestHTTPRoutePluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",
@@ -52,7 +52,7 @@ func TestHTTPRoutePluginRow(t *testing.T) {
 }
 
 func TestHTTPRoutePluginRowNoHostnames(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",
@@ -79,7 +79,7 @@ func TestHTTPRoutePluginRowNoHostnames(t *testing.T) {
 }
 
 func TestHTTPRoutePluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",

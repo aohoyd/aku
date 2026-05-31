@@ -6,13 +6,14 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 func TestPluginMetadata(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	if p.Name() != "containers" {
 		t.Fatalf("expected 'containers', got %q", p.Name())
 	}
@@ -25,7 +26,7 @@ func TestPluginMetadata(t *testing.T) {
 }
 
 func TestPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 6 {
 		t.Fatalf("expected 6 columns, got %d", len(cols))
@@ -39,7 +40,7 @@ func TestPluginColumns(t *testing.T) {
 }
 
 func TestPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{"name": "nginx", "namespace": "default"},
@@ -80,7 +81,7 @@ func TestPluginRow(t *testing.T) {
 }
 
 func TestPluginRowMissingStatus(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{"name": "app"},
@@ -104,7 +105,7 @@ func TestPluginRowMissingStatus(t *testing.T) {
 }
 
 func TestPluginYAML(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{"name": "nginx"},
@@ -128,7 +129,7 @@ func TestPluginYAML(t *testing.T) {
 }
 
 func TestPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{"name": "nginx", "namespace": "default"},
@@ -192,7 +193,7 @@ func TestPluginDescribe(t *testing.T) {
 }
 
 func TestPluginSortValue(t *testing.T) {
-	p := New(nil, nil).(*Plugin)
+	p := New().(*Plugin)
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"_type": "init",
@@ -214,7 +215,7 @@ func TestPluginSortValue(t *testing.T) {
 }
 
 func TestPluginDefaultSort(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	ds, ok := p.(plugin.DefaultSorter)
 	if !ok {
 		t.Fatal("Plugin should implement DefaultSorter")
@@ -229,7 +230,7 @@ func TestPluginDefaultSort(t *testing.T) {
 }
 
 func TestPluginImplementsInterfaces(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	if _, ok := p.(plugin.Sortable); !ok {
 		t.Fatal("Plugin should implement Sortable")
 	}
@@ -242,7 +243,7 @@ func TestPluginImplementsInterfaces(t *testing.T) {
 }
 
 func TestPluginDescribeUncovered(t *testing.T) {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	cmGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
 	secGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
 
@@ -259,7 +260,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 		},
 	})
 
-	p := New(nil, store)
+	p := New()
 
 	// Build a synthetic container object with _pod embedded
 	obj := &unstructured.Unstructured{
@@ -306,7 +307,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 	}
 
 	unc := p.(plugin.Uncoverable)
-	c, err := unc.DescribeUncovered(t.Context(), obj)
+	c, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(store), obj)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

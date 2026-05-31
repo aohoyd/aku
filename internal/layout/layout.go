@@ -370,15 +370,30 @@ func (l *Layout) UpdateLogView(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-// UpdateSplitObjects updates all splits that match the given GVR with new objects.
-func (l *Layout) UpdateSplitObjects(p plugin.ResourcePlugin, namespace string, objs []*unstructured.Unstructured) {
+// UpdateSplitObjects updates all splits that match the given GVR + namespace +
+// context with new objects. ctxName is the kube-context the update originated
+// from (stamped on k8s.ResourceUpdatedMsg).
+//
+// Context matching is strict equality: a pane only repaints from an update whose
+// originating context equals the pane's own Context(). This is the core
+// multi-cluster correctness guarantee — a prod informer tick can never repaint a
+// staging-pinned pane. Every split carries a resolved, non-empty context: the
+// initial split and global-retargeted panes get the global context, drill-down
+// children inherit their parent's context (NavSnapshot.Context), and a pane
+// pinned via gX gets the chosen context. A pane with an empty context (which
+// should not occur in practice) matches nothing and is left untouched.
+func (l *Layout) UpdateSplitObjects(p plugin.ResourcePlugin, namespace, ctxName string, objs []*unstructured.Unstructured) {
 	for i := range l.splits {
 		if l.splits[i].InDrillDown() {
 			continue
 		}
-		if l.splits[i].Plugin().GVR() == p.GVR() && l.splits[i].EffectiveNamespace() == namespace {
-			l.splits[i].SetObjects(objs)
+		if l.splits[i].Plugin().GVR() != p.GVR() || l.splits[i].EffectiveNamespace() != namespace {
+			continue
 		}
+		if l.splits[i].Context() != ctxName {
+			continue
+		}
+		l.splits[i].SetObjects(objs)
 	}
 }
 

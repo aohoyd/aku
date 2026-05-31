@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	certificatesv1 "k8s.io/api/certificates/v1"
@@ -20,7 +19,7 @@ var gvr = schema.GroupVersionResource{Group: "certificates.k8s.io", Version: "v1
 type Plugin struct{}
 
 // New creates a new CertificateSigningRequests plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

@@ -25,6 +25,9 @@ func DefaultBindings() []Binding {
 			{Key: "f", Help: "port-forwards", Command: "goto-portforwards"},
 			{Key: "H", Help: "helm", Command: "goto-helmreleases"},
 			{Key: "i", Help: "ingresses", Command: "goto-ingresses"},
+			{Key: "P", Help: "pvc", Command: "goto-pvc"},
+			{Key: "x", Help: "context", Command: "context-picker"},
+			{Key: "X", Help: "pane context", Command: "pane-context-picker"},
 		}},
 		{Key: "G", Help: "bottom", Command: "cursor-bottom"},
 		{Key: "o", Help: "split", Visible: true, Keys: []Binding{
@@ -39,6 +42,7 @@ func DefaultBindings() []Binding {
 			{Key: "f", Help: "port-forwards", Command: "split-portforwards"},
 			{Key: "H", Help: "helm", Command: "split-helmreleases"},
 			{Key: "i", Help: "ingresses", Command: "split-ingresses"},
+			{Key: "P", Help: "pvc", Command: "split-pvc"},
 		}},
 		{Key: "ctrl+d", Help: "delete", Command: "delete", Visible: true},
 		{Key: "ctrl+f", Help: "page down", Command: "page-down"},

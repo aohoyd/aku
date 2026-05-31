@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -19,7 +18,7 @@ var gvr = schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Versio
 type Plugin struct{}
 
 // New creates a new RoleBindings plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	schedulingv1 "k8s.io/api/scheduling/v1"
@@ -19,7 +18,7 @@ var gvr = schema.GroupVersionResource{Group: "scheduling.k8s.io", Version: "v1",
 type Plugin struct{}
 
 // New creates a new PriorityClasses plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

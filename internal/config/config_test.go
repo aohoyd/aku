@@ -171,6 +171,43 @@ func TestDefaultConfigMouseDisabled(t *testing.T) {
 	}
 }
 
+func TestLoadConfigWithContextDirectories(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte("contexts:\n  directories:\n    - ~/.kube/configs\n    - /work/kubeconfigs\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.ContextDirectories()
+	want := []string{"~/.kube/configs", "/work/kubeconfigs"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d directories, got %v", len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ContextDirectories()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestContextDirectoriesEmpty(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.ContextDirectories(); got != nil {
+		t.Fatalf("expected nil for absent contexts config, got %v", got)
+	}
+}
+
+func TestContextDirectoriesNilConfig(t *testing.T) {
+	var cfg *Config
+	if got := cfg.ContextDirectories(); got != nil {
+		t.Fatalf("expected nil for nil config, got %v", got)
+	}
+}
+
 func TestLoadConfigWithCharts(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

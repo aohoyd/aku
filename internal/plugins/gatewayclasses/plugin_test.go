@@ -9,7 +9,7 @@ import (
 )
 
 func TestGatewayClassPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 4 {
 		t.Fatalf("expected 4 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestGatewayClassPluginColumns(t *testing.T) {
 }
 
 func TestGatewayClassPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeGatewayClass("my-gateway-class", "example.com/gateway-controller", "True", "Accepted", "All good")
 	row := p.Row(obj)
 
@@ -33,7 +33,7 @@ func TestGatewayClassPluginRow(t *testing.T) {
 }
 
 func TestGatewayClassPluginRowNoConditions(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",
@@ -54,7 +54,7 @@ func TestGatewayClassPluginRowNoConditions(t *testing.T) {
 }
 
 func TestGatewayClassPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeGatewayClass("test-gc", "example.com/gateway-controller", "True", "Accepted", "Controller accepted")
 
 	c, err := p.Describe(t.Context(), obj)

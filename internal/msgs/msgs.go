@@ -22,6 +22,42 @@ type NamespaceSelectedMsg struct {
 	Namespace string
 }
 
+// GlobalContextSelectedMsg signals the context picker selected a context to
+// become the new global (baseline) context. Emitted when the picker was opened
+// in global scope (the `gx` binding / context-picker command).
+type GlobalContextSelectedMsg struct {
+	Context string
+}
+
+// PaneContextSelectedMsg signals the context picker selected a context to pin
+// the focused pane to. Emitted when the picker was opened in pane scope (the
+// `gX` binding / pane-context-picker command).
+type PaneContextSelectedMsg struct {
+	Context string
+}
+
+// ClusterReadyMsg is returned by the async cluster-connect command once the
+// blocking dial for Context has completed (or failed) off the Bubble Tea Update
+// goroutine.
+//
+// Client carries the freshly-dialed *k8s.Client as an opaque handle (typed
+// `any` to keep the msgs package free of a k8s import, which would form an
+// import cycle). It is an immutable connection handle, not shared mutable
+// Manager state, so passing it across the goroutine boundary is safe. On the
+// Update goroutine the handler type-asserts it to *k8s.Client and installs it
+// via Manager.RegisterConnected — so ALL Manager map/refCount mutation stays on
+// the Update goroutine. On a dial failure Client is nil and Err is set; no
+// cluster is registered and no ref is taken (so a failed connect leaks nothing).
+//
+// The handler applies the connected cluster to whichever pane(s) are currently
+// pinned to Context and awaiting data — identified by pane context, NOT by
+// focus, so a focus change between dispatch and arrival cannot drop the update.
+type ClusterReadyMsg struct {
+	Context string
+	Client  any
+	Err     error
+}
+
 // NamespacesLoadedMsg carries the result of async namespace listing.
 type NamespacesLoadedMsg struct {
 	Namespaces []string
@@ -269,6 +305,14 @@ type StatusBarClearWarningMsg struct{}
 type StatusBarShowSpinnerMsg struct{}
 
 // ClusterHealthMsg carries the result of a cluster health check.
+//
+// Context names the cluster the check ran against. The status bar shows a single
+// online indicator, so only the health of the FOCUSED pane's cluster is
+// reflected there; ticks for other (background) clusters are still re-armed so
+// every cluster a pane uses keeps being probed, but they do not clobber the
+// displayed indicator unless they match the focused pane's context. An empty
+// Context is treated as the global cluster (legacy/global-tick).
 type ClusterHealthMsg struct {
-	Online bool
+	Context string
+	Online  bool
 }

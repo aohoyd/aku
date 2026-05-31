@@ -9,7 +9,7 @@ import (
 )
 
 func TestRuntimeClassPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 3 {
 		t.Fatalf("expected 3 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestRuntimeClassPluginColumns(t *testing.T) {
 }
 
 func TestRuntimeClassPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "node.k8s.io/v1",
@@ -44,7 +44,7 @@ func TestRuntimeClassPluginRow(t *testing.T) {
 }
 
 func TestRuntimeClassPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "node.k8s.io/v1",

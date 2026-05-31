@@ -6,6 +6,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/helm"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -55,13 +56,13 @@ func testRelease() helm.ReleaseInfo {
 }
 
 func newTestPlugin(hc helm.Client) *Plugin {
-	p := New(nil, nil, nil)
+	p := New(nil, nil)
 	p.helmClient = hc
 	return p
 }
 
 func TestPluginColumns(t *testing.T) {
-	p := New(nil, nil, nil)
+	p := New(nil, nil)
 	cols := p.Columns()
 	if len(cols) != 7 {
 		t.Fatalf("expected 7 columns, got %d", len(cols))
@@ -72,7 +73,7 @@ func TestPluginColumns(t *testing.T) {
 }
 
 func TestPluginRow(t *testing.T) {
-	p := New(nil, nil, nil)
+	p := New(nil, nil)
 	obj := helm.ReleaseToUnstructured(testRelease())
 	row := p.Row(obj)
 	if row[0] != "nginx" {
@@ -98,7 +99,7 @@ func TestPluginDrillDown(t *testing.T) {
 	p := newTestPlugin(mc)
 	p.Refresh("default")
 	obj := p.Objects()[0]
-	childPlugin, children := p.DrillDown(obj)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), obj)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin")
 	}
@@ -115,7 +116,7 @@ func TestDrillDownPreservesRaw(t *testing.T) {
 	p := newTestPlugin(mc)
 	p.Refresh("default")
 	obj := p.Objects()[0]
-	childPlugin, children := p.DrillDown(obj)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), obj)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin")
 	}
@@ -133,7 +134,7 @@ func TestDrillDownReturnsRefreshableManifest(t *testing.T) {
 	p := newTestPlugin(mc)
 	p.Refresh("default")
 	obj := p.Objects()[0]
-	childPlugin, _ := p.DrillDown(obj)
+	childPlugin, _ := p.DrillDown(plugintest.NewFakeCluster(nil), obj)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin")
 	}
@@ -150,7 +151,7 @@ func TestDrillDownManifestCanRefresh(t *testing.T) {
 	p := newTestPlugin(mc)
 	p.Refresh("default")
 	obj := p.Objects()[0]
-	childPlugin, children := p.DrillDown(obj)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), obj)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin")
 	}
@@ -232,7 +233,7 @@ func TestPluginValuesAllEmptyPlaceholder(t *testing.T) {
 }
 
 func TestPluginValuesNilHelmClient(t *testing.T) {
-	p := New(nil, nil, nil)
+	p := New(nil, nil)
 	_, err := p.Values(newReleaseObj("rel", "default"))
 	if err == nil {
 		t.Fatal("expected error when helmClient is nil")

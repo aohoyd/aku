@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/containers"
 	"github.com/aohoyd/aku/internal/plugins/workload"
@@ -24,13 +23,11 @@ var (
 )
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes Pods.
-type Plugin struct {
-	store *k8s.Store
-}
+type Plugin struct{}
 
 // New creates a new Pod plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{store: store}
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "pods" }
@@ -76,22 +73,23 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 	return p.renderDescribe(pod, nil, nil)
 }
 
-func (p *Plugin) DescribeUncovered(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
+func (p *Plugin) DescribeUncovered(ctx context.Context, cl plugin.Cluster, obj *unstructured.Unstructured) (render.Content, error) {
 	pod, err := toPod(obj)
 	if err != nil {
 		return render.Content{}, fmt.Errorf("pods: decode: %w", err)
 	}
-	if p.store == nil {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return p.renderDescribe(pod, nil, nil)
 	}
 	ns := pod.Namespace
-	p.store.Subscribe(configMapsGVR, ns)
-	p.store.Subscribe(secretsGVR, ns)
-	return p.renderDescribe(pod, p.store.List(configMapsGVR, ns), p.store.List(secretsGVR, ns))
+	store.Subscribe(configMapsGVR, ns)
+	store.Subscribe(secretsGVR, ns)
+	return p.renderDescribe(pod, store.List(configMapsGVR, ns), store.List(secretsGVR, ns))
 }
 
 // DrillDown implements plugin.DrillDowner.
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+func (p *Plugin) DrillDown(_ plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
 	cp, ok := plugin.ByName("containers")
 	if !ok {
 		return nil, nil

@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/aohoyd/aku/internal/cluster"
 	"github.com/aohoyd/aku/internal/config"
 	"github.com/aohoyd/aku/internal/helm"
 	"github.com/aohoyd/aku/internal/k8s"
@@ -48,6 +49,7 @@ const (
 	overlayContainerPicker
 	overlayTimeRange
 	overlayScale
+	overlayContextPicker
 )
 
 // pendingDebugAction stores the parameters for a debug command waiting for
@@ -66,8 +68,11 @@ type pendingDebugAction struct {
 
 // App is the root Bubbletea model.
 type App struct {
-	k8sClient        *k8s.Client
-	store            *k8s.Store
+	// mgr is the single source of truth for clusters. All client/store/
+	// discovery access flows through it via clusterFor / clusterForFocused. There
+	// is always a global cluster; pinned panes may add per-pane clusters, each
+	// resolved by the pane's context.
+	mgr              *cluster.Manager
 	bindingSet       *config.BindingSet
 	keyTrie          *config.KeyTrie
 	trieContextType  string
@@ -98,6 +103,7 @@ type App struct {
 	overlayRect         *ui.OverlayRect
 	resourcePicker      ui.ResourcePicker
 	nsPicker            ui.NsPicker
+	contextPicker       ui.ContextPicker
 	confirmDialog       ui.ConfirmDialog
 	searchBar           ui.SearchBar
 	helpOverlay         ui.HelpOverlay
@@ -110,7 +116,17 @@ type App struct {
 	scaleOverlay        ui.ScaleOverlay
 
 	// Helm
-	helmClient helm.Client
+	//
+	// chartResolver is the per-app resolver used when building per-cluster helm
+	// clients. The helm client itself is built lazily from the focused cluster's
+	// rest.Config (see helmClientFor) — helm.NewClient is cheap (it only wraps a
+	// config), so it is rebuilt per call rather than cached.
+	//
+	// helmClient, when non-nil, overrides that lazy build. It exists so tests
+	// can inject a stub helm.Client without bringing up a real rest.Config.
+	// Production leaves it nil and relies on helmClientFor.
+	chartResolver helm.ChartResolver
+	helmClient    helm.Client
 
 	// Port-forward
 	pfRegistry        *portforward.Registry
@@ -165,8 +181,11 @@ type ResourceSpec struct {
 	Namespace string
 }
 
-// New creates a new App with all dependencies.
-func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *config.Config, pfRegistry *portforward.Registry, helmClient helm.Client, specs []ResourceSpec, initialDetail *msgs.DetailMode, initialOrientation layout.Orientation) App {
+// New creates a new App with all dependencies. The Manager is the single source
+// of client/store/discovery; the App resolves them per pane via clusterFor /
+// clusterForFocused. chartResolver is used to build per-cluster helm clients
+// lazily (see helmClientFor).
+func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, pfRegistry *portforward.Registry, chartResolver helm.ChartResolver, specs []ResourceSpec, initialDetail *msgs.DetailMode, initialOrientation layout.Orientation) App {
 	bs := keymap.BindingSet()
 	defaultTimeRange := cfg.LogDefaultTimeRange()
 	defaultSinceSeconds, ok := ui.LookupTimePreset(defaultTimeRange)
@@ -174,18 +193,30 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 		defaultTimeRange = "15m"
 		defaultSinceSeconds = 900
 	}
+
+	// Resolve the global cluster up front (may be nil/degraded if connect
+	// failed at startup). Everything below treats a nil client the same way the
+	// old single-client path did.
+	global := mgr.Global()
+	var client *k8s.Client
+	var globalStore *k8s.Store
+	if global != nil {
+		client = global.Client()
+		globalStore = global.Store()
+	}
+
 	a := App{
-		k8sClient:           client,
-		store:               store,
+		mgr:                 mgr,
 		bindingSet:          bs,
 		keyTrie:             bs.TrieFor("resources", ""),
 		layout:              layout.New(80, 24, cfg.LogBufferSize(), defaultTimeRange, defaultSinceSeconds),
 		statusBar:           ui.NewStatusBar(80),
 		resourcePicker:      ui.NewResourcePicker(40, 20),
 		nsPicker:            ui.NewNsPicker(40, 20),
+		contextPicker:       ui.NewContextPicker(40, 20),
 		searchBar:           ui.NewSearchBar(80),
 		helpOverlay:         ui.NewHelpOverlay(80, 24),
-		helmClient:          helmClient,
+		chartResolver:       chartResolver,
 		pfRegistry:          pfRegistry,
 		pfHandles:           make(map[string]msgs.PortForwardHandle),
 		portForwardOverlay:  ui.NewPortForwardOverlay(40, 20),
@@ -219,6 +250,12 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 		defaultNs = client.Namespace
 	}
 
+	// Add initial splits from specs. Each split is stamped with the resolved
+	// global context so informer updates (cluster-tagged via msg.Context) match
+	// the pane, and so later tasks can tighten layout.UpdateSplitObjects to a
+	// strict context match.
+	globalCtx := mgr.GlobalContext()
+
 	// If no specs provided, default to a single pods pane
 	if len(specs) == 0 {
 		if p, ok := plugin.ByName("pods"); ok {
@@ -226,15 +263,17 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 		}
 	}
 
-	// Add initial splits from specs
 	for i, spec := range specs {
 		ns := spec.Namespace
 		if ns == "" {
 			ns = defaultNs
 		}
 		a.layout.AddSplit(spec.Plugin, ns)
-		if client != nil && store != nil {
-			store.Subscribe(spec.Plugin.GVR(), ns)
+		if split := a.layout.FocusedSplit(); split != nil {
+			split.SetContext(globalCtx)
+		}
+		if globalStore != nil {
+			globalStore.Subscribe(spec.Plugin.GVR(), ns)
 		}
 		if i == 0 {
 			a.keyTrie = bs.TrieFor("resources", spec.Plugin.Name())
@@ -263,16 +302,96 @@ func New(client *k8s.Client, store *k8s.Store, keymap *config.Keymap, cfg *confi
 	return a
 }
 
-func (a App) Init() tea.Cmd {
-	if a.k8sClient == nil {
+// clusterFor resolves the cluster backing a given pane. A nil pane or one with
+// an empty context resolves to the global cluster. If the pane names a context
+// that is not currently created (e.g. a pinned pane whose cluster was torn down,
+// or whose async connect has not landed yet) it falls back to the global cluster.
+// The returned *cluster.Cluster is never nil as long as the global cluster
+// exists; callers still guard with Connected()/nil-client checks for degraded
+// clusters.
+func (a App) clusterFor(rl *ui.ResourceList) *cluster.Cluster {
+	if rl == nil || rl.Context() == "" {
+		return a.mgr.Global()
+	}
+	if c, ok := a.mgr.Get(rl.Context()); ok {
+		return c
+	}
+	return a.mgr.Global()
+}
+
+// clusterForFocused resolves the cluster backing the focused split, falling back
+// to the global cluster when there is no focused split.
+func (a App) clusterForFocused() *cluster.Cluster {
+	return a.clusterFor(a.layout.FocusedSplit())
+}
+
+// storeFor returns the informer store for the cluster backing rl, or nil if that
+// cluster is absent/degraded.
+func (a App) storeFor(rl *ui.ResourceList) *k8s.Store {
+	cl := a.clusterFor(rl)
+	if cl == nil {
 		return nil
 	}
+	return cl.Store()
+}
+
+// storeForFocused returns the informer store for the focused split's cluster.
+func (a App) storeForFocused() *k8s.Store {
+	return a.storeFor(a.layout.FocusedSplit())
+}
+
+// clientForFocused returns the k8s client for the focused split's cluster, or
+// nil if that cluster is absent/degraded.
+func (a App) clientForFocused() *k8s.Client {
+	cl := a.clusterForFocused()
+	if cl == nil {
+		return nil
+	}
+	return cl.Client()
+}
+
+// helmClientFor returns the helm client for the given cluster. When a.helmClient
+// is set (test override) it is returned directly. Otherwise a client is built
+// lazily from the cluster's rest.Config — helm.NewClient merely wraps the
+// config, so rebuilding per call is cheap and keeps the client pinned to the
+// right cluster. Returns nil when the cluster is degraded or has no config.
+func (a App) helmClientFor(cl *cluster.Cluster) helm.Client {
+	if a.helmClient != nil {
+		return a.helmClient
+	}
+	if cl == nil || !cl.Connected() {
+		return nil
+	}
+	client := cl.Client()
+	if client == nil || client.Config == nil {
+		return nil
+	}
+	return helm.NewClient(client.Config, a.chartResolver)
+}
+
+// helmClientForFocused returns the helm client for the focused split's cluster.
+func (a App) helmClientForFocused() helm.Client {
+	return a.helmClientFor(a.clusterForFocused())
+}
+
+func (a App) Init() tea.Cmd {
+	global := a.mgr.Global()
+	if global == nil || !global.Connected() {
+		return nil
+	}
+	disc := global.Discovery()
+	client := global.Client()
+	typed := client.Typed
+	// disc.Refresh populates the GLOBAL cluster's own Discovery index directly;
+	// the message is tagged with the global context so handleAPIResourcesDiscovered
+	// only feeds the (global) plugin registry from the global cluster's results.
+	globalCtx := global.Context()
 	return tea.Batch(
 		func() tea.Msg {
-			resources, err := k8s.DiscoverAPIResources(a.k8sClient.Typed)
-			return k8s.APIResourcesDiscoveredMsg{Resources: resources, Err: err}
+			resources, err := disc.Refresh(typed)
+			return k8s.APIResourcesDiscoveredMsg{Context: globalCtx, Resources: resources, Err: err}
 		},
-		initialHeartbeatCmd(a.k8sClient),
+		initialHeartbeatCmd(globalCtx, client),
 	)
 }
 
@@ -295,6 +414,7 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.resourcePicker.SetSize(overlayW, overlayH)
 		a.searchBar.SetWidth(msg.Width)
 		a.nsPicker.SetSize(overlayW, overlayH)
+		a.contextPicker.SetSize(overlayW, overlayH)
 		a.portForwardOverlay.SetSize(overlayW, overlayH)
 		a.setImageOverlay.SetSize(overlayW, overlayH)
 		a.helmRollbackOverlay.SetSize(overlayW, overlayH)
@@ -385,6 +505,13 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				a.activeOverlay = overlayNone
 			}
 			return a, cmd
+		case overlayContextPicker:
+			updated, cmd := a.contextPicker.Update(msg)
+			a.contextPicker = updated
+			if !a.contextPicker.Active() {
+				a.activeOverlay = overlayNone
+			}
+			return a, cmd
 		case overlayConfirm:
 			updated, cmd := a.confirmDialog.Update(msg)
 			a.confirmDialog = updated
@@ -429,6 +556,29 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgs.NamespaceSelectedMsg:
 		return a.handleNamespaceSwitch(msg.Namespace)
 
+	case msgs.GlobalContextSelectedMsg:
+		m, cmd := a.handleGlobalContextSwitch(msg.Context)
+		// The global changed: panes that now match it lose their footer; panes
+		// still on a different context keep/gain it. Sync on the returned model.
+		if app, ok := m.(App); ok {
+			app.syncPaneFooters()
+			return app, cmd
+		}
+		return m, cmd
+
+	case msgs.PaneContextSelectedMsg:
+		m, cmd := a.handlePaneContextSwitch(msg.Context)
+		// The focused pane was (optimistically) pinned to another context, so it
+		// should now show its footer. Sync on the returned model.
+		if app, ok := m.(App); ok {
+			app.syncPaneFooters()
+			return app, cmd
+		}
+		return m, cmd
+
+	case msgs.ClusterReadyMsg:
+		return a.handleClusterReady(msg)
+
 	case msgs.NamespacesLoadedMsg:
 		a.statusBar.EndOperation()
 		if msg.Err != nil {
@@ -450,8 +600,8 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if focused := a.layout.FocusedSplit(); focused != nil {
 					focused.ClearSelection()
 				}
-				if a.k8sClient != nil {
-					return a, k8s.RestartCmd(a.k8sClient.Dynamic, gvr, targets)
+				if cl := a.clusterForFocused(); cl != nil && cl.Connected() {
+					return a, k8s.RestartCmd(cl.Client().Dynamic, gvr, targets)
 				}
 			}
 			return a, nil
@@ -507,10 +657,21 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, clearCmd
 
 	case k8s.ResourceUpdatedMsg:
-		// Find plugin by GVR and update matching splits
+		// Find plugin by GVR and update matching splits. List from the store of
+		// the cluster that produced the update (identified by msg.Context),
+		// falling back to the global cluster. Pass msg.Context so only panes on
+		// that cluster are repainted.
 		if p, ok := plugin.ByGVR(msg.GVR); ok {
-			objs := a.store.List(msg.GVR, msg.Namespace)
-			a.layout.UpdateSplitObjects(p, msg.Namespace, objs)
+			var srcStore *k8s.Store
+			if c, ok := a.mgr.Get(msg.Context); ok {
+				srcStore = c.Store()
+			} else if g := a.mgr.Global(); g != nil {
+				srcStore = g.Store()
+			}
+			if srcStore != nil {
+				objs := srcStore.List(msg.GVR, msg.Namespace)
+				a.layout.UpdateSplitObjects(p, msg.Namespace, msg.Context, objs)
+			}
 		}
 		// Refresh drill-down child views when relevant resources update
 		a.refreshDrillDownSplits(msg.GVR, msg.Namespace)
@@ -882,11 +1043,7 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 
 	case msgs.ClusterHealthMsg:
-		a.statusBar.SetOnline(msg.Online)
-		if a.k8sClient == nil {
-			return a, nil
-		}
-		return a, heartbeatCmd(a.k8sClient, a.config.HeartbeatInterval())
+		return a.handleClusterHealth(msg)
 	}
 
 	return a, nil
@@ -1055,6 +1212,8 @@ func (a App) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 			(&a.resourcePicker).ScrollWheel(msg.Button)
 		case overlayNsPicker:
 			(&a.nsPicker).ScrollWheel(msg.Button)
+		case overlayContextPicker:
+			(&a.contextPicker).ScrollWheel(msg.Button)
 		case overlayContainerPicker:
 			(&a.containerPicker).ScrollWheel(msg.Button)
 		case overlayTimeRange:
@@ -1135,15 +1294,18 @@ func (a App) refreshDetailPanelOpts(preserve bool) (App, tea.Cmd) {
 		panel.SetContent(render.Content{Raw: placeholder, Display: placeholder}, refresh)
 		mode := panel.Mode()
 		selCopy := sel.DeepCopy()
+		// Use the FOCUSED pane's cluster helm client, not the plugin's baked
+		// (global) one, so values for a pinned pane are read from its own cluster.
+		hc := a.helmClientFor(a.clusterFor(focused))
 		fetchCmd := func() tea.Msg {
 			var (
 				content render.Content
 				err     error
 			)
 			if mode == msgs.DetailValuesAll {
-				content, err = hp.ValuesAll(selCopy)
+				content, err = hp.ValuesAllWith(hc, selCopy)
 			} else {
-				content, err = hp.Values(selCopy)
+				content, err = hp.ValuesWith(hc, selCopy)
 			}
 			return msgs.HelmValuesLoadedMsg{
 				ReleaseName: selCopy.GetName(),
@@ -1168,7 +1330,9 @@ func (a App) refreshDetailPanelOpts(preserve bool) (App, tea.Cmd) {
 			ns = focused.Namespace()
 		}
 		gvr := p.GVR()
-		store := a.store
+		cl := a.clusterFor(focused)
+		store := plugin.StoreOf(cl)
+		discovery := plugin.DiscoveryOf(cl)
 		timeout := a.config.APITimeout()
 		describeCmd := func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -1177,7 +1341,7 @@ func (a App) refreshDetailPanelOpts(preserve bool) (App, tea.Cmd) {
 			var err error
 			if envResolved {
 				if unc, ok := p.(plugin.Uncoverable); ok {
-					content, err = unc.DescribeUncovered(ctx, selCopy)
+					content, err = unc.DescribeUncovered(ctx, cl, selCopy)
 					if err != nil {
 						content, err = p.Describe(ctx, selCopy)
 					}
@@ -1187,8 +1351,8 @@ func (a App) refreshDetailPanelOpts(preserve bool) (App, tea.Cmd) {
 				content, err = p.Describe(ctx, selCopy)
 			}
 			var events render.Content
-			if err == nil && content.Raw != "" && store != nil && gvr != eventsGVR {
-				if kind, ok := k8s.KindForGVR(gvr); ok {
+			if err == nil && content.Raw != "" && store != nil && discovery != nil && gvr != eventsGVR {
+				if kind, ok := discovery.KindForGVR(gvr); ok {
 					store.Subscribe(eventsGVR, ns)
 					allEvents := store.List(eventsGVR, ns)
 					events = render.RenderEvents(allEvents, kind, selCopy.GetName(), ns)
@@ -1406,6 +1570,18 @@ func (a App) localPortForPF(id string) int {
 	return 0
 }
 
+// handleAPIResourcesDiscovered consumes a discovery result.
+//
+// Per-cluster routing: the per-cluster *k8s.Discovery index is populated by the
+// Refresh call that produced this message (disc.Refresh runs against the
+// cluster's OWN Discovery in Init / handleGlobalContextSwitch / handleClusterReady),
+// so the per-cluster missing-resource check (cl.Discovery().KindForGVR) is already
+// accurate for every cluster. THIS handler only feeds the single, GLOBAL plugin
+// registry — the picker/registry is the global superset by design. To avoid a CRD
+// that exists only on cluster B becoming navigable (and mis-subscribing) from
+// cluster A's panes, we feed the global registry ONLY from the global context's
+// results. Results tagged with a non-global context still populated their own
+// cluster's Discovery (above) but do not touch the global registry here.
 func (a App) handleAPIResourcesDiscovered(msg k8s.APIResourcesDiscoveredMsg) (tea.Model, tea.Cmd) {
 	var clearCmd tea.Cmd
 	if msg.Err != nil && len(msg.Resources) == 0 {
@@ -1414,6 +1590,18 @@ func (a App) handleAPIResourcesDiscovered(msg k8s.APIResourcesDiscoveredMsg) (te
 	}
 	if msg.Err != nil {
 		clearCmd = a.statusBar.SetError("api discovery partial: " + msg.Err.Error())
+	}
+
+	// Only the global context feeds the global plugin registry / picker. A
+	// non-global result has already populated its own cluster's Discovery index
+	// (so its panes resolve correctly) and must not leak resources into the
+	// global superset. An empty Context is treated as the global context.
+	tagged := msg.Context
+	if tagged == "" {
+		tagged = a.mgr.GlobalContext()
+	}
+	if tagged != a.mgr.GlobalContext() {
+		return a, clearCmd
 	}
 
 	// Register generic plugins for undiscovered resources
@@ -1514,6 +1702,8 @@ func (a App) currentOverlayView() string {
 		return a.resourcePicker.View()
 	case overlayNsPicker:
 		return a.nsPicker.View()
+	case overlayContextPicker:
+		return a.contextPicker.View()
 	case overlayPortForward:
 		return a.portForwardOverlay.View()
 	case overlaySetImage:
@@ -1555,7 +1745,9 @@ func (a App) OverlayRect() ui.OverlayRect {
 }
 
 // refreshDrillDownSplit re-runs the parent's DrillDown to get fresh filtered
-// children for a single split that is currently in a drill-down view.
+// children for a single split that is currently in a drill-down view. The
+// DrillDown reads from the split's own cluster (its store/discovery), keeping
+// drill-downs scoped to the pane's context.
 func (a App) refreshDrillDownSplit(split *ui.ResourceList) {
 	snap, ok := split.ParentSnap()
 	if !ok {
@@ -1565,6 +1757,8 @@ func (a App) refreshDrillDownSplit(split *ui.ResourceList) {
 	if !ok {
 		return
 	}
+
+	cl := a.clusterFor(split)
 
 	var parentObj *unstructured.Unstructured
 
@@ -1578,11 +1772,15 @@ func (a App) refreshDrillDownSplit(split *ui.ResourceList) {
 			}
 		}
 	} else if snap.ParentUID != "" {
+		store := plugin.StoreOf(cl)
+		if store == nil {
+			return
+		}
 		parentNs := split.Namespace()
 		if snap.Plugin.IsClusterScoped() {
 			parentNs = ""
 		}
-		for _, obj := range a.store.List(snap.Plugin.GVR(), parentNs) {
+		for _, obj := range store.List(snap.Plugin.GVR(), parentNs) {
 			if string(obj.GetUID()) == snap.ParentUID {
 				parentObj = obj
 				break
@@ -1593,7 +1791,7 @@ func (a App) refreshDrillDownSplit(split *ui.ResourceList) {
 	if parentObj == nil {
 		return
 	}
-	_, children := drillable.DrillDown(parentObj)
+	_, children := drillable.DrillDown(cl, parentObj)
 	split.SetObjects(children)
 }
 
@@ -1618,12 +1816,13 @@ func (a App) refreshDrillDownSplits(updatedGVR schema.GroupVersionResource, name
 }
 
 func (a App) handleHelmRollback(msg msgs.HelmRollbackRequestedMsg) (tea.Model, tea.Cmd) {
-	if a.helmClient == nil {
+	hc := a.helmClientForFocused()
+	if hc == nil {
 		cmd := a.statusBar.SetError("helm: no client")
 		return a, cmd
 	}
 	return a, func() tea.Msg {
-		if err := a.helmClient.Rollback(msg.ReleaseName, msg.Namespace, msg.Revision); err != nil {
+		if err := hc.Rollback(msg.ReleaseName, msg.Namespace, msg.Revision); err != nil {
 			return msgs.ActionResultMsg{Err: err}
 		}
 		return msgs.ActionResultMsg{ActionID: "helm-rollback:" + msg.ReleaseName}
@@ -1675,11 +1874,12 @@ func (a App) handleHelmChartRefSet(msg msgs.HelmChartRefSetMsg) (tea.Model, tea.
 	if a.config != nil {
 		a.config.SetChartRef(msg.Namespace, msg.ReleaseName, msg.ChartRef)
 	}
-	if a.helmClient == nil {
+	hc := a.helmClientForFocused()
+	if hc == nil {
 		cmd := a.statusBar.SetError("helm: no client")
 		return a, cmd
 	}
-	return a, helm.EditValuesCmd(a.helmClient, msg.ReleaseName, msg.Namespace)
+	return a, helm.EditValuesCmd(hc, msg.ReleaseName, msg.Namespace)
 }
 
 // maybeRefetchValuesAfterEdit dispatches an extra values re-fetch when the
@@ -1713,31 +1913,96 @@ func (a App) refreshHelmSplits() (tea.Model, tea.Cmd) {
 	for i := range a.layout.SplitCount() {
 		split := a.layout.SplitAt(i)
 		if split != nil && split.Plugin().Name() == "helmreleases" {
-			if a.helmClient != nil {
+			if hc := a.helmClientFor(a.clusterFor(split)); hc != nil {
 				opCmd := a.statusBar.StartOperation()
-				cmds = append(cmds, opCmd, fetchHelmReleasesCmd(a.helmClient, split.Namespace(), a.config.APITimeout()))
+				cmds = append(cmds, opCmd, fetchHelmReleasesCmd(hc, split.Namespace(), a.config.APITimeout()))
 			}
 		}
 	}
 	return a, tea.Batch(cmds...)
 }
 
-func heartbeatCmd(client *k8s.Client, interval time.Duration) tea.Cmd {
+// handleClusterHealth processes a ClusterHealthMsg tick on the Update goroutine.
+//
+// The status bar exposes a single online indicator, so it reflects the FOCUSED
+// pane's cluster only: a tick is displayed when its Context matches the focused
+// pane's cluster context (empty Context == global). Ticks for other clusters are
+// not displayed but are still relevant — every cluster a pane currently uses
+// must keep being probed.
+//
+// Re-arming: rather than re-arm only the cluster that just ticked (which would
+// let a cluster's probe loop die if its tick was dropped, and would never start
+// probing a newly-pinned cluster), each tick re-arms a heartbeat for EVERY
+// distinct live cluster currently referenced by a pane — the global plus each
+// distinct pinned context. This is self-healing and naturally picks up clusters
+// pinned after startup. Heartbeats are tea.Cmds (no goroutine races): all
+// Manager reads happen here on the Update goroutine and only the health dial
+// runs off-thread inside the returned cmd, against an immutable client handle.
+func (a App) handleClusterHealth(msg msgs.ClusterHealthMsg) (tea.Model, tea.Cmd) {
+	// Resolve the focused pane's cluster context (empty == global) and only let a
+	// matching tick drive the displayed indicator.
+	focusedCtx := ""
+	if f := a.layout.FocusedSplit(); f != nil {
+		focusedCtx = f.Context()
+	}
+	if focusedCtx == "" {
+		focusedCtx = a.mgr.GlobalContext()
+	}
+	tickCtx := msg.Context
+	if tickCtx == "" {
+		tickCtx = a.mgr.GlobalContext()
+	}
+	if tickCtx == focusedCtx {
+		a.statusBar.SetOnline(msg.Online)
+	}
+
+	// Re-arm a heartbeat for each distinct live cluster a pane uses: the global
+	// plus every distinct pinned context. Dedupe so two panes on one cluster do
+	// not double the probe rate.
+	seen := make(map[string]bool)
+	var cmds []tea.Cmd
+	armOne := func(ctxName string) {
+		if seen[ctxName] {
+			return
+		}
+		seen[ctxName] = true
+		cl, ok := a.mgr.Get(ctxName)
+		if !ok || cl == nil || !cl.Connected() {
+			return
+		}
+		cmds = append(cmds, heartbeatCmd(cl.Context(), cl.Client(), a.config.HeartbeatInterval()))
+	}
+	if g := a.mgr.Global(); g != nil && g.Connected() {
+		armOne(g.Context())
+	}
+	for _, ctxName := range a.pinnedContexts() {
+		armOne(ctxName)
+	}
+	return a, tea.Batch(cmds...)
+}
+
+// heartbeatCmd schedules a delayed health check for ctxName's client and reports
+// the result tagged with ctxName, so the Update-goroutine handler can decide
+// whether it concerns the focused pane's cluster (displayed) or a background one.
+func heartbeatCmd(ctxName string, client *k8s.Client, interval time.Duration) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(interval)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		online := k8s.CheckHealth(ctx, client)
-		return msgs.ClusterHealthMsg{Online: online}
+		return msgs.ClusterHealthMsg{Context: ctxName, Online: online}
 	}
 }
 
-func initialHeartbeatCmd(client *k8s.Client) tea.Cmd {
+// initialHeartbeatCmd fires an immediate health check (no startup delay) tagged
+// with ctxName, so the status bar reflects connectivity right after a cluster
+// connects (startup global, global switch, or per-pane connect).
+func initialHeartbeatCmd(ctxName string, client *k8s.Client) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		online := k8s.CheckHealth(ctx, client)
-		return msgs.ClusterHealthMsg{Online: online}
+		return msgs.ClusterHealthMsg{Context: ctxName, Online: online}
 	}
 }
 
@@ -1823,13 +2088,16 @@ func (a App) searchDebounceCmd(pattern string, mode msgs.SearchMode) tea.Cmd {
 func (a App) startLogStream(podName, containerName, namespace string, opts k8s.LogOptions) (App, tea.Cmd) {
 	a = a.stopLogStream()
 	a.logStreamGen++
-	if a.k8sClient == nil {
+	// Capture the focused cluster's client into a local BEFORE building the
+	// closure so the stream stays pinned to its cluster even if the global
+	// context later changes.
+	client := a.clientForFocused()
+	if client == nil {
 		return a, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a.logStreamCancel = cancel
 	gen := a.logStreamGen
-	client := a.k8sClient
 	opCmd := a.statusBar.StartOperation()
 	return a, tea.Batch(opCmd, func() tea.Msg {
 		ch, err := k8s.StreamLogs(ctx, client, podName, containerName, namespace, opts)

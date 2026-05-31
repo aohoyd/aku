@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -20,14 +19,17 @@ var gvr = schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Ver
 
 var vapbGVR = schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingadmissionpolicybindings"}
 
-// Plugin implements plugin.ResourcePlugin and plugin.DrillDowner for Kubernetes ValidatingAdmissionPolicies.
-type Plugin struct {
-	store *k8s.Store
-}
+// Plugin implements plugin.ResourcePlugin and plugin.DrillDowner for Kubernetes
+// ValidatingAdmissionPolicies. It is stateless: drill-down resolves its store at
+// call time from the plugin.Cluster passed in (plugin.StoreOf), so the same
+// instance serves any cluster.
+type Plugin struct{}
 
-// New creates a new ValidatingAdmissionPolicies plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{store: store}
+// New creates a new ValidatingAdmissionPolicies plugin. The client/store args are
+// ignored — they are resolved per call via plugin.Cluster — and are retained only
+// to match the registry factory signature.
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "validatingadmissionpolicies" }
@@ -164,17 +166,18 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 }
 
 // DrillDown implements plugin.DrillDowner.
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
-	if p.store == nil {
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return nil, nil
 	}
 	pp, ok := plugin.ByName("validatingadmissionpolicybindings")
 	if !ok {
 		return nil, nil
 	}
-	p.store.Subscribe(vapbGVR, "")
+	store.Subscribe(vapbGVR, "")
 	name := obj.GetName()
-	all := p.store.List(vapbGVR, "")
+	all := store.List(vapbGVR, "")
 	var matched []*unstructured.Unstructured
 	for _, o := range all {
 		policyName, _, _ := unstructured.NestedString(o.Object, "spec", "policyName")

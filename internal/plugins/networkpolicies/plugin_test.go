@@ -9,7 +9,7 @@ import (
 )
 
 func TestNetworkPolicyPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 3 {
 		t.Fatalf("expected 3 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestNetworkPolicyPluginColumns(t *testing.T) {
 }
 
 func TestNetworkPolicyPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 
 	t.Run("with labels", func(t *testing.T) {
 		obj := &unstructured.Unstructured{
@@ -72,7 +72,7 @@ func TestNetworkPolicyPluginRow(t *testing.T) {
 }
 
 func TestNetworkPolicyPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "networking.k8s.io/v1",

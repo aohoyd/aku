@@ -15,7 +15,7 @@ type mockPlugin struct {
 	gvr  schema.GroupVersionResource
 }
 
-func (m *mockPlugin) Name() string                     { return m.name }
+func (m *mockPlugin) Name() string { return m.name }
 func (m *mockPlugin) ShortName() string {
 	if len(m.name) < 2 {
 		return m.name
@@ -143,7 +143,7 @@ func TestRegisterIfAbsentNew(t *testing.T) {
 
 func TestByKindFound(t *testing.T) {
 	Reset()
-	k8s.TestSeedGVRIndex(t)
+	d := k8s.SeededTestDiscovery(t)
 
 	mock := &mockPlugin{
 		name: "deployments",
@@ -151,7 +151,7 @@ func TestByKindFound(t *testing.T) {
 	}
 	Register(mock)
 
-	got, ok := ByKind("apps/v1", "Deployment")
+	got, ok := ByKind(d.ResolveGVR, "apps/v1", "Deployment")
 	if !ok {
 		t.Fatal("expected to find plugin by kind")
 	}
@@ -162,7 +162,8 @@ func TestByKindFound(t *testing.T) {
 
 func TestByKindNotFound(t *testing.T) {
 	Reset()
-	_, ok := ByKind("v1", "NonExistent")
+	d := k8s.SeededTestDiscovery(t)
+	_, ok := ByKind(d.ResolveGVR, "v1", "NonExistent")
 	if ok {
 		t.Fatal("should not find plugin for unknown kind")
 	}
@@ -170,11 +171,24 @@ func TestByKindNotFound(t *testing.T) {
 
 func TestByKindNoPlugin(t *testing.T) {
 	Reset()
-	k8s.TestSeedGVRIndex(t)
+	d := k8s.SeededTestDiscovery(t)
 
-	_, ok := ByKind("apps/v1", "Deployment")
+	_, ok := ByKind(d.ResolveGVR, "apps/v1", "Deployment")
 	if ok {
 		t.Fatal("should not find plugin when none registered for GVR")
+	}
+}
+
+func TestByKindNilResolver(t *testing.T) {
+	Reset()
+	mock := &mockPlugin{
+		name: "deployments",
+		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+	Register(mock)
+
+	if _, ok := ByKind(nil, "apps/v1", "Deployment"); ok {
+		t.Fatal("expected no match with nil resolver")
 	}
 }
 

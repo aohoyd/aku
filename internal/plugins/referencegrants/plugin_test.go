@@ -9,7 +9,7 @@ import (
 )
 
 func TestReferenceGrantPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 2 {
 		t.Fatalf("expected 2 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestReferenceGrantPluginColumns(t *testing.T) {
 }
 
 func TestReferenceGrantPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",
@@ -57,7 +57,7 @@ func TestReferenceGrantPluginRow(t *testing.T) {
 }
 
 func TestReferenceGrantPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.networking.k8s.io/v1",

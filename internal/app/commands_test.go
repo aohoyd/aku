@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/aohoyd/aku/internal/cluster"
 	"github.com/aohoyd/aku/internal/config"
 	"github.com/aohoyd/aku/internal/helm"
 	"github.com/aohoyd/aku/internal/k8s"
@@ -57,12 +58,64 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 	return render.Content{Raw: s, Display: s}, nil
 }
 
+// newTestManager returns a Manager with no clusters created. mgr.Global()
+// returns nil, which the App's clusterFor/storeFor/clientForFocused helpers
+// treat the same way the old nil client/store did.
+func newTestManager() *cluster.Manager {
+	return cluster.NewManager(nil, "", 0)
+}
+
 // newTestApp creates an App suitable for testing with no k8s client or store.
 func newTestApp() App {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	return New(nil, nil, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	return New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+}
+
+// newAppWithClient creates an App whose single global cluster wraps the given
+// client. The cluster's context is taken from client.Context, and its store is
+// built from client.Dynamic (nil when the client has no dynamic interface). It
+// replaces the old pattern of assigning App.k8sClient directly.
+func newAppWithClient(client *k8s.Client) App {
+	km := config.DefaultKeymap()
+	cfg := config.DefaultConfig()
+	plugin.Reset()
+	mgr := cluster.NewManager(nil, "", 0)
+	var store *k8s.Store
+	if client != nil && client.Dynamic != nil {
+		store = k8s.NewStore(client.Dynamic, client.Context, nil)
+	}
+	mgr.Register(cluster.New(client.Context, "", client, store, k8s.NewDiscovery(), nil), true)
+	return New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+}
+
+// withGlobalStore rebinds the App's global cluster to one wrapping the given
+// store, preserving the existing layout/state. It replaces the old pattern of
+// assigning App.store directly: tests build a store, populate it, and route the
+// app's reads through it. The cluster carries a default-namespace client so
+// helpers that read client.Namespace keep working.
+func withGlobalStore(app App, store *k8s.Store) App {
+	mgr := cluster.NewManager(nil, "", 0)
+	mgr.Register(cluster.New("", "", &k8s.Client{Namespace: "default"}, store, k8s.NewDiscovery(), nil), true)
+	app.mgr = mgr
+	return app
+}
+
+// withGlobalClient rebinds the App global cluster to one wrapping the given
+// client (with a store derived from client.Dynamic), preserving the existing
+// layout/state. Use this — instead of newAppWithClient — when the test has
+// already configured app state (log mode, pf registry, splits) before attaching
+// a client, so that state is not discarded.
+func withGlobalClient(app App, client *k8s.Client) App {
+	mgr := cluster.NewManager(nil, "", 0)
+	var store *k8s.Store
+	if client != nil && client.Dynamic != nil {
+		store = k8s.NewStore(client.Dynamic, client.Context, nil)
+	}
+	mgr.Register(cluster.New(client.Context, "", client, store, k8s.NewDiscovery(), nil), true)
+	app.mgr = mgr
+	return app
 }
 
 func TestSearchOpenCommand(t *testing.T) {
@@ -657,7 +710,7 @@ func TestScopedKeyPodsExecBinding(t *testing.T) {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	app := New(nil, nil, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
 
 	podsPlugin := &mockPlugin{
 		name: "pods",
@@ -680,7 +733,7 @@ func TestScopedKeyDeploymentNoExec(t *testing.T) {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	app := New(nil, nil, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
 
 	deploymentsPlugin := &mockPlugin{
 		name: "deployments",
@@ -1478,7 +1531,7 @@ type mockDrillablePlugin struct {
 	children    []*unstructured.Unstructured
 }
 
-func (m *mockDrillablePlugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+func (m *mockDrillablePlugin) DrillDown(_ plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
 	return m.childPlugin, m.children
 }
 
@@ -1596,7 +1649,7 @@ func (m *mockGotoPlugin) GoTo(obj *unstructured.Unstructured) (string, string, b
 	return m.targetResource, ns, true
 }
 
-func (m *mockGotoPlugin) DrillDown(_ *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+func (m *mockGotoPlugin) DrillDown(_ plugin.Cluster, _ *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
 	return nil, nil
 }
 
@@ -1837,7 +1890,7 @@ func TestHandleGotoSelfPopulating(t *testing.T) {
 
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
-	a := New(nil, nil, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
 
 	// Add initial split with pods so goto has a focused split
 	a.layout.AddSplit(podsPlugin, "default")
@@ -1878,7 +1931,7 @@ func TestEnterDetailApiResourcesGoto(t *testing.T) {
 
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
-	a := New(nil, nil, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
 
 	a.layout.AddSplit(gotoPlugin, "default")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
@@ -2829,6 +2882,195 @@ func TestCloseCurrentPanelClosesSplit(t *testing.T) {
 	}
 }
 
+// pinFocusedTo pins the focused pane to ctxName by driving the same
+// handlePaneContextSwitch -> ClusterReadyMsg path the real app uses, so the
+// Manager ref for ctxName is Acquired exactly as in production. Returns the
+// resulting App.
+func pinFocusedTo(t *testing.T, a App, ctxName string) App {
+	t.Helper()
+	model, connectCmd := a.handlePaneContextSwitch(ctxName)
+	a = model.(App)
+	if connectCmd == nil {
+		t.Fatalf("expected a connect command pinning to %q", ctxName)
+	}
+	ready := extractClusterReady(t, connectCmd)
+	if ready.Err != nil {
+		t.Fatalf("unexpected connect error pinning to %q: %v", ctxName, ready.Err)
+	}
+	model, _ = a.handleClusterReady(ready)
+	return model.(App)
+}
+
+// TestCloseSplit_ReleasesLastPinnedCluster verifies that closing the last pane
+// pinned to a non-global context Releases its ref, driving the cluster's refCount
+// to zero so the Manager tears it down and removes it from the map.
+//
+// newContextSwitchApp starts with one split (the global pods pane created by
+// New); the focused pane is that split. We pin it to staging (Acquire) then close
+// it. A second pane is added first so closing is allowed (the last split is never
+// closed) and so the focus returns to a global pane afterward.
+func TestCloseSplit_ReleasesLastPinnedCluster(t *testing.T) {
+	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
+		"global":  {testPod("global-pod", "default")},
+		"staging": {testPod("staging-pod", "default")},
+	})
+	app := newContextSwitchApp(t, mgr)
+
+	// Add a second global pane so we can close the staging one (>1 split) and end
+	// up focused on a remaining global pane.
+	pods := app.layout.FocusedSplit().Plugin()
+	app.layout.AddSplit(pods, "default")
+	app.layout.SplitAt(app.layout.SplitCount() - 1).SetContext("global")
+
+	// Focus the new pane and pin it to staging — this Acquires staging (refCount 1).
+	app.layout.FocusSplitAt(app.layout.SplitCount() - 1)
+	app = pinFocusedTo(t, app, "staging")
+
+	if _, ok := mgr.Get("staging"); !ok {
+		t.Fatalf("precondition: expected staging cluster present after pin")
+	}
+	before := app.layout.SplitCount()
+
+	// Close the staging-pinned pane. Release should drive staging to refCount 0
+	// and the Manager should tear it down + remove it from the map.
+	app = app.closeFocusedSplit()
+
+	if app.layout.SplitCount() != before-1 {
+		t.Fatalf("expected %d splits after close, got %d", before-1, app.layout.SplitCount())
+	}
+	if _, ok := mgr.Get("staging"); ok {
+		t.Fatalf("expected staging cluster torn down (removed) after closing its last pinned pane")
+	}
+}
+
+// TestCloseSplit_SharedPinnedClusterNotTornDown verifies that closing one of two
+// panes pinned to the same non-global context only decrements the refcount; the
+// cluster stays alive for the remaining pane, and is torn down only when the last
+// one closes.
+func TestCloseSplit_SharedPinnedClusterNotTornDown(t *testing.T) {
+	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
+		"global":  {testPod("global-pod", "default")},
+		"staging": {testPod("staging-pod", "default")},
+	})
+	app := newContextSwitchApp(t, mgr)
+
+	// The app starts with one global pane (index 0). Pin it to staging (Acquire #1).
+	pods := app.layout.SplitAt(0).Plugin()
+	app.layout.FocusSplitAt(0)
+	app = pinFocusedTo(t, app, "staging")
+
+	// Add a second pane and pin it to staging too (Acquire #2). Each pane holds
+	// its own ref, so staging's refCount is 2.
+	app.layout.AddSplit(pods, "default")
+	app.layout.SplitAt(app.layout.SplitCount() - 1).SetContext("global") // inherits global before pin
+	app.layout.FocusSplitAt(app.layout.SplitCount() - 1)
+	app = pinFocusedTo(t, app, "staging")
+
+	if _, ok := mgr.Get("staging"); !ok {
+		t.Fatalf("precondition: expected staging cluster present with two pinned panes")
+	}
+
+	// Close the focused (second) staging pane. refCount drops 2 -> 1; staging must
+	// remain because pane 0 still references it.
+	app = app.closeFocusedSplit()
+
+	if _, ok := mgr.Get("staging"); !ok {
+		t.Fatalf("expected staging cluster to survive: another pinned pane still uses it")
+	}
+
+	// Focus the remaining staging pane and close it: refCount drops 1 -> 0 and the
+	// Manager tears it down. (closeFocusedSplit requires >1 split, which holds
+	// here because the app retains its baseline panes.)
+	for i := range app.layout.SplitCount() {
+		if app.layout.SplitAt(i).Context() == "staging" {
+			app.layout.FocusSplitAt(i)
+			break
+		}
+	}
+	app = app.closeFocusedSplit()
+	if _, ok := mgr.Get("staging"); ok {
+		t.Fatalf("expected staging cluster torn down after closing its last pinned pane")
+	}
+}
+
+// TestCloseSplit_FollowingGlobalDoesNotReleaseGlobal verifies that closing a
+// pane that FOLLOWS GLOBAL (unpinned) does not tear down the global cluster — the
+// pane held no ref, and the global is pinned in the Manager regardless.
+func TestCloseSplit_FollowingGlobalDoesNotReleaseGlobal(t *testing.T) {
+	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
+		"global": {testPod("global-pod", "default")},
+	})
+	app := newContextSwitchApp(t, mgr)
+
+	// Add a second pane following global (unpinned), focus it, then close it.
+	pods := app.layout.FocusedSplit().Plugin()
+	app.layout.AddSplit(pods, "default")
+	app.layout.SplitAt(app.layout.SplitCount() - 1).SetContext("global")
+	app.layout.FocusSplitAt(app.layout.SplitCount() - 1)
+	before := app.layout.SplitCount()
+
+	app = app.closeFocusedSplit()
+
+	if app.layout.SplitCount() != before-1 {
+		t.Fatalf("expected %d splits after close, got %d", before-1, app.layout.SplitCount())
+	}
+	// Global is always present (never torn down by Release).
+	if _, ok := mgr.Get("global"); !ok {
+		t.Fatalf("expected global cluster to remain after closing a following pane")
+	}
+	if g := mgr.Global(); g == nil || g.Context() != "global" {
+		t.Fatalf("expected global pointer intact, got %v", g)
+	}
+}
+
+// TestReloadAll_MultiClusterNoChangeToRefcounts verifies reload-all re-subscribes
+// across all live clusters (one global pane + one pinned pane) without panicking
+// and without changing refcounts — both clusters remain present afterward.
+func TestReloadAll_MultiClusterNoChangeToRefcounts(t *testing.T) {
+	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
+		"global":  {testPod("global-pod", "default")},
+		"staging": {testPod("staging-pod", "default")},
+	})
+	app := newContextSwitchApp(t, mgr)
+
+	// The app starts with one global pane (index 0). Add a second pane and pin it
+	// to staging (Acquire staging).
+	pods := app.layout.FocusedSplit().Plugin()
+	stagingIdx := app.layout.SplitCount() // the about-to-be-added pane's index
+	app.layout.AddSplit(pods, "default")
+	app.layout.SplitAt(stagingIdx).SetContext("global")
+	app.layout.FocusSplitAt(stagingIdx)
+	app = pinFocusedTo(t, app, "staging")
+
+	if _, ok := mgr.Get("staging"); !ok {
+		t.Fatalf("precondition: expected staging present after pin")
+	}
+	before := app.layout.SplitCount()
+
+	// reload-all: tears down + re-subscribes informers on every live cluster but
+	// must NOT change refcounts (no Acquire/Release) — both clusters survive.
+	model, _ := app.executeCommand("reload-all")
+	app = model.(App)
+
+	if app.layout.SplitCount() != before {
+		t.Fatalf("expected %d splits after reload, got %d", before, app.layout.SplitCount())
+	}
+	if _, ok := mgr.Get("global"); !ok {
+		t.Fatalf("expected global cluster present after reload")
+	}
+	if _, ok := mgr.Get("staging"); !ok {
+		t.Fatalf("expected staging cluster present after reload (reload must not Release)")
+	}
+	// Pane bindings are unchanged: the global pane still follows global, the
+	// staging pane is still pinned to staging.
+	if p0 := app.layout.SplitAt(0); p0.Context() != "global" || p0.Pinned() {
+		t.Fatalf("expected pane 0 to remain following global, got ctx=%q pinned=%v", p0.Context(), p0.Pinned())
+	}
+	if ps := app.layout.SplitAt(stagingIdx); ps.Context() != "staging" || !ps.Pinned() {
+		t.Fatalf("expected staging pane to remain pinned to staging, got ctx=%q pinned=%v", ps.Context(), ps.Pinned())
+	}
+}
+
 func TestCloseCurrentPanelNoopWithOneSplit(t *testing.T) {
 	app := newTestApp()
 
@@ -2885,7 +3127,7 @@ func TestSubstituteVarsCleanValues(t *testing.T) {
 
 func TestDebugNodeShowsConfirmDialog(t *testing.T) {
 	app := newTestApp()
-	app.k8sClient = &k8s.Client{Namespace: "default"}
+	app = newAppWithClient(&k8s.Client{Namespace: "default"})
 
 	nodesPlugin := &mockClusterPlugin{
 		mockPlugin: mockPlugin{
@@ -2925,7 +3167,7 @@ func TestDebugNodeShowsConfirmDialog(t *testing.T) {
 
 func TestDebugPrivilegedShowsConfirmDialog(t *testing.T) {
 	app := newTestApp()
-	app.k8sClient = &k8s.Client{Namespace: "default"}
+	app = newAppWithClient(&k8s.Client{Namespace: "default"})
 
 	podsPlugin := &mockPlugin{
 		name: "pods",
@@ -2977,7 +3219,7 @@ func TestDebugPrivilegedShowsConfirmDialog(t *testing.T) {
 
 func TestDebugNonPrivilegedNoConfirmDialog(t *testing.T) {
 	app := newTestApp()
-	app.k8sClient = &k8s.Client{Namespace: "default"}
+	app = newAppWithClient(&k8s.Client{Namespace: "default"})
 
 	podsPlugin := &mockPlugin{
 		name: "pods",
@@ -3019,7 +3261,7 @@ func TestDebugNonPrivilegedNoConfirmDialog(t *testing.T) {
 
 func TestDebugConfirmResultCancelled(t *testing.T) {
 	app := newTestApp()
-	app.k8sClient = &k8s.Client{Namespace: "default"}
+	app = newAppWithClient(&k8s.Client{Namespace: "default"})
 
 	nodesPlugin := &mockClusterPlugin{
 		mockPlugin: mockPlugin{
@@ -3065,10 +3307,10 @@ func TestNamespacePickerUsesContextWithTimeout(t *testing.T) {
 
 	app := newTestApp()
 	app.config.API.TimeoutSeconds = 10
-	app.k8sClient = &k8s.Client{
+	app = newAppWithClient(&k8s.Client{
 		Typed:     fakeClient,
 		Namespace: "default",
-	}
+	})
 
 	_, cmd := app.executeCommand("namespace-picker")
 	if cmd == nil {
@@ -3124,10 +3366,10 @@ func TestNamespacePickerTimeoutExpires(t *testing.T) {
 	// Instead, test that no k8sClient means no cmd is returned.
 	// And test that with a client, we get the expected async behavior.
 	app.config.API.TimeoutSeconds = 5
-	app.k8sClient = &k8s.Client{
+	app = newAppWithClient(&k8s.Client{
 		Typed:     fakeClient,
 		Namespace: "default",
-	}
+	})
 
 	_, cmd := app.executeCommand("namespace-picker")
 	if cmd == nil {
@@ -3222,8 +3464,9 @@ func TestHandlePortForwardRequested_DuplicateLocalPortRejectedSynchronously(t *t
 
 	a := newTestApp()
 	a.pfRegistry = reg
-	// Set a non-nil k8sClient so the nil guard doesn't short-circuit.
-	a.k8sClient = &k8s.Client{}
+	// Attach a non-nil client (in-place) so the nil guard doesn't short-circuit,
+	// while preserving the pfRegistry set above.
+	a = withGlobalClient(a, &k8s.Client{})
 
 	msg := msgs.PortForwardRequestedMsg{
 		PodName:      "new-pod",
@@ -3503,8 +3746,8 @@ func TestDescribeRefreshOnResourceIdentityChange(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store so the ResourceUpdatedMsg handler can call store.List
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 
 	// Populate with two pods: pod-A (cursor 0) and pod-B
 	podA := &unstructured.Unstructured{}
@@ -3569,8 +3812,8 @@ func TestDescribePanelClearedOnEmptyList(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 
 	// Populate with one pod
 	pod := &unstructured.Unstructured{}
@@ -3610,8 +3853,8 @@ func TestDescribeSameResourceUsesDebounce(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 
 	// Populate with one pod
 	pod := &unstructured.Unstructured{}
@@ -3656,8 +3899,8 @@ func TestDescribeDebounceNotResetByUnrelatedGVR(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store and populate with one pod
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 	pod := &unstructured.Unstructured{}
 	pod.SetName("my-pod")
 	pod.SetNamespace("default")
@@ -3693,8 +3936,8 @@ func TestDescribeDebounceFiresForMatchingGVR(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store and populate with one pod
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 	pod := &unstructured.Unstructured{}
 	pod.SetName("my-pod")
 	pod.SetNamespace("default")
@@ -3729,8 +3972,8 @@ func TestDescribeDebounceFiresForEventsGVR(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store and populate with one pod
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 	pod := &unstructured.Unstructured{}
 	pod.SetName("my-pod")
 	pod.SetNamespace("default")
@@ -3765,8 +4008,8 @@ func TestDescribeDebounceFiresForSecretsGVRWhenEnvResolved(t *testing.T) {
 	plugin.Register(podsPlugin)
 	app.layout.AddSplit(podsPlugin, "default")
 
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 	pod := &unstructured.Unstructured{}
 	pod.SetName("my-pod")
 	pod.SetNamespace("default")
@@ -3803,8 +4046,8 @@ func TestDescribeDebounceSkipsSecretsGVRWhenNotEnvResolved(t *testing.T) {
 	plugin.Register(podsPlugin)
 	app.layout.AddSplit(podsPlugin, "default")
 
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 	pod := &unstructured.Unstructured{}
 	pod.SetName("my-pod")
 	pod.SetNamespace("default")
@@ -3905,8 +4148,8 @@ func TestYAMLRefreshOnResourceIdentityChange(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store so the ResourceUpdatedMsg handler can call store.List
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 
 	// Populate with two pods: pod-A (cursor 0) and pod-B
 	podA := &unstructured.Unstructured{}
@@ -3962,8 +4205,8 @@ func TestLogRestartOnResourceIdentityChange(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store so the ResourceUpdatedMsg handler can call store.List
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 
 	// Populate with two pods: pod-A (cursor 0) and pod-B
 	podA := &unstructured.Unstructured{}
@@ -4023,8 +4266,8 @@ func TestYAMLReloadSkipsUnrelatedGVR(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store and populate with one pod
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 	pod := &unstructured.Unstructured{}
 	pod.SetName("my-pod")
 	pod.SetNamespace("default")
@@ -4072,8 +4315,8 @@ func TestYAMLReloadFiresForMatchingGVR(t *testing.T) {
 	app.layout.AddSplit(podsPlugin, "default")
 
 	// Create a store and populate with one pod
-	store := k8s.NewStore(nil, nil)
-	app.store = store
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
 	pod := &unstructured.Unstructured{}
 	pod.SetName("my-pod")
 	pod.SetNamespace("default")
@@ -4716,7 +4959,7 @@ func setupRestartPendingApp(t *testing.T) App {
 		},
 	}}
 	fakeDyn := dynamicfake.NewSimpleDynamicClient(scheme, dep)
-	app.k8sClient = &k8s.Client{Dynamic: fakeDyn, Namespace: "default"}
+	app = newAppWithClient(&k8s.Client{Dynamic: fakeDyn, Namespace: "default"})
 
 	deploymentsPlugin := &mockPlugin{
 		name: "deployments",
@@ -4827,7 +5070,7 @@ func TestConfirmResultMsg_PendingRestart_No(t *testing.T) {
 func setupRolloutRestartDispatchApp(t *testing.T, count int) (App, []*unstructured.Unstructured) {
 	t.Helper()
 	app := newTestApp()
-	app.k8sClient = &k8s.Client{Namespace: "default"}
+	app = newAppWithClient(&k8s.Client{Namespace: "default"})
 
 	deploymentsPlugin := &mockPlugin{
 		name: "deployments",
@@ -4927,7 +5170,9 @@ func TestRolloutRestart_MultiSelect_Dispatch(t *testing.T) {
 
 func TestRolloutRestart_NoK8sClient_NoOp(t *testing.T) {
 	app, _ := setupRolloutRestartDispatchApp(t, 1)
-	app.k8sClient = nil
+	// Drop the cluster (no connected client) while keeping the split/targets set
+	// up above, so rollout-restart hits the missing-client guard.
+	app.mgr = newTestManager()
 	prevOverlay := app.activeOverlay
 
 	_, cmd := app.executeCommand("rollout-restart")
@@ -4957,7 +5202,7 @@ func TestRolloutRestart_NoK8sClient_NoOp(t *testing.T) {
 func TestRolloutRestart_NoFocusedSplit(t *testing.T) {
 	plugin.Reset()
 	app := newTestApp()
-	app.k8sClient = &k8s.Client{Namespace: "default"}
+	app = newAppWithClient(&k8s.Client{Namespace: "default"})
 	// No splits added; FocusedSplit() returns nil.
 
 	model, cmd := app.executeCommand("rollout-restart")
@@ -5230,7 +5475,7 @@ func TestExecuteDelete(t *testing.T) {
 						return false, nil, nil
 					})
 				}
-				app.k8sClient = &k8s.Client{Dynamic: fakeDyn, Namespace: "default"}
+				app = newAppWithClient(&k8s.Client{Dynamic: fakeDyn, Namespace: "default"})
 
 				p := &mockPlugin{name: "pods", gvr: podsGVR}
 				plugin.Register(p)
@@ -5330,7 +5575,7 @@ func TestExecuteDelete_K8s_N1_FailureWraps(t *testing.T) {
 	fakeDyn.PrependReactor("delete", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("forbidden by RBAC")
 	})
-	app.k8sClient = &k8s.Client{Dynamic: fakeDyn, Namespace: "default"}
+	app = newAppWithClient(&k8s.Client{Dynamic: fakeDyn, Namespace: "default"})
 
 	p := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(p)
@@ -5413,14 +5658,14 @@ func TestExecuteDelete_NoFocusedSplit(t *testing.T) {
 
 func TestCurrentLogContext(t *testing.T) {
 	tests := []struct {
-		name       string
-		setup      func(a *App)
-		wantOK     bool
+		name        string
+		setup       func(a *App)
+		wantOK      bool
 		wantCluster string
-		wantNS     string
-		wantPod    string
-		wantCtr    string
-		wantLines  int
+		wantNS      string
+		wantPod     string
+		wantCtr     string
+		wantLines   int
 	}{
 		{
 			name:   "empty buffer returns ok=false",
@@ -5477,7 +5722,7 @@ func TestCurrentLogContext(t *testing.T) {
 		{
 			name: "k8sClient with empty Context falls back to unknown-cluster",
 			setup: func(a *App) {
-				a.k8sClient = &k8s.Client{}
+				*a = newAppWithClient(&k8s.Client{})
 				lv := a.layout.LogView()
 				lv.AppendLine("a")
 				lv.SetNamespace("ns1")
@@ -5494,7 +5739,7 @@ func TestCurrentLogContext(t *testing.T) {
 		{
 			name: "k8sClient with Context populates cluster",
 			setup: func(a *App) {
-				a.k8sClient = &k8s.Client{Context: "prod"}
+				*a = newAppWithClient(&k8s.Client{Context: "prod"})
 				lv := a.layout.LogView()
 				lv.AppendLine("a")
 				lv.SetNamespace("ns1")
@@ -5582,7 +5827,7 @@ func TestSaveLogsCommand_WritesFile(t *testing.T) {
 
 	a := newTestApp()
 	a.layout.SetLogMode(true)
-	a.k8sClient = &k8s.Client{Context: "prod"}
+	a = withGlobalClient(a, &k8s.Client{Context: "prod"})
 	lv := a.layout.LogView()
 	lv.AppendLine("line-1")
 	lv.AppendLine("line-2")
@@ -5633,7 +5878,7 @@ func TestSaveAndOpenLogsCommand_WritesFileAndReturnsExecCmd(t *testing.T) {
 
 	a := newTestApp()
 	a.layout.SetLogMode(true)
-	a.k8sClient = &k8s.Client{Context: "stg"}
+	a = withGlobalClient(a, &k8s.Client{Context: "stg"})
 	lv := a.layout.LogView()
 	lv.AppendLine("hello")
 	lv.AppendLine("world")
@@ -5685,5 +5930,215 @@ func TestSaveAndOpenLogsCommand_NoLinesShowsError(t *testing.T) {
 	}
 	if w := got.statusBar.WarningText(); w != "" {
 		t.Errorf("status bar warning should be empty, got %q", w)
+	}
+}
+
+// fakeClientFor builds a fake k8s.Client for the named context with working
+// dynamic + typed fakes. The dynamic fake registers list kinds for the GVRs the
+// global-switch tests subscribe to (pods, deployments) so the informer's LIST
+// does not panic. Used as the per-context connect result.
+func fakeClientFor(ctx string) *k8s.Client {
+	listKinds := map[schema.GroupVersionResource]string{
+		{Version: "v1", Resource: "pods"}:                       "PodList",
+		{Group: "apps", Version: "v1", Resource: "deployments"}: "DeploymentList",
+	}
+	return &k8s.Client{
+		Dynamic:   dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds),
+		Typed:     fake.NewSimpleClientset(),
+		Namespace: "default",
+		Context:   ctx,
+	}
+}
+
+// connectWithNamespaces overrides a manager's connect so each context yields a
+// fake client whose default namespace is taken from nsByCtx (falling back to
+// "default"). Used by the global-switch tests to prove a following pane lands on
+// the NEW cluster's default namespace, which a uniform "default" everywhere
+// could not distinguish.
+func connectWithNamespaces(a App, nsByCtx map[string]string) {
+	a.mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
+		cl := fakeClientFor(ctx)
+		if ns, ok := nsByCtx[ctx]; ok && ns != "" {
+			cl.Namespace = ns
+		}
+		return cl, nil
+	})
+}
+
+// appWithManager builds an App with a multi-context Manager. The first context
+// is the connected global (a registered cluster with a working store); the rest
+// are entries that connect lazily via an injected connect that yields a
+// fakeClientFor. New() seeds a default pods split (stamped with the global
+// context) so the layout is non-empty with exactly one following pane.
+func appWithManager(t *testing.T, ctxNames ...string) App {
+	t.Helper()
+	if len(ctxNames) == 0 {
+		t.Fatal("appWithManager needs at least one context")
+	}
+	entries := make([]cluster.ContextEntry, len(ctxNames))
+	for i, n := range ctxNames {
+		entries[i] = cluster.ContextEntry{Name: n, File: "/dev/null"}
+	}
+	mgr := cluster.NewManager(entries, "", 0)
+	// Lazily-created clusters (the non-global contexts) connect via this stub.
+	mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
+		return fakeClientFor(ctx), nil
+	})
+	// Register the global (first context) eagerly with a real store so the
+	// default global pane subscribes correctly.
+	gctx := ctxNames[0]
+	gclient := fakeClientFor(gctx)
+	gstore := k8s.NewStore(gclient.Dynamic, gctx, nil)
+	mgr.Register(cluster.New(gctx, "", gclient, gstore, k8s.NewDiscovery(), nil), true)
+
+	km := config.DefaultKeymap()
+	cfg := config.DefaultConfig()
+	plugin.Reset()
+	podsPlugin := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	deploymentsPlugin := &mockPlugin{name: "deployments", gvr: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}}
+	plugin.Register(podsPlugin)
+	plugin.Register(deploymentsPlugin)
+
+	// New() with empty specs seeds a single pods pane and stamps it with the
+	// global context.
+	return New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+}
+
+// addSplit adds a following split for the named registered plugin and stamps it
+// with the current global context (mirroring handleSplit's inherit behavior),
+// returning the updated App.
+func addSplit(t *testing.T, a App, pluginName string) App {
+	t.Helper()
+	p, ok := plugin.ByName(pluginName)
+	if !ok {
+		t.Fatalf("plugin %q not registered", pluginName)
+	}
+	a.layout.AddSplit(p, "default")
+	if sp := a.layout.FocusedSplit(); sp != nil {
+		sp.SetContext(a.mgr.GlobalContext())
+	}
+	return a
+}
+
+func TestGlobalContextSwitchRetargetsFollowingPanes(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b")
+	// ctx-b connects lazily; give it a distinct default namespace so we can
+	// assert the following pane lands on it.
+	connectWithNamespaces(a, map[string]string{"ctx-b": "team-b"})
+
+	// Add a second following (unpinned) split. Both panes follow global (ctx-a).
+	a = addSplit(t, a, "deployments")
+	if got := a.layout.SplitCount(); got != 2 {
+		t.Fatalf("expected 2 splits, got %d", got)
+	}
+
+	model, _ := a.handleGlobalContextSwitch("ctx-b")
+	app := model.(App)
+
+	if app.mgr.GlobalContext() != "ctx-b" {
+		t.Fatalf("expected global ctx-b, got %q", app.mgr.GlobalContext())
+	}
+	for i := range app.layout.SplitCount() {
+		sp := app.layout.SplitAt(i)
+		if sp.Context() != "ctx-b" {
+			t.Errorf("split %d: expected context ctx-b, got %q", i, sp.Context())
+		}
+		if sp.Namespace() != "team-b" {
+			t.Errorf("split %d: expected namespace team-b, got %q", i, sp.Namespace())
+		}
+	}
+	if app.activeOverlay != overlayNone {
+		t.Errorf("expected overlay closed, got %v", app.activeOverlay)
+	}
+}
+
+func TestGlobalContextSwitchLeavesPinnedPanesUntouched(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b")
+	connectWithNamespaces(a, map[string]string{"ctx-b": "team-b"})
+
+	// Add a second split and pin it to ctx-a explicitly.
+	a = addSplit(t, a, "deployments")
+	pinned := a.layout.SplitAt(1)
+	pinned.SetPinned(true)
+	pinned.SetContext("ctx-a")
+	pinned.SetNamespace("pinned-ns")
+
+	model, _ := a.handleGlobalContextSwitch("ctx-b")
+	app := model.(App)
+
+	// Following pane (index 0) retargeted to ctx-b.
+	if got := app.layout.SplitAt(0).Context(); got != "ctx-b" {
+		t.Errorf("following pane: expected ctx-b, got %q", got)
+	}
+	// Pinned pane (index 1) untouched.
+	pinnedAfter := app.layout.SplitAt(1)
+	if pinnedAfter.Context() != "ctx-a" {
+		t.Errorf("pinned pane: expected ctx-a, got %q", pinnedAfter.Context())
+	}
+	if pinnedAfter.Namespace() != "pinned-ns" {
+		t.Errorf("pinned pane: expected namespace pinned-ns, got %q", pinnedAfter.Namespace())
+	}
+}
+
+func TestGlobalContextSwitchUpdatesStatusBar(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b")
+	connectWithNamespaces(a, map[string]string{"ctx-b": "team-b"})
+
+	model, _ := a.handleGlobalContextSwitch("ctx-b")
+	app := model.(App)
+
+	if got := app.statusBar.ContextName(); got != "ctx-b" {
+		t.Errorf("expected status bar context ctx-b, got %q", got)
+	}
+}
+
+func TestGlobalContextSwitchNoOpWhenAlreadyGlobal(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b")
+	a = addSplit(t, a, "deployments")
+	// Mark a pane pinned-but-equal so we can detect any spurious retarget work.
+	beforeNs := a.layout.SplitAt(0).Namespace()
+
+	model, _ := a.handleGlobalContextSwitch("ctx-a")
+	app := model.(App)
+
+	if app.mgr.GlobalContext() != "ctx-a" {
+		t.Fatalf("expected global to remain ctx-a, got %q", app.mgr.GlobalContext())
+	}
+	if got := app.layout.SplitAt(0).Namespace(); got != beforeNs {
+		t.Errorf("no-op switch changed namespace: %q -> %q", beforeNs, got)
+	}
+	if app.activeOverlay != overlayNone {
+		t.Errorf("expected overlay closed, got %v", app.activeOverlay)
+	}
+}
+
+func TestGlobalContextSwitchFailedConnectKeepsGlobal(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b")
+	// Make ctx-b fail to connect; ctx-a (already connected) stays usable.
+	a.mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
+		if ctx == "ctx-b" {
+			return nil, fmt.Errorf("boom")
+		}
+		return fakeClientFor(ctx), nil
+	})
+
+	a = addSplit(t, a, "deployments")
+
+	model, cmd := a.handleGlobalContextSwitch("ctx-b")
+	app := model.(App)
+
+	// Global must NOT move to the broken cluster.
+	if app.mgr.GlobalContext() != "ctx-a" {
+		t.Fatalf("expected global to remain ctx-a after failed connect, got %q", app.mgr.GlobalContext())
+	}
+	// Panes must not be retargeted.
+	for i := range app.layout.SplitCount() {
+		if got := app.layout.SplitAt(i).Context(); got != "ctx-a" {
+			t.Errorf("split %d retargeted on failed switch: got %q", i, got)
+		}
+	}
+	// An error status command should have been produced.
+	if cmd == nil {
+		t.Errorf("expected an error status command, got nil")
 	}
 }

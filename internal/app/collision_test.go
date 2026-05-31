@@ -12,18 +12,18 @@ func TestIsBuiltInGroup(t *testing.T) {
 		group string
 		want  bool
 	}{
-		{"", true},                                  // core
-		{"apps", true},                              // well-known built-in group
-		{"batch", true},                             // well-known built-in group
-		{"autoscaling", true},                       // well-known built-in group
-		{"policy", true},                            // well-known built-in group
-		{"networking.k8s.io", true},                 // .k8s.io suffix
-		{"storage.k8s.io", true},                    // .k8s.io suffix
-		{"cert-manager.io", false},                  // CRD group
-		{"argoproj.io", false},                      // CRD group
-		{"admissionregistration.k8s.io", true},      // .k8s.io suffix
-		{"flowcontrol.apiserver.k8s.io", true},      // .k8s.io suffix
-		{"stable.example.com", false},               // CRD group
+		{"", true},                             // core
+		{"apps", true},                         // well-known built-in group
+		{"batch", true},                        // well-known built-in group
+		{"autoscaling", true},                  // well-known built-in group
+		{"policy", true},                       // well-known built-in group
+		{"networking.k8s.io", true},            // .k8s.io suffix
+		{"storage.k8s.io", true},               // .k8s.io suffix
+		{"cert-manager.io", false},             // CRD group
+		{"argoproj.io", false},                 // CRD group
+		{"admissionregistration.k8s.io", true}, // .k8s.io suffix
+		{"flowcontrol.apiserver.k8s.io", true}, // .k8s.io suffix
+		{"stable.example.com", false},          // CRD group
 	}
 	for _, tt := range tests {
 		t.Run(tt.group, func(t *testing.T) {

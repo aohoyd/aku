@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
@@ -17,13 +16,11 @@ import (
 var gvr = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes ReplicaSets.
-type Plugin struct {
-	store *k8s.Store
-}
+type Plugin struct{}
 
 // New creates a new ReplicaSet plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{store: store}
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "replicasets" }
@@ -95,16 +92,17 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 }
 
 // DrillDown implements plugin.DrillDowner.
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
-	if p.store == nil {
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return nil, nil
 	}
 	pp, ok := plugin.ByName("pods")
 	if !ok {
 		return nil, nil
 	}
-	p.store.Subscribe(workload.PodsGVR, obj.GetNamespace())
-	pods := workload.FindOwnedPods(p.store, obj.GetNamespace(), string(obj.GetUID()))
+	store.Subscribe(workload.PodsGVR, obj.GetNamespace())
+	pods := workload.FindOwnedPods(store, obj.GetNamespace(), string(obj.GetUID()))
 	return pp, pods
 }
 

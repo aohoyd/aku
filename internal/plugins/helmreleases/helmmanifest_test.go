@@ -8,6 +8,7 @@ import (
 	"github.com/aohoyd/aku/internal/helm"
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/render"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -176,7 +177,7 @@ func (m *mockDescribePlugin) Describe(_ context.Context, obj *unstructured.Unstr
 
 func TestHelmmanifestDescribeDelegates(t *testing.T) {
 	plugin.Reset()
-	k8s.TestSeedGVRIndex(t)
+	d := k8s.SeededTestDiscovery(t)
 
 	mock := &mockDescribePlugin{
 		pluginName: "services",
@@ -184,7 +185,7 @@ func TestHelmmanifestDescribeDelegates(t *testing.T) {
 	}
 	plugin.Register(mock)
 
-	p := newTestHelmmanifest()
+	p := &helmmanifest{discovery: d}
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Service",
@@ -203,7 +204,7 @@ type mockUncoverablePlugin struct {
 	mockDescribePlugin
 }
 
-func (m *mockUncoverablePlugin) DescribeUncovered(_ context.Context, obj *unstructured.Unstructured) (render.Content, error) {
+func (m *mockUncoverablePlugin) DescribeUncovered(_ context.Context, _ plugin.Cluster, obj *unstructured.Unstructured) (render.Content, error) {
 	s := "uncovered: " + obj.GetKind()
 	return render.Content{Raw: s, Display: s}, nil
 }
@@ -217,7 +218,7 @@ func TestHelmmanifestImplementsUncoverable(t *testing.T) {
 
 func TestHelmmanifestDescribeUncoveredDelegates(t *testing.T) {
 	plugin.Reset()
-	k8s.TestSeedGVRIndex(t)
+	d := k8s.SeededTestDiscovery(t)
 
 	mock := &mockUncoverablePlugin{
 		mockDescribePlugin: mockDescribePlugin{
@@ -227,13 +228,13 @@ func TestHelmmanifestDescribeUncoveredDelegates(t *testing.T) {
 	}
 	plugin.Register(mock)
 
-	p := newTestHelmmanifest()
+	p := &helmmanifest{discovery: d}
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Secret",
 		"metadata":   map[string]any{"name": "my-secret", "namespace": "default"},
 	}}
-	c, err := p.DescribeUncovered(context.Background(), obj)
+	c, err := p.DescribeUncovered(context.Background(), plugintest.NewFakeCluster(nil), obj)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -244,7 +245,7 @@ func TestHelmmanifestDescribeUncoveredDelegates(t *testing.T) {
 
 func TestHelmmanifestDescribeUncoveredFallback(t *testing.T) {
 	plugin.Reset()
-	k8s.TestSeedGVRIndex(t)
+	d := k8s.SeededTestDiscovery(t)
 
 	mock := &mockDescribePlugin{
 		pluginName: "services",
@@ -252,13 +253,13 @@ func TestHelmmanifestDescribeUncoveredFallback(t *testing.T) {
 	}
 	plugin.Register(mock)
 
-	p := newTestHelmmanifest()
+	p := &helmmanifest{discovery: d}
 	obj := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "Service",
 		"metadata":   map[string]any{"name": "my-svc", "namespace": "default"},
 	}}
-	c, err := p.DescribeUncovered(context.Background(), obj)
+	c, err := p.DescribeUncovered(context.Background(), plugintest.NewFakeCluster(nil), obj)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -292,7 +293,7 @@ func TestHelmmanifestDrillDownNilStore(t *testing.T) {
 		"kind":       "Deployment",
 		"metadata":   map[string]any{"name": "nginx", "namespace": "default"},
 	}}
-	childPlugin, children := p.DrillDown(obj)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), obj)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil,nil for nil store")
 	}
@@ -300,9 +301,9 @@ func TestHelmmanifestDrillDownNilStore(t *testing.T) {
 
 func TestHelmmanifestDrillDownFiltersLiveObjects(t *testing.T) {
 	plugin.Reset()
-	k8s.TestSeedGVRIndex(t)
+	d := k8s.SeededTestDiscovery(t)
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	deploymentsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 
 	// Seed live objects in store
@@ -339,13 +340,14 @@ func TestHelmmanifestDrillDownFiltersLiveObjects(t *testing.T) {
 	}
 
 	p := &helmmanifest{
-		store:    store,
-		children: children,
+		store:     store,
+		discovery: d,
+		children:  children,
 	}
 
 	// Drill on a Deployment — should return only nginx and worker, not unrelated
 	selected := children[0] // nginx deployment
-	childPlugin, matched := p.DrillDown(selected)
+	childPlugin, matched := p.DrillDown(plugintest.NewFakeCluster(nil), selected)
 	if childPlugin == nil {
 		t.Fatal("expected non-nil child plugin")
 	}
@@ -366,11 +368,12 @@ func TestHelmmanifestDrillDownFiltersLiveObjects(t *testing.T) {
 
 func TestHelmmanifestDrillDownUnresolvableGVR(t *testing.T) {
 	plugin.Reset()
-	// Don't seed GVR index — resolution will fail
+	// Empty discovery — resolution will fail for the Widget GVR.
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	p := &helmmanifest{
-		store: store,
+		store:     store,
+		discovery: k8s.NewDiscovery(),
 		children: []*unstructured.Unstructured{
 			{Object: map[string]any{
 				"apiVersion": "custom.io/v1", "kind": "Widget",
@@ -380,7 +383,7 @@ func TestHelmmanifestDrillDownUnresolvableGVR(t *testing.T) {
 	}
 
 	selected := p.children[0]
-	childPlugin, matched := p.DrillDown(selected)
+	childPlugin, matched := p.DrillDown(plugintest.NewFakeCluster(nil), selected)
 	if childPlugin != nil || matched != nil {
 		t.Fatal("expected nil,nil for unresolvable GVR")
 	}
@@ -388,7 +391,7 @@ func TestHelmmanifestDrillDownUnresolvableGVR(t *testing.T) {
 
 func TestHelmmanifestRowNamespaceFallback(t *testing.T) {
 	plugin.Reset()
-	k8s.TestSeedGVRIndex(t)
+	d := k8s.SeededTestDiscovery(t)
 
 	mock := &mockDescribePlugin{
 		pluginName: "services",
@@ -397,6 +400,7 @@ func TestHelmmanifestRowNamespaceFallback(t *testing.T) {
 	plugin.Register(mock)
 
 	p := &helmmanifest{
+		discovery:        d,
 		releaseNamespace: "production",
 	}
 
@@ -413,7 +417,7 @@ func TestHelmmanifestRowNamespaceFallback(t *testing.T) {
 
 func TestHelmmanifestRowClusterScopedNoFallback(t *testing.T) {
 	plugin.Reset()
-	k8s.TestSeedGVRIndex(t)
+	d := k8s.SeededTestDiscovery(t)
 
 	mock := &mockDescribePlugin{
 		pluginName:    "namespaces",
@@ -423,6 +427,7 @@ func TestHelmmanifestRowClusterScopedNoFallback(t *testing.T) {
 	plugin.Register(mock)
 
 	p := &helmmanifest{
+		discovery:        d,
 		releaseNamespace: "production",
 	}
 
@@ -439,7 +444,7 @@ func TestHelmmanifestRowClusterScopedNoFallback(t *testing.T) {
 
 func TestHelmmanifestDrillDownNamespaceFallback(t *testing.T) {
 	plugin.Reset()
-	k8s.TestSeedGVRIndex(t)
+	d := k8s.SeededTestDiscovery(t)
 
 	// Register namespaced mock for Deployment
 	mock := &mockDescribePlugin{
@@ -448,7 +453,7 @@ func TestHelmmanifestDrillDownNamespaceFallback(t *testing.T) {
 	}
 	plugin.Register(mock)
 
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	deploymentsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
 
 	// Live object in "production" namespace
@@ -468,11 +473,12 @@ func TestHelmmanifestDrillDownNamespaceFallback(t *testing.T) {
 
 	p := &helmmanifest{
 		store:            store,
+		discovery:        d,
 		releaseNamespace: "production",
 		children:         children,
 	}
 
-	childPlugin, matched := p.DrillDown(children[0])
+	childPlugin, matched := p.DrillDown(plugintest.NewFakeCluster(nil), children[0])
 	if childPlugin == nil {
 		t.Fatal("expected non-nil child plugin")
 	}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
 	"github.com/charmbracelet/x/ansi"
@@ -35,7 +36,7 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 }
 
 func TestNodePluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 6 {
 		t.Fatalf("expected 6 columns, got %d", len(cols))
@@ -43,7 +44,7 @@ func TestNodePluginColumns(t *testing.T) {
 }
 
 func TestNodePluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeNode("node-1", "True", "v1.28.3")
 	row := p.Row(obj)
 	if row[0] != "node-1" {
@@ -61,7 +62,7 @@ func TestNodePluginRow(t *testing.T) {
 }
 
 func TestNodePluginRowRoles(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -95,7 +96,7 @@ func TestNodePluginRowRoles(t *testing.T) {
 }
 
 func TestNodePluginRowMissingIP(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -121,7 +122,7 @@ func TestNodePluginRowMissingIP(t *testing.T) {
 }
 
 func TestNodePluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -190,7 +191,7 @@ func TestNodePluginDescribe(t *testing.T) {
 }
 
 func TestNodeDrillDown(t *testing.T) {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 
 	plugin.Reset()
 	mockPods := &mockPlugin{name: "pods"}
@@ -206,16 +207,14 @@ func TestNodeDrillDown(t *testing.T) {
 	}}
 	store.CacheUpsert(workload.PodsGVR, "", pod1)
 
-	p := &Plugin{
-		store: store,
-	}
+	p := &Plugin{}
 	node := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{
 			"name": "node-1",
 		},
 	}}
 
-	childPlugin, children := p.DrillDown(node)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(store), node)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin, got nil")
 	}
@@ -228,13 +227,11 @@ func TestNodeDrillDown(t *testing.T) {
 }
 
 func TestNodeDrillDownNilStore(t *testing.T) {
-	p := &Plugin{
-		store: nil,
-	}
+	p := &Plugin{}
 	node := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "node-1"},
 	}}
-	childPlugin, children := p.DrillDown(node)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), node)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil, nil for nil store")
 	}

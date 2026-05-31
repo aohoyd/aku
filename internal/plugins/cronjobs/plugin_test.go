@@ -8,6 +8,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/render"
 	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -35,7 +36,7 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 }
 
 func TestCronJobPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 6 {
 		t.Fatalf("expected 6 columns, got %d", len(cols))
@@ -49,7 +50,7 @@ func TestCronJobPluginColumns(t *testing.T) {
 }
 
 func TestCronJobPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeCronJob("backup-job", "*/5 * * * *", false, 0)
 	row := p.Row(obj)
 	if row[0] != "backup-job" {
@@ -67,7 +68,7 @@ func TestCronJobPluginRow(t *testing.T) {
 }
 
 func TestCronJobPluginRowSuspended(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeCronJob("suspended-job", "0 * * * *", true, 2)
 	row := p.Row(obj)
 	if row[2] != "True" {
@@ -79,7 +80,7 @@ func TestCronJobPluginRowSuspended(t *testing.T) {
 }
 
 func TestCronJobPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "batch/v1",
@@ -134,7 +135,7 @@ func TestCronJobPluginDescribe(t *testing.T) {
 
 func TestCronJobDrillDown(t *testing.T) {
 	jobsGVR := schema.GroupVersionResource{Group: "batch", Version: "v1", Resource: "jobs"}
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 
 	plugin.Reset()
 	mockJobs := &mockPlugin{name: "jobs"}
@@ -148,16 +149,14 @@ func TestCronJobDrillDown(t *testing.T) {
 	}}
 	store.CacheUpsert(jobsGVR, "default", job1)
 
-	p := &Plugin{
-		store: store,
-	}
+	p := &Plugin{}
 	cronjob := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{
 			"name": "backup-job", "namespace": "default", "uid": "cronjob-uid-1",
 		},
 	}}
 
-	childPlugin, children := p.DrillDown(cronjob)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(store), cronjob)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin, got nil")
 	}
@@ -170,20 +169,18 @@ func TestCronJobDrillDown(t *testing.T) {
 }
 
 func TestCronJobDrillDownNilStore(t *testing.T) {
-	p := &Plugin{
-		store: nil,
-	}
+	p := &Plugin{}
 	cronjob := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "backup-job", "namespace": "default", "uid": "cronjob-uid-1"},
 	}}
-	childPlugin, children := p.DrillDown(cronjob)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), cronjob)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil, nil for nil store")
 	}
 }
 
 func TestCronJobPluginName(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	if p.Name() != "cronjobs" {
 		t.Fatalf("expected 'cronjobs', got '%s'", p.Name())
 	}

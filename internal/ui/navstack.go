@@ -10,6 +10,7 @@ import (
 type NavSnapshot struct {
 	Plugin           plugin.ResourcePlugin
 	Namespace        string
+	Context          string // kube-context the pane was bound to at push time
 	Objects          []*unstructured.Unstructured
 	Cursor           int
 	SortState        SortState

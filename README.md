@@ -47,6 +47,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Fuzzy resource picker (`:`) and namespace picker (`Ctrl+n`)
 - Regex search (`/`) and filter (`Ctrl+/`) in both list and detail views
 - Column sorting by name, namespace, age, status, or kind
+- Multi-cluster context switching: global (`gx`) or per-pane (`gX`) with side-by-side live panes on different clusters
 - Fully customizable keybindings via YAML
 
 **Mouse (optional)**
@@ -132,6 +133,12 @@ debug:
 logs:
   buffer_size: 10000       # max lines to buffer (default)
 
+# Extra directories to scan for kubeconfig files (multi-cluster context switching)
+contexts:
+  directories:
+    - ~/.kube/configs       # recursively scanned for kubeconfig files
+    - ~/work/clusters       # contexts found here become switchable
+
 # API timeout for async operations (describe, helm, log stream)
 api:
   timeout_seconds: 5       # default
@@ -147,6 +154,8 @@ When `mouse.enabled` is `false` or unset, aku does not process mouse events and 
 When mouse support is enabled, aku captures mouse events for click focus, wheel scrolling, and double-click drill-down. Two clicks on the same row within 500 ms (inclusive) are treated as Enter. When no overlay is open, scrolling the wheel over any pane moves that pane's cursor without changing focus. When an overlay is open, the wheel scrolls the overlay's list instead.
 
 To copy text while mouse support is enabled, hold Option (iTerm2, macOS Terminal) or Shift (most Linux terminals) while dragging to bypass aku and use the terminal's native selection.
+
+`contexts.directories` lists extra directories aku scans recursively (in addition to the active `$KUBECONFIG`/`~/.kube/config`) for kubeconfig files. Every context across those files becomes switchable; files that aren't valid kubeconfigs or contain zero contexts are skipped. aku keeps one **global** context (the app's baseline cluster) and new panes inherit the focused pane's context (which is the global context unless you are focused on a pinned pane). `gx` opens a fuzzy picker to switch the global context, retargeting every pane still following global; it connects synchronously (the switch completes once the cluster is reachable). `gX` pins the focused pane to a different context so it ignores future global switches; it connects asynchronously — the status bar briefly shows a "connecting…" message and the pane then populates once the cluster is reachable. Any pane whose context differs from the global context shows that context name in a footer at the bottom of the pane. On switch, a pane lands on the chosen context's default namespace (the kubeconfig `namespace:` field, else `default`); if the pane's current resource type doesn't exist on the new cluster it shows an empty list and a short message in the status bar (there is no inline annotation in the list). That missing-resource check requires the cluster's API discovery to have been populated; until then the pane simply shows an empty list. Different panes can run live on different clusters at the same time, each with its own watches.
 
 ### keymap.yaml
 
@@ -208,6 +217,8 @@ syntax:
 | `%` | Toggle layout orientation |
 | `Ctrl+n` | Namespace picker |
 | `:` | Resource picker |
+| `gx` | Switch global context |
+| `gX` | Pin focused pane to a context |
 | `?` | Help overlay |
 | `y` | YAML view (resets values variant to manifest for helm releases) |
 | `d` | Describe view |

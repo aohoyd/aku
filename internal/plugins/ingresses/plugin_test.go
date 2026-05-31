@@ -9,7 +9,7 @@ import (
 )
 
 func TestIngressPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 6 {
 		t.Fatalf("expected 6 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestIngressPluginColumns(t *testing.T) {
 }
 
 func TestIngressPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeIngress("my-ingress", "nginx", []string{"foo.example.com", "bar.example.com"}, true)
 	row := p.Row(obj)
 
@@ -39,7 +39,7 @@ func TestIngressPluginRow(t *testing.T) {
 }
 
 func TestIngressPluginRowNoTLS(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeIngress("simple-ingress", "nginx", []string{"example.com"}, false)
 	row := p.Row(obj)
 
@@ -49,7 +49,7 @@ func TestIngressPluginRowNoTLS(t *testing.T) {
 }
 
 func TestIngressPluginRowNoClass(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "networking.k8s.io/v1",
@@ -73,7 +73,7 @@ func TestIngressPluginRowNoClass(t *testing.T) {
 }
 
 func TestIngressPluginDescribe(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "networking.k8s.io/v1",

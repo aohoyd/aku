@@ -6,6 +6,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/plugins/containers"
 	"github.com/charmbracelet/x/ansi"
 	corev1 "k8s.io/api/core/v1"
@@ -14,7 +15,7 @@ import (
 )
 
 func TestPluginMetadata(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	if p.Name() != "pods" {
 		t.Fatalf("expected 'pods', got '%s'", p.Name())
 	}
@@ -27,7 +28,7 @@ func TestPluginMetadata(t *testing.T) {
 }
 
 func TestPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 6 {
 		t.Fatalf("expected 6 columns, got %d", len(cols))
@@ -44,7 +45,7 @@ func TestPluginColumns(t *testing.T) {
 }
 
 func TestPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{
@@ -88,7 +89,7 @@ func TestPluginRow(t *testing.T) {
 }
 
 func TestPluginYAML(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "v1",
@@ -106,7 +107,7 @@ func TestPluginYAML(t *testing.T) {
 }
 
 func TestPluginCrashLoopBackOff(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"status": map[string]any{
@@ -140,7 +141,7 @@ func TestPluginCrashLoopBackOff(t *testing.T) {
 }
 
 func TestPluginSortValueStatus(t *testing.T) {
-	p := New(nil, nil).(*Plugin)
+	p := New().(*Plugin)
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"status": map[string]any{
@@ -155,7 +156,7 @@ func TestPluginSortValueStatus(t *testing.T) {
 }
 
 func TestPluginSortValueFallback(t *testing.T) {
-	p := New(nil, nil).(*Plugin)
+	p := New().(*Plugin)
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{},
 	}
@@ -172,7 +173,7 @@ func TestPluginSortValueFallback(t *testing.T) {
 }
 
 func TestPluginRowMissingPodIP(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{
@@ -197,7 +198,7 @@ func TestPluginRowMissingPodIP(t *testing.T) {
 }
 
 func TestPluginSortValueIP(t *testing.T) {
-	p := New(nil, nil).(*Plugin)
+	p := New().(*Plugin)
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"status": map[string]any{
@@ -212,7 +213,7 @@ func TestPluginSortValueIP(t *testing.T) {
 }
 
 func TestPluginDescribeDocument(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{
@@ -413,7 +414,7 @@ func TestPluginDescribeDocument(t *testing.T) {
 }
 
 func TestPluginDescribeUncovered(t *testing.T) {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	cmGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
 	secGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
 
@@ -430,7 +431,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 		},
 	})
 
-	p := New(nil, store)
+	p := New()
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -471,7 +472,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 		t.Fatal("Plugin should implement Uncoverable")
 	}
 
-	c, err := unc.DescribeUncovered(t.Context(), obj)
+	c, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(store), obj)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -503,7 +504,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 }
 
 func TestPluginImplementsDrillDowner(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	_, ok := p.(plugin.DrillDowner)
 	if !ok {
 		t.Fatal("Plugin should implement DrillDowner")
@@ -512,8 +513,8 @@ func TestPluginImplementsDrillDowner(t *testing.T) {
 
 func TestPluginDrillDown(t *testing.T) {
 	plugin.Reset()
-	plugin.Register(containers.New(nil, nil))
-	p := New(nil, nil)
+	plugin.Register(containers.New())
+	p := New()
 	drillable := p.(plugin.DrillDowner)
 	pod := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -532,7 +533,7 @@ func TestPluginDrillDown(t *testing.T) {
 			},
 		},
 	}
-	childPlugin, children := drillable.DrillDown(pod)
+	childPlugin, children := drillable.DrillDown(plugintest.NewFakeCluster(nil), pod)
 	if childPlugin == nil {
 		t.Fatal("DrillDown should return a child plugin")
 	}
@@ -545,7 +546,7 @@ func TestPluginDrillDown(t *testing.T) {
 }
 
 func TestDescribeShowsContainerConfigError(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{

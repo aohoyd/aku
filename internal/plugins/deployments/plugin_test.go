@@ -7,6 +7,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/render"
 	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,7 +35,7 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 }
 
 func TestPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 5 {
 		t.Fatalf("expected 5 columns, got %d", len(cols))
@@ -42,7 +43,7 @@ func TestPluginColumns(t *testing.T) {
 }
 
 func TestPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeDeployment("nginx", 3, 3, 3)
 	row := p.Row(obj)
 	if row[0] != "nginx" {
@@ -51,7 +52,7 @@ func TestPluginRow(t *testing.T) {
 }
 
 func TestPluginRowPartial(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeDeployment("web", 3, 2, 1)
 	row := p.Row(obj)
 	if row[0] != "web" {
@@ -63,7 +64,7 @@ func TestPluginRowPartial(t *testing.T) {
 }
 
 func TestPluginName(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	if p.Name() != "deployments" {
 		t.Fatalf("expected 'deployments', got '%s'", p.Name())
 	}
@@ -73,7 +74,7 @@ func TestPluginName(t *testing.T) {
 }
 
 func TestPluginDescribeDocument(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{
@@ -156,7 +157,7 @@ func TestPluginDescribeDocument(t *testing.T) {
 }
 
 func TestPluginDescribeUncovered(t *testing.T) {
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 	cmGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
 	secGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
 
@@ -173,7 +174,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 		},
 	})
 
-	p := New(nil, store)
+	p := New()
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -217,7 +218,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 		t.Fatal("Plugin should implement Uncoverable")
 	}
 
-	c, err := unc.DescribeUncovered(t.Context(), obj)
+	c, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(store), obj)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestPluginDescribeUncovered(t *testing.T) {
 func TestPluginDescribeUncoveredNilStore(t *testing.T) {
 	// With a nil store, DescribeUncovered must still succeed and return the
 	// same output as Describe (falling back to the unresolved env refs).
-	p := &Plugin{store: nil}
+	p := &Plugin{}
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{"name": "x", "namespace": "default"},
@@ -255,14 +256,14 @@ func TestPluginDescribeUncoveredNilStore(t *testing.T) {
 		},
 	}
 	unc := plugin.ResourcePlugin(p).(plugin.Uncoverable)
-	if _, err := unc.DescribeUncovered(t.Context(), obj); err != nil {
+	if _, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(nil), obj); err != nil {
 		t.Fatalf("unexpected error with nil store: %v", err)
 	}
 }
 
 func TestDeploymentDrillDown(t *testing.T) {
 	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
-	store := k8s.NewStore(nil, nil)
+	store := k8s.NewStore(nil, "", nil)
 
 	plugin.Reset()
 	mockRS := &mockPlugin{name: "replicasets"}
@@ -283,14 +284,14 @@ func TestDeploymentDrillDown(t *testing.T) {
 	store.CacheUpsert(rsGVR, "default", rs1)
 	store.CacheUpsert(rsGVR, "default", rs2)
 
-	p := &Plugin{store: store}
+	p := &Plugin{}
 	deploy := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{
 			"name": "nginx", "namespace": "default", "uid": "deploy-uid-1",
 		},
 	}}
 
-	childPlugin, children := p.DrillDown(deploy)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(store), deploy)
 	if childPlugin == nil {
 		t.Fatal("expected child plugin, got nil")
 	}
@@ -303,13 +304,61 @@ func TestDeploymentDrillDown(t *testing.T) {
 }
 
 func TestDeploymentDrillDownNilStore(t *testing.T) {
-	p := &Plugin{store: nil}
+	p := &Plugin{}
 	deploy := &unstructured.Unstructured{Object: map[string]any{
 		"metadata": map[string]any{"name": "nginx", "namespace": "default", "uid": "deploy-uid-1"},
 	}}
-	childPlugin, children := p.DrillDown(deploy)
+	childPlugin, children := p.DrillDown(plugintest.NewFakeCluster(nil), deploy)
 	if childPlugin != nil || children != nil {
 		t.Fatal("expected nil, nil for nil store")
+	}
+}
+
+// TestDeploymentDrillDownUsesInjectedCluster proves the multi-cluster guarantee:
+// one plugin instance, called with two different plugin.Cluster values, reads the
+// children from whichever cluster's store was injected at call time — never a
+// store baked in at construction.
+func TestDeploymentDrillDownUsesInjectedCluster(t *testing.T) {
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+
+	plugin.Reset()
+	plugin.Register(&mockPlugin{name: "replicasets"})
+
+	// Cluster A: one replicaset owned by the deployment.
+	storeA := k8s.NewStore(nil, "ctx-a", nil)
+	storeA.CacheUpsert(rsGVR, "default", &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name": "rs-a", "namespace": "default",
+			"ownerReferences": []any{map[string]any{"uid": "deploy-uid-1"}},
+		},
+	}})
+
+	// Cluster B: two replicasets owned by the same-UID deployment.
+	storeB := k8s.NewStore(nil, "ctx-b", nil)
+	storeB.CacheUpsert(rsGVR, "default", &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name": "rs-b1", "namespace": "default",
+			"ownerReferences": []any{map[string]any{"uid": "deploy-uid-1"}},
+		},
+	}})
+	storeB.CacheUpsert(rsGVR, "default", &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name": "rs-b2", "namespace": "default",
+			"ownerReferences": []any{map[string]any{"uid": "deploy-uid-1"}},
+		},
+	}})
+
+	// SAME plugin instance for both calls.
+	p := &Plugin{}
+	deploy := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "nginx", "namespace": "default", "uid": "deploy-uid-1"},
+	}}
+
+	if _, children := p.DrillDown(plugintest.NewFakeCluster(storeA), deploy); len(children) != 1 {
+		t.Fatalf("cluster A: expected 1 child from injected store, got %d", len(children))
+	}
+	if _, children := p.DrillDown(plugintest.NewFakeCluster(storeB), deploy); len(children) != 2 {
+		t.Fatalf("cluster B: expected 2 children from injected store, got %d", len(children))
 	}
 }
 

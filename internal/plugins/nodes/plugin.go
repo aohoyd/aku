@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
@@ -19,13 +18,11 @@ import (
 var gvr = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}
 
 // Plugin implements plugin.ResourcePlugin and plugin.DrillDowner for Kubernetes Nodes.
-type Plugin struct {
-	store *k8s.Store
-}
+type Plugin struct{}
 
 // New creates a new Nodes plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{store: store}
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "nodes" }
@@ -151,16 +148,17 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 }
 
 // DrillDown implements plugin.DrillDowner.
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
-	if p.store == nil {
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return nil, nil
 	}
 	pp, ok := plugin.ByName("pods")
 	if !ok {
 		return nil, nil
 	}
-	p.store.Subscribe(workload.PodsGVR, "") // all-namespaces
-	pods := workload.FindPodsByNodeName(p.store, obj.GetName())
+	store.Subscribe(workload.PodsGVR, "") // all-namespaces
+	pods := workload.FindPodsByNodeName(store, obj.GetName())
 	return pp, pods
 }
 

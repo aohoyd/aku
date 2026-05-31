@@ -1749,7 +1749,7 @@ func TestLogView_SearchWithFilterUsesCachedStrippedLines(t *testing.T) {
 func TestLogView_BinarySearchMatchWindow_NoMatchesInWindow(t *testing.T) {
 	// All matches are outside the visible window.
 	lv := NewLogView(80, 7, 100, "15m", 900) // viewport height = 5
-	lv.ToggleSyntax()                         // disable syntax highlighting for predictable text
+	lv.ToggleSyntax()                        // disable syntax highlighting for predictable text
 
 	// Add 20 lines; matches on lines 0, 1, 2 only.
 	for i := range 20 {
@@ -2058,7 +2058,7 @@ func TestLogView_WrapContinuationIndicator(t *testing.T) {
 	// continuation rows in logVP.lines contain the "↪" indicator
 	// while the first row does not. Also verify actual row widths.
 	const vpWidth = 20
-	contWidth := vpWidth - wrapIndicatorWidth // 18
+	contWidth := vpWidth - wrapIndicatorWidth        // 18
 	lv := NewLogView(vpWidth+2, 12, 100, "15m", 900) // inner: 20 wide, 10 tall
 	lv.softWrap = true
 	lv.autoscroll = true
@@ -2120,8 +2120,8 @@ func TestComputeLineMatchPositions_MatchesJoinAllApproach(t *testing.T) {
 	// identical match positions to the old join-all approach (join lines,
 	// run FindAllStringIndex, call computeMatchPositions).
 	tests := []struct {
-		name  string
-		lines []string
+		name    string
+		lines   []string
 		pattern string
 	}{
 		{
@@ -2775,9 +2775,9 @@ func TestLogView_ScrollEnd_ScrollsToLongestLine(t *testing.T) {
 	lv := NewLogView(22, 6, 100, "15m", 900) // vpWidth = 20
 	lv.ToggleSyntax()
 	// Append lines of varying widths.
-	lv.AppendLine("short")                                       // width 5
-	lv.AppendLine(strings.Repeat("a", 60))                       // width 60
-	lv.AppendLine(strings.Repeat("b", 40))                       // width 40
+	lv.AppendLine("short")                 // width 5
+	lv.AppendLine(strings.Repeat("a", 60)) // width 60
+	lv.AppendLine(strings.Repeat("b", 40)) // width 40
 
 	lv.ScrollEnd()
 	// maxWidth = 60, vpWidth = 20, expected xOffset = 60 - 20 = 40
@@ -2801,7 +2801,7 @@ func TestLogView_ScrollEnd_NoOpInWrapMode(t *testing.T) {
 func TestLogView_ScrollEnd_AllLinesFitInViewport(t *testing.T) {
 	lv := NewLogView(82, 6, 100, "15m", 900) // vpWidth = 80
 	lv.ToggleSyntax()
-	lv.AppendLine("short")     // width 5
+	lv.AppendLine("short")      // width 5
 	lv.AppendLine("also short") // width 10
 
 	lv.ScrollEnd()

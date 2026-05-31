@@ -3,10 +3,44 @@ package plugin
 import (
 	"context"
 
+	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/render"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+// Cluster is the per-call context a plugin needs to serve describe and
+// drill-down requests against a specific cluster's data. The app layer supplies
+// it from the focused pane's cluster at call time, so a single plugin instance
+// (registered once) can serve any cluster.
+//
+// The interface is intentionally narrow and depends only on *k8s.Store and
+// *k8s.Discovery, which this package already imports. This avoids importing the
+// internal/cluster package here (which would create an import cycle, since
+// cluster imports k8s and app imports both). *cluster.Cluster satisfies this
+// interface structurally because it exposes Store() and Discovery() methods.
+type Cluster interface {
+	Store() *k8s.Store
+	Discovery() *k8s.Discovery
+}
+
+// StoreOf returns cl.Store(), tolerating a nil Cluster (e.g. a call site that
+// has no cluster wired yet) so callers can guard with a single nil check.
+func StoreOf(cl Cluster) *k8s.Store {
+	if cl == nil {
+		return nil
+	}
+	return cl.Store()
+}
+
+// DiscoveryOf returns cl.Discovery(), tolerating a nil Cluster the same way as
+// StoreOf.
+func DiscoveryOf(cl Cluster) *k8s.Discovery {
+	if cl == nil {
+		return nil
+	}
+	return cl.Discovery()
+}
 
 // MarshalYAML serialises an Unstructured object to YAML, stripping noisy
 // fields like metadata.managedFields to match kubectl's default behaviour.
@@ -57,13 +91,20 @@ type DefaultSorter interface {
 // Uncoverable is an optional interface plugins may implement to provide a
 // describe view with resolved/uncovered environment variable values.
 // The app layer probes for this interface via type assertion.
+//
+// The Cluster argument supplies the store/discovery for the cluster the request
+// targets (the focused pane's cluster), so the plugin reads live objects from
+// the correct cluster rather than a store baked in at construction time.
 type Uncoverable interface {
-	DescribeUncovered(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error)
+	DescribeUncovered(ctx context.Context, cl Cluster, obj *unstructured.Unstructured) (render.Content, error)
 }
 
 // DrillDowner is an optional interface for plugins that show child resources on Enter.
+//
+// The Cluster argument supplies the store/discovery for the cluster the request
+// targets (the focused pane's cluster).
 type DrillDowner interface {
-	DrillDown(obj *unstructured.Unstructured) (ResourcePlugin, []*unstructured.Unstructured)
+	DrillDown(cl Cluster, obj *unstructured.Unstructured) (ResourcePlugin, []*unstructured.Unstructured)
 }
 
 // GoToer is an optional interface for plugins that navigate to a different resource view on Enter.

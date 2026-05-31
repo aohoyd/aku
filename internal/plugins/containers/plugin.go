@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	corev1 "k8s.io/api/core/v1"
@@ -20,13 +19,11 @@ var (
 )
 
 // Plugin implements plugin.ResourcePlugin for container drill-down views.
-type Plugin struct {
-	store *k8s.Store
-}
+type Plugin struct{}
 
 // New creates a new container plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{store: store}
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "containers" }
@@ -73,18 +70,19 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 }
 
 // DescribeUncovered implements plugin.Uncoverable.
-func (p *Plugin) DescribeUncovered(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
+func (p *Plugin) DescribeUncovered(ctx context.Context, cl plugin.Cluster, obj *unstructured.Unstructured) (render.Content, error) {
 	pod, err := p.extractPod(obj)
 	if err != nil {
 		return p.renderDescribe(obj, nil, nil, nil)
 	}
-	if p.store == nil {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return p.renderDescribe(obj, pod, nil, nil)
 	}
 	ns := obj.GetNamespace()
-	p.store.Subscribe(configMapsGVR, ns)
-	p.store.Subscribe(secretsGVR, ns)
-	return p.renderDescribe(obj, pod, p.store.List(configMapsGVR, ns), p.store.List(secretsGVR, ns))
+	store.Subscribe(configMapsGVR, ns)
+	store.Subscribe(secretsGVR, ns)
+	return p.renderDescribe(obj, pod, store.List(configMapsGVR, ns), store.List(secretsGVR, ns))
 }
 
 // DefaultSort implements plugin.DefaultSorter.

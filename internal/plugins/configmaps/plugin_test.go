@@ -9,7 +9,7 @@ import (
 )
 
 func TestConfigMapPluginColumns(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	cols := p.Columns()
 	if len(cols) != 3 {
 		t.Fatalf("expected 3 columns, got %d", len(cols))
@@ -17,7 +17,7 @@ func TestConfigMapPluginColumns(t *testing.T) {
 }
 
 func TestConfigMapPluginRow(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := makeConfigMap("my-cm", map[string]any{"key1": "val1", "key2": "val2"})
 	row := p.Row(obj)
 	if row[0] != "my-cm" {
@@ -29,14 +29,14 @@ func TestConfigMapPluginRow(t *testing.T) {
 }
 
 func TestConfigMapPluginName(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	if p.Name() != "configmaps" {
 		t.Fatalf("expected 'configmaps', got '%s'", p.Name())
 	}
 }
 
 func TestConfigMapPluginDescribeDocument(t *testing.T) {
-	p := New(nil, nil)
+	p := New()
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"metadata": map[string]any{

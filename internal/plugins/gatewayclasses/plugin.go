@@ -3,7 +3,6 @@ package gatewayclasses
 import (
 	"context"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
@@ -14,13 +13,11 @@ import (
 var gvr = schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gatewayclasses"}
 
 // Plugin implements plugin.ResourcePlugin and plugin.DrillDowner for Kubernetes GatewayClasses.
-type Plugin struct {
-	store *k8s.Store
-}
+type Plugin struct{}
 
 // New creates a new GatewayClasses plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{store: store}
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "gatewayclasses" }
@@ -111,16 +108,17 @@ func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (re
 }
 
 // DrillDown implements plugin.DrillDowner.
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
-	if p.store == nil {
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return nil, nil
 	}
 	gw, ok := plugin.ByName("gateways")
 	if !ok {
 		return nil, nil
 	}
-	p.store.Subscribe(workload.GatewaysGVR, "")
-	gateways := workload.FindGatewaysByClassName(p.store, "", obj.GetName())
+	store.Subscribe(workload.GatewaysGVR, "")
+	gateways := workload.FindGatewaysByClassName(store, "", obj.GetName())
 	return gw, gateways
 }
 

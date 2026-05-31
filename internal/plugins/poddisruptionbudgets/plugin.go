@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	policyv1 "k8s.io/api/policy/v1"
@@ -19,7 +18,7 @@ var gvr = schema.GroupVersionResource{Group: "policy", Version: "v1", Resource: 
 type Plugin struct{}
 
 // New creates a new PodDisruptionBudget plugin.
-func New(_ *k8s.Client, _ *k8s.Store) plugin.ResourcePlugin {
+func New() plugin.ResourcePlugin {
 	return &Plugin{}
 }
 

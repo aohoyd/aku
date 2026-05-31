@@ -30,11 +30,26 @@ var manifestGVR = schema.GroupVersionResource{
 
 type helmmanifest struct {
 	store            *k8s.Store
+	discovery        *k8s.Discovery
 	helmClient       helm.Client
 	releaseName      string
 	releaseNamespace string
 	mu               sync.RWMutex
 	children         []*unstructured.Unstructured
+}
+
+// resolveGVRWith returns the discovery resolver for the supplied cluster,
+// falling back to the discovery captured when this manifest was created (e.g.
+// for Refresh paths or tests that have no live cluster). Returns nil when no
+// discovery is available at all.
+func (p *helmmanifest) resolveGVRWith(disc *k8s.Discovery) plugin.GVRResolver {
+	if disc == nil {
+		disc = p.discovery
+	}
+	if disc == nil {
+		return nil
+	}
+	return disc.ResolveGVR
 }
 
 func (p *helmmanifest) Name() string                     { return "helmmanifest" }
@@ -62,16 +77,16 @@ func (p *helmmanifest) Refresh(_ string) {
 	p.mu.Unlock()
 }
 
-func isClusterScoped(apiVersion, kind string) bool {
-	if p, ok := plugin.ByKind(apiVersion, kind); ok {
-		return p.IsClusterScoped()
+func (p *helmmanifest) isClusterScoped(disc *k8s.Discovery, apiVersion, kind string) bool {
+	if cp, ok := plugin.ByKind(p.resolveGVRWith(disc), apiVersion, kind); ok {
+		return cp.IsClusterScoped()
 	}
 	return false
 }
 
-func (p *helmmanifest) effectiveNamespace(obj *unstructured.Unstructured) string {
+func (p *helmmanifest) effectiveNamespace(disc *k8s.Discovery, obj *unstructured.Unstructured) string {
 	ns := obj.GetNamespace()
-	if ns == "" && !isClusterScoped(obj.GetAPIVersion(), obj.GetKind()) {
+	if ns == "" && !p.isClusterScoped(disc, obj.GetAPIVersion(), obj.GetKind()) {
 		return p.releaseNamespace
 	}
 	return ns
@@ -86,7 +101,8 @@ func (p *helmmanifest) Columns() []plugin.Column {
 }
 
 func (p *helmmanifest) Row(obj *unstructured.Unstructured) []string {
-	return []string{obj.GetKind(), obj.GetName(), p.effectiveNamespace(obj)}
+	// Row has no per-call cluster; use the discovery captured at drill-down time.
+	return []string{obj.GetKind(), obj.GetName(), p.effectiveNamespace(p.discovery, obj)}
 }
 
 func (p *helmmanifest) YAML(obj *unstructured.Unstructured) (render.Content, error) {
@@ -112,15 +128,27 @@ func (p *helmmanifest) DefaultSort() plugin.SortPreference {
 	return plugin.SortPreference{Column: "KIND", Ascending: true}
 }
 
-func (p *helmmanifest) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
-	if p.store == nil {
+func (p *helmmanifest) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
+		store = p.store
+	}
+	if store == nil {
+		return nil, nil
+	}
+
+	disc := plugin.DiscoveryOf(cl)
+	if disc == nil {
+		disc = p.discovery
+	}
+	if disc == nil {
 		return nil, nil
 	}
 
 	apiVersion := obj.GetAPIVersion()
 	kind := obj.GetKind()
 
-	gvr, ok := k8s.ResolveGVR(apiVersion, kind)
+	gvr, ok := disc.ResolveGVR(apiVersion, kind)
 	if !ok {
 		return nil, nil
 	}
@@ -131,7 +159,7 @@ func (p *helmmanifest) DrillDown(obj *unstructured.Unstructured) (plugin.Resourc
 	p.mu.RLock()
 	for _, c := range p.children {
 		if c.GetAPIVersion() == apiVersion && c.GetKind() == kind {
-			ns := p.effectiveNamespace(c)
+			ns := p.effectiveNamespace(disc, c)
 			wanted[nk{c.GetName(), ns}] = struct{}{}
 			namespaces[ns] = struct{}{}
 		}
@@ -140,22 +168,25 @@ func (p *helmmanifest) DrillDown(obj *unstructured.Unstructured) (plugin.Resourc
 
 	var matched []*unstructured.Unstructured
 	for ns := range namespaces {
-		p.store.Subscribe(gvr, ns)
-		for _, live := range p.store.List(gvr, ns) {
+		store.Subscribe(gvr, ns)
+		for _, live := range store.List(gvr, ns) {
 			if _, ok := wanted[nk{live.GetName(), live.GetNamespace()}]; ok {
 				matched = append(matched, live)
 			}
 		}
 	}
 
-	if childPlugin, ok := plugin.ByKind(apiVersion, kind); ok {
+	if childPlugin, ok := plugin.ByKind(p.resolveGVRWith(disc), apiVersion, kind); ok {
 		return childPlugin, matched
 	}
 	return generic.New(gvr), matched
 }
 
 func (p *helmmanifest) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
-	if delegate, ok := plugin.ByKind(obj.GetAPIVersion(), obj.GetKind()); ok {
+	// Describe is the base interface and carries no per-call cluster; use the
+	// discovery captured at drill-down time.
+	disc := p.discovery
+	if delegate, ok := plugin.ByKind(p.resolveGVRWith(disc), obj.GetAPIVersion(), obj.GetKind()); ok {
 		content, err := delegate.Describe(ctx, obj)
 		if err == nil {
 			return content, nil
@@ -165,15 +196,19 @@ func (p *helmmanifest) Describe(ctx context.Context, obj *unstructured.Unstructu
 	b := render.NewBuilder()
 	b.KV(render.LEVEL_0, "Kind", obj.GetKind())
 	b.KV(render.LEVEL_0, "Name", obj.GetName())
-	b.KV(render.LEVEL_0, "Namespace", p.effectiveNamespace(obj))
+	b.KV(render.LEVEL_0, "Namespace", p.effectiveNamespace(disc, obj))
 	b.KV(render.LEVEL_0, "API Version", obj.GetAPIVersion())
 	return b.Build(), nil
 }
 
-func (p *helmmanifest) DescribeUncovered(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {
-	if delegate, ok := plugin.ByKind(obj.GetAPIVersion(), obj.GetKind()); ok {
+func (p *helmmanifest) DescribeUncovered(ctx context.Context, cl plugin.Cluster, obj *unstructured.Unstructured) (render.Content, error) {
+	disc := plugin.DiscoveryOf(cl)
+	if disc == nil {
+		disc = p.discovery
+	}
+	if delegate, ok := plugin.ByKind(p.resolveGVRWith(disc), obj.GetAPIVersion(), obj.GetKind()); ok {
 		if unc, ok := delegate.(plugin.Uncoverable); ok {
-			content, err := unc.DescribeUncovered(ctx, obj)
+			content, err := unc.DescribeUncovered(ctx, cl, obj)
 			if err == nil {
 				return content, nil
 			}

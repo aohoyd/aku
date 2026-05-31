@@ -4,7 +4,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
@@ -99,10 +98,20 @@ func ByGVR(gvr schema.GroupVersionResource) (ResourcePlugin, bool) {
 	return p, ok
 }
 
-// ByKind looks up a plugin by Kubernetes apiVersion and kind,
-// using the discovery index to resolve the GVR first.
-func ByKind(apiVersion, kind string) (ResourcePlugin, bool) {
-	gvr, ok := k8s.ResolveGVR(apiVersion, kind)
+// GVRResolver resolves an apiVersion and kind to a GroupVersionResource using a
+// cluster's discovery index. It mirrors (*k8s.Discovery).ResolveGVR without
+// coupling this package to internal/k8s.
+type GVRResolver func(apiVersion, kind string) (schema.GroupVersionResource, bool)
+
+// ByKind looks up a plugin by Kubernetes apiVersion and kind, using the
+// provided resolver to resolve the GVR first. The resolver is typically
+// (*k8s.Discovery).ResolveGVR for the relevant cluster. A nil resolver always
+// yields no match.
+func ByKind(resolve GVRResolver, apiVersion, kind string) (ResourcePlugin, bool) {
+	if resolve == nil {
+		return nil, false
+	}
+	gvr, ok := resolve(apiVersion, kind)
 	if !ok {
 		return nil, false
 	}

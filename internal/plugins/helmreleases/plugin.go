@@ -18,16 +18,19 @@ var syntheticGVR = schema.GroupVersionResource{
 }
 
 type Plugin struct {
-	store      *k8s.Store
 	helmClient helm.Client
 	mu         sync.RWMutex
 	objects    []*unstructured.Unstructured
 }
 
-func New(client *k8s.Client, store *k8s.Store, resolver helm.ChartResolver) *Plugin {
-	p := &Plugin{
-		store: store,
-	}
+// New constructs the helmreleases plugin. Store and discovery are not baked in:
+// drill-down receives them at call time via plugin.Cluster so the same instance
+// can serve any cluster. The Helm client is still built from the (single,
+// global) client here because it is exercised through the app layer
+// (values/rollback/uninstall via App.helmClientFor), not inside the plugin's
+// describe/drill-down paths. Making the Helm client per-cluster is a later task.
+func New(client *k8s.Client, resolver helm.ChartResolver) *Plugin {
+	p := &Plugin{}
 	if client != nil {
 		p.helmClient = helm.NewClient(client.Config, resolver)
 	}
@@ -73,19 +76,34 @@ func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 	return render.YAML(map[string]any{"manifest": manifest})
 }
 
+// Values / ValuesAll fetch using the plugin's baked (global) helm client. They
+// are kept for tests and any caller that has no per-cluster client; app code
+// that knows the pane's cluster should use ValuesWith / ValuesAllWith so a
+// pinned pane reads the RIGHT cluster's release rather than the global one.
 func (p *Plugin) Values(obj *unstructured.Unstructured) (render.Content, error) {
-	return p.fetchValues(obj, false)
+	return fetchValues(p.helmClient, obj, false)
 }
 
 func (p *Plugin) ValuesAll(obj *unstructured.Unstructured) (render.Content, error) {
-	return p.fetchValues(obj, true)
+	return fetchValues(p.helmClient, obj, true)
 }
 
-func (p *Plugin) fetchValues(obj *unstructured.Unstructured, all bool) (render.Content, error) {
-	if p.helmClient == nil {
+// ValuesWith / ValuesAllWith fetch using an explicitly supplied helm client.
+// The app passes the focused pane's cluster helm client (helmClientFor) so values
+// are read from the pane's actual cluster, not the baked global one.
+func (p *Plugin) ValuesWith(hc helm.Client, obj *unstructured.Unstructured) (render.Content, error) {
+	return fetchValues(hc, obj, false)
+}
+
+func (p *Plugin) ValuesAllWith(hc helm.Client, obj *unstructured.Unstructured) (render.Content, error) {
+	return fetchValues(hc, obj, true)
+}
+
+func fetchValues(hc helm.Client, obj *unstructured.Unstructured, all bool) (render.Content, error) {
+	if hc == nil {
 		return render.Content{}, fmt.Errorf("helm client unavailable")
 	}
-	vals, err := p.helmClient.GetValues(obj.GetName(), obj.GetNamespace(), all)
+	vals, err := hc.GetValues(obj.GetName(), obj.GetNamespace(), all)
 	if err != nil {
 		return render.Content{}, err
 	}
@@ -116,14 +134,15 @@ func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (re
 	return b.Build(), nil
 }
 
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
 	manifest, _, _ := unstructured.NestedString(obj.Object, "_manifest")
 	if manifest == "" {
 		return nil, nil
 	}
 	children := ParseManifest(manifest)
 	return &helmmanifest{
-		store:            p.store,
+		store:            plugin.StoreOf(cl),
+		discovery:        plugin.DiscoveryOf(cl),
 		helmClient:       p.helmClient,
 		releaseName:      obj.GetName(),
 		releaseNamespace: obj.GetNamespace(),
@@ -167,8 +186,4 @@ func (p *Plugin) Refresh(namespace string) {
 	p.mu.Lock()
 	p.objects = objs
 	p.mu.Unlock()
-}
-
-func (p *Plugin) HelmClient() helm.Client {
-	return p.helmClient
 }

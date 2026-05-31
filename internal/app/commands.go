@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/aohoyd/aku/internal/cluster"
 	"github.com/aohoyd/aku/internal/config"
 	"github.com/aohoyd/aku/internal/helm"
 	"github.com/aohoyd/aku/internal/k8s"
@@ -128,7 +129,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		childPlugin, children := drillDowner.DrillDown(sel)
+		childPlugin, children := drillDowner.DrillDown(a.clusterFor(focused), sel)
 		if childPlugin == nil {
 			return a, nil
 		}
@@ -334,8 +335,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		// Pop drill-down before closing panel
 		if focused := a.layout.FocusedSplit(); focused != nil && focused.InDrillDown() {
 			focused.PopNav()
-			// Refresh with latest data from store
-			if a.store != nil {
+			// Refresh with latest data from the pane's cluster store
+			if store := a.storeFor(focused); store != nil {
 				if focused.InDrillDown() {
 					if sp, ok := focused.Plugin().(plugin.SelfPopulating); ok {
 						if r, ok := focused.Plugin().(plugin.Refreshable); ok {
@@ -347,7 +348,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 					}
 				} else if focused.Plugin().GVR().Group != "_ktui" {
 					// Back at root — load all objects from store
-					objs := a.store.List(focused.Plugin().GVR(), focused.EffectiveNamespace())
+					objs := store.List(focused.Plugin().GVR(), focused.EffectiveNamespace())
 					focused.SetObjects(objs)
 				}
 			}
@@ -399,12 +400,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if a.layout.SplitCount() > 1 {
-			closing := a.layout.FocusedSplit()
-			closingGVR := closing.Plugin().GVR()
-			closingNs := closing.EffectiveNamespace()
-			a.keyTrie.Reset()
-			a.layout.CloseCurrentSplit()
-			a.unsubscribeIfUnused(closingGVR, closingNs)
+			a = a.closeFocusedSplit()
 			a.statusBar.SetHints(a.currentHints())
 			return a, nil
 		}
@@ -425,12 +421,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if a.layout.SplitCount() > 1 {
-			closing := a.layout.FocusedSplit()
-			closingGVR := closing.Plugin().GVR()
-			closingNs := closing.EffectiveNamespace()
-			a.keyTrie.Reset()
-			a.layout.CloseCurrentSplit()
-			a.unsubscribeIfUnused(closingGVR, closingNs)
+			a = a.closeFocusedSplit()
 			a.statusBar.SetHints(a.currentHints())
 			return a, nil
 		}
@@ -457,8 +448,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 	case command == "namespace-picker":
 		a.activeOverlay = overlayNsPicker
 		a.nsPicker.Open()
-		if a.k8sClient != nil {
-			client := a.k8sClient
+		if client := a.clientForFocused(); client != nil {
 			timeout := a.config.APITimeout()
 			opCmd := a.statusBar.StartOperation()
 			return a, tea.Batch(opCmd, func() tea.Msg {
@@ -468,6 +458,22 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 				return msgs.NamespacesLoadedMsg{Namespaces: nsList, Err: err}
 			})
 		}
+		return a, nil
+
+	// Context picker (global scope: gx)
+	case command == "context-picker":
+		a.activeOverlay = overlayContextPicker
+		a.contextPicker.SetScope(true)
+		a.contextPicker.SetContexts(a.contextNames())
+		a.contextPicker.Open()
+		return a, nil
+
+	// Context picker (pane scope: gX)
+	case command == "pane-context-picker":
+		a.activeOverlay = overlayContextPicker
+		a.contextPicker.SetScope(false)
+		a.contextPicker.SetContexts(a.contextNames())
+		a.contextPicker.Open()
 		return a, nil
 
 	case command == "toggle-select":
@@ -547,7 +553,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if !ok {
 			return a, nil
 		}
-		if a.k8sClient == nil {
+		execClient := a.clientForFocused()
+		if execClient == nil {
 			cmd := a.statusBar.SetError("exec: no k8s client")
 			return a, cmd
 		}
@@ -557,7 +564,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		podName := resolvePodName(focused, selected)
 		containerName := resolveContainerName(focused, selected)
-		return a, k8s.ExecCmd(a.k8sClient, podName, containerName, ns, a.config.ExecCommand())
+		return a, k8s.ExecCmd(execClient, podName, containerName, ns, a.config.ExecCommand())
 
 	case command == "debug" || command == "debug-privileged":
 		return a.handleDebug(command == "debug-privileged")
@@ -599,7 +606,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if focused == nil {
 			return a, nil
 		}
-		if a.k8sClient == nil {
+		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
 			cmd := a.statusBar.SetError("rollout-restart: no k8s client")
 			return a, cmd
 		}
@@ -633,12 +640,14 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if !ok {
 			return a, nil
 		}
-		if a.k8sClient == nil {
+		editCl := a.clusterFor(focused)
+		if editCl == nil || !editCl.Connected() {
 			cmd := a.statusBar.SetError("edit: no k8s client")
 			return a, cmd
 		}
 		if focused.Plugin().Name() == "helmreleases" {
-			if a.helmClient == nil {
+			hc := a.helmClientFor(editCl)
+			if hc == nil {
 				cmd := a.statusBar.SetError("helm: no client")
 				return a, cmd
 			}
@@ -653,20 +662,20 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 				a.activeOverlay = overlayChartInput
 				return a, nil
 			}
-			return a, helm.EditValuesCmd(a.helmClient, name, ns)
+			return a, helm.EditValuesCmd(hc, name, ns)
 		}
 		if focused.Plugin().GVR().Group == "_ktui" {
 			return a, nil
 		}
 		p := focused.Plugin()
-		return a, k8s.EditCmd(a.k8sClient.Dynamic, p.GVR(), p.IsClusterScoped(), selected)
+		return a, k8s.EditCmd(editCl.Client().Dynamic, p.GVR(), p.IsClusterScoped(), selected)
 
 	case command == "set-image":
 		focused, selected, ok := a.focusedSelection()
 		if !ok {
 			return a, nil
 		}
-		if a.k8sClient == nil {
+		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
 			cmd := a.statusBar.SetError("set-image: no k8s client")
 			return a, cmd
 		}
@@ -703,7 +712,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if !ok {
 			return a, nil
 		}
-		if a.k8sClient == nil {
+		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
 			cmd := a.statusBar.SetError("scale: no k8s client")
 			return a, cmd
 		}
@@ -749,7 +758,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if selected == nil {
 			return a, nil
 		}
-		if a.helmClient == nil {
+		hc := a.helmClientFor(a.clusterFor(focused))
+		if hc == nil {
 			cmd := a.statusBar.SetError("helm: no client")
 			return a, cmd
 		}
@@ -758,7 +768,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		a.helmRollbackOverlay.OpenLoading(name, ns)
 		a.activeOverlay = overlayHelmRollback
 		opCmd := a.statusBar.StartOperation()
-		return a, tea.Batch(opCmd, fetchHelmHistoryCmd(a.helmClient, name, ns, a.config.APITimeout()))
+		return a, tea.Batch(opCmd, fetchHelmHistoryCmd(hc, name, ns, a.config.APITimeout()))
 
 	case command == "toggle-autoscroll":
 		if a.layout.IsLogMode() {
@@ -955,8 +965,8 @@ func (a *App) currentLogContext() (cluster, ns, pod, container string, lines []s
 		return "", "", "", "", nil, false
 	}
 	cluster = "unknown-cluster"
-	if a.k8sClient != nil && a.k8sClient.Context != "" {
-		cluster = a.k8sClient.Context
+	if cl := a.clusterForFocused(); cl != nil && cl.Context() != "" {
+		cluster = cl.Context()
 	}
 	return cluster, ns, pod, container, lines, true
 }
@@ -973,6 +983,53 @@ func (a App) closeRightPanel() App {
 	a.layout.HideRightPanel()
 	a = a.syncIndicators()
 	a.statusBar.SetHints(a.currentHints())
+	return a
+}
+
+// closeFocusedSplit removes the currently-focused split and releases the
+// resources it held. Callers must guarantee SplitCount() > 1 (the last split is
+// never closed).
+//
+// Refcount invariant enforced here: a split holds exactly one manager reference
+// iff it is PINNED to a NON-GLOBAL context (Task 9 takes that ref via Acquire on
+// pin; a pane following global holds no ref). So on close we Release(closingCtx)
+// only in that case, keeping Acquire/Release balanced with handlePaneContextSwitch.
+//
+// Order matters: the closing split's (gvr, ns) is unsubscribed on the CLOSING
+// split's OWN cluster store FIRST (resolved before removal — Release may tear the
+// cluster down and drop the store), then the split is removed from the layout (so
+// unsubscribeOnStoreIfUnused's "still in use?" scan no longer sees the closing
+// pane), then Release decrements the ref. If several panes share the same pinned
+// context, Release just decrements and the Manager tears down only at the last
+// one.
+func (a App) closeFocusedSplit() App {
+	closing := a.layout.FocusedSplit()
+	if closing == nil {
+		return a
+	}
+
+	closingCtx := closing.Context()
+	closingGVR := closing.Plugin().GVR()
+	closingNs := closing.EffectiveNamespace()
+
+	// Resolve the closing split's cluster store BEFORE removal/reconcile:
+	// SyncRefs can tear down a non-global cluster and drop its store, so we must
+	// grab it while the cluster is still live.
+	closingStore := a.storeFor(closing)
+
+	a.keyTrie.Reset()
+	a.layout.CloseCurrentSplit()
+
+	// Stop the closing split's informer for (gvr, ns) on its OWN cluster store
+	// when no remaining pane on that cluster still needs it. Done after removal so
+	// the "still in use?" scan does not count the just-closed pane.
+	a.unsubscribeOnStoreIfUnused(closingStore, closingCtx, closingGVR, closingNs)
+
+	// Reconcile manager refcounts against the panes that remain pinned; a
+	// non-global cluster no remaining pane references is torn down here. The
+	// global is never torn down.
+	a.mgr.SyncRefs(a.pinnedContexts())
+
 	return a
 }
 
@@ -1017,7 +1074,7 @@ func (a App) handleGotoPlugin(p plugin.ResourcePlugin, targetNs string) (tea.Mod
 	populateCmd := a.subscribeAndPopulate(focused, p, ns)
 
 	// Clean up old GVR subscription if unused
-	if a.store != nil && oldPlugin.GVR() != p.GVR() {
+	if a.storeFor(focused) != nil && oldPlugin.GVR() != p.GVR() {
 		a.unsubscribeIfUnused(oldPlugin.GVR(), oldNs)
 	}
 
@@ -1063,9 +1120,15 @@ func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 		a = a.syncIndicators()
 	}
 
+	// New panes inherit the currently-focused pane's context (the cluster the
+	// user is looking at). Resolve its default namespace from that cluster.
+	inheritCtx := a.mgr.GlobalContext()
+	if f := a.layout.FocusedSplit(); f != nil {
+		inheritCtx = f.Context()
+	}
 	ns := "default"
-	if a.k8sClient != nil {
-		ns = a.k8sClient.Namespace
+	if cl := a.clusterFor(a.layout.FocusedSplit()); cl != nil && cl.Client() != nil {
+		ns = cl.Client().Namespace
 	}
 	if prev := a.layout.FocusedSplit(); prev != nil {
 		if prev.Namespace() != "" {
@@ -1075,8 +1138,12 @@ func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 
 	a.keyTrie.Reset()
 	a.layout.AddSplit(p, ns)
+	// New splits inherit the global context (no footer), but keep footers in
+	// sync across all panes for consistency.
+	a.syncPaneFooters()
 	a.layout.FocusResources()
 	newSplit := a.layout.FocusedSplit()
+	newSplit.SetContext(inheritCtx)
 	populateCmd := a.subscribeAndPopulate(newSplit, p, newSplit.EffectiveNamespace())
 
 	var descCmd tea.Cmd
@@ -1185,7 +1252,7 @@ func (a App) handleViewHelmValues(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
 	// Match the pattern used by other helm actions (see `edit`,
 	// `helm-rollback`): surface an explicit status when no helm client is
 	// configured rather than silently falling through to the manifest path.
-	if a.helmClient == nil {
+	if a.helmClientForFocused() == nil {
 		cmd := a.statusBar.SetError("helm: no client")
 		return a, cmd
 	}
@@ -1232,17 +1299,19 @@ func (a App) handleResourcePickerCommand(input string) (tea.Model, tea.Cmd) {
 // or falls back to SelfPopulating for synthetic plugins.
 // For helm releases it returns a tea.Cmd to fetch data asynchronously.
 func (a App) subscribeAndPopulate(split *ui.ResourceList, p plugin.ResourcePlugin, ns string) tea.Cmd {
-	if a.store != nil && p.GVR().Group != "_ktui" {
-		objs := a.store.Subscribe(p.GVR(), ns)
+	cl := a.clusterFor(split)
+	store := plugin.StoreOf(cl)
+	if store != nil && p.GVR().Group != "_ktui" {
+		objs := store.Subscribe(p.GVR(), ns)
 		split.SetObjects(objs)
 		return nil
 	}
 	if sp, ok := p.(plugin.SelfPopulating); ok {
 		if _, ok := p.(plugin.Refreshable); ok {
-			if a.helmClient != nil {
+			if hc := a.helmClientFor(cl); hc != nil {
 				split.SetObjects(sp.Objects()) // show cached data immediately
 				opCmd := a.statusBar.StartOperation()
-				return tea.Batch(opCmd, fetchHelmReleasesCmd(a.helmClient, ns, a.config.APITimeout()))
+				return tea.Batch(opCmd, fetchHelmReleasesCmd(hc, ns, a.config.APITimeout()))
 			}
 		}
 		split.SetObjects(sp.Objects())
@@ -1254,10 +1323,12 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	wasLogMode := a.layout.IsLogMode()
 	wasRightVisible := a.layout.RightPanelVisible()
 
-	// Tear down all informers and clear store cache
-	if a.store != nil {
-		a.store.UnsubscribeAll()
-	}
+	// Tear down all informers and clear store cache across every live cluster.
+	a.mgr.ForEach(func(c *cluster.Cluster) {
+		if s := c.Store(); s != nil {
+			s.UnsubscribeAll()
+		}
+	})
 	a = a.stopLogStream()
 	a.layout.SetLogMode(false)
 
@@ -1329,9 +1400,407 @@ func (a App) unsubscribeIfUnused(gvr schema.GroupVersionResource, namespace stri
 			return // still needed by a parent view
 		}
 	}
-	if a.store != nil {
-		a.store.Unsubscribe(gvr, namespace)
+	// Unsubscribe on the focused split's cluster store (the GVR/ns being torn
+	// down belongs to the operation that triggered this, which runs on the
+	// focused pane's cluster). Through Task 6 there is a single cluster.
+	if store := a.storeForFocused(); store != nil {
+		store.Unsubscribe(gvr, namespace)
 	}
+}
+
+// contextNames returns the kube-context names known to the manager, mapped from
+// its ContextEntry list. ScanKubeconfigs already sorts and dedupes entries, so
+// the slice is returned in that order without further processing.
+func (a App) contextNames() []string {
+	entries := a.mgr.Entries()
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+// handleGlobalContextSwitch changes the app's baseline (global) cluster and
+// retargets every pane that is still following global (not pinned) onto the new
+// cluster. Pinned panes are left untouched.
+//
+// Connect strategy: synchronous, with a GetOrCreate-first guard. Manager.
+// SetGlobal sets the global pointer unconditionally (even for a degraded
+// cluster), so a naive SetGlobal-then-check would leave global pointing at a
+// broken cluster when the switch fails. Instead we GetOrCreate the target first
+// and only call SetGlobal once we know it connected — so a failed switch never
+// moves the global off the working cluster. (Per the plan, async connect via
+// ClusterReadyMsg is introduced for the per-pane path in Task 9; the global
+// switch stays synchronous here, matching how startup connects.)
+func (a App) handleGlobalContextSwitch(ctx string) (tea.Model, tea.Cmd) {
+	a.activeOverlay = overlayNone
+
+	// No-op if we're already on this context.
+	if ctx == a.mgr.GlobalContext() {
+		return a, nil
+	}
+
+	// Connect (or look up) the target cluster WITHOUT yet promoting it to
+	// global. If it fails to connect, report the error and keep the current
+	// working global — do not retarget any panes.
+	cl, err := a.mgr.GetOrCreate(ctx)
+	if err != nil || cl == nil || !cl.Connected() {
+		msg := fmt.Sprintf("context %s: failed to connect", ctx)
+		if err != nil {
+			msg = fmt.Sprintf("context %s: %s", ctx, err)
+		}
+		cmd := a.statusBar.SetError(msg)
+		return a, cmd
+	}
+
+	// Remember the old global so we can clean up its now-unused informers.
+	oldGlobal := a.mgr.GlobalContext()
+	oldStore := a.storeForContext(oldGlobal)
+
+	// Promote the connected cluster to global.
+	if _, err := a.mgr.SetGlobal(ctx); err != nil {
+		cmd := a.statusBar.SetError(fmt.Sprintf("context %s: %s", ctx, err))
+		return a, cmd
+	}
+
+	// Update the status bar to reflect the new baseline.
+	a.statusBar.SetContextName(ctx)
+	newNs := ""
+	if cl.Client() != nil {
+		newNs = cl.Client().Namespace
+	}
+
+	// Stop any log stream — log streams are bound to their cluster's client and
+	// the focused pane may be following global.
+	wasLogMode := a.layout.IsLogMode()
+	a = a.stopLogStream()
+	a.layout.SetLogMode(false)
+	a.envResolved = false
+
+	// Retarget every following (unpinned) pane onto the new global cluster.
+	type prevSub struct {
+		gvr schema.GroupVersionResource
+		ns  string
+	}
+	var oldSubs []prevSub
+	var populateCmds []tea.Cmd
+	for i := range a.layout.SplitCount() {
+		split := a.layout.SplitAt(i)
+		if split == nil || split.Pinned() {
+			continue
+		}
+
+		// Capture the pane's previous (gvr, ns) for old-store cleanup.
+		oldSubs = append(oldSubs, prevSub{gvr: split.Plugin().GVR(), ns: split.EffectiveNamespace()})
+
+		// Point the pane at the new global, landing on its default namespace,
+		// and clear stale data from the old cluster.
+		split.SetContext(ctx)
+		if newNs != "" {
+			split.SetNamespace(newNs)
+		}
+		split.ResetNav()
+		split.SetObjects(nil)
+
+		// Best-effort missing-resource check: if the new cluster's discovery is
+		// populated and does not know this GVR, leave the pane empty with an
+		// informational message rather than subscribing. Synthetic (_ktui) GVRs
+		// have no informer and are always "available". When discovery has not
+		// refreshed yet (IsEmpty) we cannot be authoritative, so we subscribe
+		// and rely on an empty informer yielding an empty list; the discovery
+		// refresh dispatched below will populate the index for next time.
+		gvr := split.Plugin().GVR()
+		if gvr.Group != "_ktui" && cl.Discovery() != nil && !cl.Discovery().IsEmpty() {
+			if _, ok := cl.Discovery().KindForGVR(gvr); !ok {
+				continue
+			}
+		}
+
+		if cmd := a.subscribeAndPopulate(split, split.Plugin(), split.EffectiveNamespace()); cmd != nil {
+			populateCmds = append(populateCmds, cmd)
+		}
+	}
+
+	// Clean up informers on the OLD global store that no retargeted pane needs
+	// anymore. The old cluster itself is NOT torn down — it remains a valid
+	// cluster the user may switch back to, and pinned panes may still use it.
+	if oldStore != nil {
+		for _, sub := range oldSubs {
+			a.unsubscribeOnStoreIfUnused(oldStore, oldGlobal, sub.gvr, sub.ns)
+		}
+	}
+
+	// Refresh discovery for the new global and re-arm the heartbeat on the new
+	// global's client so connectivity status tracks the new cluster. Both mirror
+	// the cmds Init() dispatches at startup.
+	cmds := populateCmds
+	if disc := cl.Discovery(); disc != nil && cl.Client() != nil {
+		typed := cl.Client().Typed
+		newCtx := ctx
+		cmds = append(cmds, func() tea.Msg {
+			resources, derr := disc.Refresh(typed)
+			return k8s.APIResourcesDiscoveredMsg{Context: newCtx, Resources: resources, Err: derr}
+		})
+	}
+	if cl.Client() != nil {
+		cmds = append(cmds, initialHeartbeatCmd(ctx, cl.Client()))
+	}
+
+	// Restore detail/log panel state.
+	if wasLogMode {
+		if focused := a.layout.FocusedSplit(); focused != nil && isLoggablePlugin(focused.Plugin().Name()) {
+			a.layout.SetLogMode(true)
+			if lv := a.layout.LogView(); lv != nil {
+				lv.ClearAndRestart()
+				lv.SetUnavailable(true)
+			}
+		}
+	}
+	var descCmd tea.Cmd
+	a, descCmd = a.refreshDetailPanel()
+	if descCmd != nil {
+		cmds = append(cmds, descCmd)
+	}
+
+	a.statusBar.SetHints(a.currentHints())
+	a = a.syncIndicators()
+
+	return a, tea.Batch(cmds...)
+}
+
+// storeForContext returns the informer store for a given context name without
+// creating the cluster. Returns nil when the cluster is absent or degraded.
+func (a App) storeForContext(ctx string) *k8s.Store {
+	if c, ok := a.mgr.Get(ctx); ok {
+		return c.Store()
+	}
+	return nil
+}
+
+// unsubscribeOnStoreIfUnused unsubscribes (gvr, ns) on the given store when no
+// remaining pane bound to ctxName still needs that pair (either as its visible
+// resource or as a parent in its drill-down nav stack). Synthetic (_ktui) GVRs
+// have no informer and are skipped. This mirrors unsubscribeIfUnused but targets
+// an explicit store/context, which the global switch needs because the panes
+// have already been retargeted off the old store.
+func (a App) unsubscribeOnStoreIfUnused(store *k8s.Store, ctxName string, gvr schema.GroupVersionResource, namespace string) {
+	if store == nil || gvr.Group == "_ktui" {
+		return
+	}
+	for i := range a.layout.SplitCount() {
+		s := a.layout.SplitAt(i)
+		if s == nil || s.Context() != ctxName {
+			continue
+		}
+		if s.Plugin().GVR() == gvr && s.EffectiveNamespace() == namespace {
+			return // still in use by a pane on this cluster
+		}
+		if s.NavStackHasGVR(gvr, namespace) {
+			return // still needed by a drill-down parent on this cluster
+		}
+	}
+	store.Unsubscribe(gvr, namespace)
+}
+
+// asyncConnectCmd performs ONLY the blocking dial for ctxName off the Bubble Tea
+// Update goroutine and reports completion via msgs.ClusterReadyMsg. It calls
+// Manager.Dial, which runs k8s.NewClient (blocking REST/raw-config reads that
+// must never run on the Update goroutine — Risk 3) WITHOUT touching any Manager
+// state. The dialed *k8s.Client (an immutable handle) travels back in the
+// message; all Manager map/refcount mutation happens later in handleClusterReady
+// on the Update goroutine, keeping the lock-free Manager invariant intact.
+func asyncConnectCmd(mgr *cluster.Manager, ctxName string) tea.Cmd {
+	return func() tea.Msg {
+		client, err := mgr.Dial(ctxName)
+		return msgs.ClusterReadyMsg{Context: ctxName, Client: client, Err: err}
+	}
+}
+
+// handlePaneContextSwitch pins the focused pane to ctxName and runs it live on
+// that cluster, simultaneously with other panes on other clusters (true
+// side-by-side multi-cluster).
+//
+// Approach (optimistic pin, no pending-map): the focused pane is immediately
+// pinned and re-pointed at ctxName, its stale data cleared, and a "connecting"
+// status shown. The actual connect happens off-thread (asyncConnectCmd); when
+// msgs.ClusterReadyMsg arrives, handleClusterReady completes the switch
+// (subscribe/populate) or surfaces an error, leaving the pane pinned-but-empty
+// on failure so the user can switch again. The awaiting pane is identified on
+// completion by (Pinned && Context()==ctxName) — see handleClusterReady.
+//
+// Picking any context always PINS the pane (even when ctxName equals the global
+// context — the footer added in Task 10 simply will not show in that case).
+// There is no "unpin / follow global" affordance here; that is out of scope.
+//
+// Refcount bookkeeping is reconciliation-based (idempotent, order-independent):
+// after every pin/repin/close we call Manager.SyncRefs(pinnedContexts()), which
+// makes each cluster's refCount equal the number of panes currently pinned to it
+// and tears down any non-global cluster with zero pinned panes. The global is
+// never torn down. This is robust under rapid re-pins and focus changes: a stale
+// ClusterReadyMsg for a context no pane is pinned to anymore reconciles to zero
+// and is cleaned up. The actual connect (k8s.NewClient) happens off-thread in
+// asyncConnectCmd via Manager.Dial; install + reconcile happen on the Update
+// goroutine in handleClusterReady.
+func (a App) handlePaneContextSwitch(ctxName string) (tea.Model, tea.Cmd) {
+	a.activeOverlay = overlayNone
+
+	focused := a.layout.FocusedSplit()
+	if focused == nil {
+		return a, nil
+	}
+
+	old := focused.Context()
+	wasPinned := focused.Pinned()
+
+	// No-op only when already pinned to this exact context AND its cluster is
+	// connected. A pane left pinned-but-broken by a failed connect must be able to
+	// retry: re-selecting the same context re-attempts the dial rather than
+	// dead-ending here.
+	if wasPinned && old == ctxName {
+		if cl, ok := a.mgr.Get(ctxName); ok && cl.Connected() {
+			return a, nil
+		}
+	}
+
+	// Stop any log stream on the focused pane: log streams are bound to the old
+	// cluster's client.
+	a = a.stopLogStream()
+	a.layout.SetLogMode(false)
+	a.envResolved = false
+
+	// Optimistically pin and re-point the pane, clearing stale data from the old
+	// cluster. The new cluster's data arrives via ClusterReadyMsg.
+	focused.SetPinned(true)
+	focused.SetContext(ctxName)
+	focused.ResetNav()
+	focused.SetObjects(nil)
+
+	// Reconcile refcounts against the new pinned set. The target cluster may not
+	// be in the Manager yet (still dialing); SyncRefs counts what it can now and
+	// is called again in handleClusterReady once the dial returns. Any cluster the
+	// pane just stopped pinning (its old context) that no other pane holds is torn
+	// down here.
+	a.mgr.SyncRefs(a.pinnedContexts())
+
+	cmd := a.statusBar.SetWarning(fmt.Sprintf("connecting to %s…", ctxName))
+	return a, tea.Batch(cmd, asyncConnectCmd(a.mgr, ctxName))
+}
+
+// pinnedContexts returns the set of contexts currently pinned by some pane — the
+// authoritative input to Manager.SyncRefs. A pane contributes its context iff it
+// is pinned and its context is non-empty.
+func (a App) pinnedContexts() []string {
+	var ctxs []string
+	for i := 0; i < a.layout.SplitCount(); i++ {
+		split := a.layout.SplitAt(i)
+		if split == nil || !split.Pinned() {
+			continue
+		}
+		if c := split.Context(); c != "" {
+			ctxs = append(ctxs, c)
+		}
+	}
+	return ctxs
+}
+
+// handleClusterReady completes a per-pane connect once the async connect cmd
+// reports back. It applies the connected cluster to the focused pane when that
+// pane is pinned to msg.Context and awaiting data; on failure it surfaces an
+// error and leaves the pane pinned-but-empty.
+func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
+	client, _ := msg.Client.(*k8s.Client)
+	if msg.Err != nil || client == nil {
+		// Failed dial: nothing was registered and no ref was taken. Reconcile so a
+		// context the user re-pinned away from is torn down, then report the error
+		// and leave the awaiting pane(s) pinned-but-empty so the user can retry.
+		a.mgr.SyncRefs(a.pinnedContexts())
+		errMsg := fmt.Sprintf("context %s: failed to connect", msg.Context)
+		if msg.Err != nil {
+			errMsg = fmt.Sprintf("context %s: %s", msg.Context, msg.Err)
+		}
+		cmd := a.statusBar.SetError(errMsg)
+		return a, cmd
+	}
+
+	// Install the dialed client on the Update goroutine. RegisterConnected returns
+	// the already-cached cluster if another pane connected this context first
+	// (discarding the redundant client); newlyConnected gates arming a fresh
+	// heartbeat/discovery so two panes on the same context do not start duplicate
+	// heartbeat loops.
+	cl, newlyConnected := a.mgr.RegisterConnected(msg.Context, client)
+
+	// Reconcile refcounts against the panes currently pinned. If no pane is pinned
+	// to msg.Context anymore (the requester re-pinned elsewhere), this tears the
+	// just-registered cluster back down — no leak.
+	a.mgr.SyncRefs(a.pinnedContexts())
+
+	if cl == nil || !cl.Connected() {
+		cmd := a.statusBar.SetError(fmt.Sprintf("context %s: failed to connect", msg.Context))
+		return a, cmd
+	}
+
+	var cmds []tea.Cmd
+
+	// Arm discovery + heartbeat only on the cluster's first connect.
+	if newlyConnected && cl.Client() != nil {
+		if disc := cl.Discovery(); disc != nil {
+			typed := cl.Client().Typed
+			newCtx := msg.Context
+			cmds = append(cmds, func() tea.Msg {
+				resources, derr := disc.Refresh(typed)
+				return k8s.APIResourcesDiscoveredMsg{Context: newCtx, Resources: resources, Err: derr}
+			})
+		}
+		cmds = append(cmds, initialHeartbeatCmd(msg.Context, cl.Client()))
+	}
+
+	// Apply to EVERY pinned split awaiting this context (identified by pane
+	// context across ALL splits, NOT by focus — if the user moved focus between
+	// dispatch and arrival, the correct non-focused pinned pane is still
+	// populated). Re-applying to an already-populated pane is harmless.
+	defaultNs := ""
+	if cl.Client() != nil {
+		defaultNs = cl.Client().Namespace
+	}
+	for i := range a.layout.SplitCount() {
+		split := a.layout.SplitAt(i)
+		if split == nil || !split.Pinned() || split.Context() != msg.Context {
+			continue
+		}
+		if defaultNs != "" {
+			split.SetNamespace(defaultNs)
+		}
+		gvr := split.Plugin().GVR()
+		// Missing-resource check: if discovery is populated and does not know this
+		// GVR, leave the pane empty with a message instead of subscribing.
+		// Synthetic (_ktui) GVRs are always available; the check is only
+		// authoritative once discovery has loaded (IsEmpty).
+		if gvr.Group != "_ktui" && cl.Discovery() != nil && !cl.Discovery().IsEmpty() {
+			if _, known := cl.Discovery().KindForGVR(gvr); !known {
+				split.SetObjects(nil)
+				cmds = append(cmds, a.statusBar.SetWarning(fmt.Sprintf("%s not available on %s", gvr.Resource, msg.Context)))
+				continue
+			}
+		}
+		if pc := a.subscribeAndPopulate(split, split.Plugin(), split.EffectiveNamespace()); pc != nil {
+			cmds = append(cmds, pc)
+		}
+	}
+
+	// A pane's context is now live: refresh per-pane footers so a pane that
+	// differs from the global context shows its footer.
+	a.syncPaneFooters()
+
+	// Clear the transient "connecting…" status now that we are live.
+	a.statusBar.SetError("")
+
+	var dc tea.Cmd
+	a, dc = a.refreshDetailPanel()
+	if dc != nil {
+		cmds = append(cmds, dc)
+	}
+	a.statusBar.SetHints(a.currentHints())
+	return a, tea.Batch(cmds...)
 }
 
 func (a App) handleNamespaceSwitch(ns string) (tea.Model, tea.Cmd) {
@@ -1398,8 +1867,11 @@ func (a App) executeDelete(targets []*unstructured.Unstructured, force bool) (te
 	n := len(targets)
 
 	// Helm releases
-	if p.Name() == "helmreleases" && a.helmClient != nil {
-		helmClient := a.helmClient
+	if p.Name() == "helmreleases" {
+		helmClient := a.helmClientFor(a.clusterFor(focused))
+		if helmClient == nil {
+			return a, nil
+		}
 		return a, func() tea.Msg {
 			var errs []string
 			var firstErr error
@@ -1438,10 +1910,10 @@ func (a App) executeDelete(targets []*unstructured.Unstructured, force bool) (te
 	}
 
 	// K8s resources via dynamic client
-	if a.k8sClient == nil {
+	client := a.clientForFocused()
+	if client == nil {
 		return a, nil
 	}
-	client := a.k8sClient
 	gvr := p.GVR()
 	clusterScoped := p.IsClusterScoped()
 
@@ -1493,7 +1965,8 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 	if !ok {
 		return a, nil
 	}
-	if a.k8sClient == nil {
+	debugClient := a.clientForFocused()
+	if debugClient == nil {
 		a.statusBar.SetError("debug: no k8s client")
 		return a, nil
 	}
@@ -1548,19 +2021,20 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	return a, k8s.DebugCmd(a.k8sClient, podName, containerName, ns, image, command, false)
+	return a, k8s.DebugCmd(debugClient, podName, containerName, ns, image, command, false)
 }
 
 // executePendingDebug runs a debug action that was confirmed by the user.
 func (a App) executePendingDebug(dbg *pendingDebugAction) (tea.Model, tea.Cmd) {
-	if a.k8sClient == nil {
+	client := a.clientForFocused()
+	if client == nil {
 		a.statusBar.SetError("debug: no k8s client")
 		return a, nil
 	}
 	if dbg.nodeMode {
-		return a, k8s.DebugNodeCmd(a.k8sClient, dbg.nodeName, dbg.image, dbg.command)
+		return a, k8s.DebugNodeCmd(client, dbg.nodeName, dbg.image, dbg.command)
 	}
-	return a, k8s.DebugCmd(a.k8sClient, dbg.podName, dbg.containerName, dbg.namespace, dbg.image, dbg.command, dbg.privileged)
+	return a, k8s.DebugCmd(client, dbg.podName, dbg.containerName, dbg.namespace, dbg.image, dbg.command, dbg.privileged)
 }
 
 func (a App) handleSearchSubmitted(msg msgs.SearchSubmittedMsg) (tea.Model, tea.Cmd) {
@@ -1687,17 +2161,19 @@ func toInt32(v any) int32 {
 }
 
 func (a App) handleSetImageRequested(msg msgs.SetImageRequestedMsg) (tea.Model, tea.Cmd) {
-	if a.k8sClient == nil {
+	client := a.clientForFocused()
+	if client == nil {
 		return a, nil
 	}
-	return a, k8s.SetImageCmd(a.k8sClient.Dynamic, msg.GVR, msg.ResourceName, msg.Namespace, msg.PluginName, msg.Images)
+	return a, k8s.SetImageCmd(client.Dynamic, msg.GVR, msg.ResourceName, msg.Namespace, msg.PluginName, msg.Images)
 }
 
 func (a App) handleScaleRequested(msg msgs.ScaleRequestedMsg) (tea.Model, tea.Cmd) {
-	if a.k8sClient == nil {
+	client := a.clientForFocused()
+	if client == nil {
 		return a, nil
 	}
-	return a, k8s.ScaleCmd(a.k8sClient.Dynamic, msg.GVR, msg.ResourceName, msg.Namespace, msg.Replicas)
+	return a, k8s.ScaleCmd(client.Dynamic, msg.GVR, msg.ResourceName, msg.Namespace, msg.Replicas)
 }
 
 func extractContainerImages(pluginName string, obj *unstructured.Unstructured) []msgs.ContainerImageChange {
@@ -1748,7 +2224,10 @@ func appendImageChanges(result []msgs.ContainerImageChange, obj *unstructured.Un
 }
 
 func (a App) handlePortForwardRequested(msg msgs.PortForwardRequestedMsg) (tea.Model, tea.Cmd) {
-	if a.pfRegistry == nil || a.k8sClient == nil {
+	// Capture the focused cluster's client into a local before the closure so
+	// the forward stays pinned to its cluster across later context switches.
+	client := a.clientForFocused()
+	if a.pfRegistry == nil || client == nil {
 		return a, nil
 	}
 	if a.pfRegistry.HasLocalPort(msg.LocalPort) {
@@ -1757,7 +2236,7 @@ func (a App) handlePortForwardRequested(msg msgs.PortForwardRequestedMsg) (tea.M
 		}
 	}
 	return a, func() tea.Msg {
-		apf, err := k8s.PortForward(a.k8sClient, msg.PodName, msg.PodNamespace, msg.LocalPort, msg.RemotePort)
+		apf, err := k8s.PortForward(client, msg.PodName, msg.PodNamespace, msg.LocalPort, msg.RemotePort)
 		if err != nil {
 			return msgs.PortForwardStartedMsg{Err: err}
 		}

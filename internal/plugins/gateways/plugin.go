@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
@@ -15,13 +14,11 @@ import (
 var gvr = schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gateways"}
 
 // Plugin implements plugin.ResourcePlugin and plugin.DrillDowner for Gateway API Gateways.
-type Plugin struct {
-	store *k8s.Store
-}
+type Plugin struct{}
 
 // New creates a new Gateways plugin.
-func New(_ *k8s.Client, store *k8s.Store) plugin.ResourcePlugin {
-	return &Plugin{store: store}
+func New() plugin.ResourcePlugin {
+	return &Plugin{}
 }
 
 func (p *Plugin) Name() string                     { return "gateways" }
@@ -135,16 +132,17 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 }
 
 // DrillDown implements plugin.DrillDowner.
-func (p *Plugin) DrillDown(obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
-	if p.store == nil {
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	store := plugin.StoreOf(cl)
+	if store == nil {
 		return nil, nil
 	}
 	pp, ok := plugin.ByName("httproutes")
 	if !ok {
 		return nil, nil
 	}
-	p.store.Subscribe(workload.HTTPRoutesGVR, "")
-	routes := workload.FindHTTPRoutesByGateway(p.store, obj.GetNamespace(), obj.GetName())
+	store.Subscribe(workload.HTTPRoutesGVR, "")
+	routes := workload.FindHTTPRoutesByGateway(store, obj.GetNamespace(), obj.GetName())
 	return pp, routes
 }
 

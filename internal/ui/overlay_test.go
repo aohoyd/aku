@@ -259,13 +259,13 @@ func TestOverlayRectContainsExclusiveBottomRight(t *testing.T) {
 func TestOverlayRectContainsOutOfBounds(t *testing.T) {
 	r := OverlayRect{X: 3, Y: 4, W: 5, H: 6}
 	for _, pt := range []struct{ x, y int }{
-		{-1, 5},       // negative x
-		{5, -1},       // negative y
-		{-1, -1},      // both negative
-		{100, 5},      // far right
-		{5, 100},      // far below
-		{2, 5},        // x < X (just outside left)
-		{5, 3},        // y < Y (just outside top)
+		{-1, 5},  // negative x
+		{5, -1},  // negative y
+		{-1, -1}, // both negative
+		{100, 5}, // far right
+		{5, 100}, // far below
+		{2, 5},   // x < X (just outside left)
+		{5, 3},   // y < Y (just outside top)
 	} {
 		if r.Contains(pt.x, pt.y) {
 			t.Errorf("Contains(%d,%d) must be false for rect %+v", pt.x, pt.y, r)
