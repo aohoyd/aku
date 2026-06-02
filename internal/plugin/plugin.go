@@ -112,6 +112,26 @@ type GoToer interface {
 	GoTo(obj *unstructured.Unstructured) (resourceName string, namespace string, ok bool)
 }
 
+// Commander lets a plugin map Enter on a row to an app command string.
+//
+// Enter precedence: Commander is checked FIRST. If it returns ok=true, the
+// returned cmd string is dispatched through executeCommand and no further
+// handling occurs. If ok=false, Enter falls through to GoToer (navigate to a
+// different resource view), and if that does not apply either, to the default
+// drill-down / enter-detail behavior.
+type Commander interface {
+	Command(obj *unstructured.Unstructured) (cmd string, ok bool)
+}
+
+// PaneCountSetter is an optional interface a self-populating plugin may
+// implement to receive the current per-context pane counts. The app layer
+// pushes the counts in (App.distinctPaneContexts) via SetPaneCounts before/while
+// the view is shown, so the plugin can render a per-context pane count without
+// holding a back-reference to the app. A nil map is treated as all-zero.
+type PaneCountSetter interface {
+	SetPaneCounts(map[string]int)
+}
+
 // SelfPopulating is an optional interface for plugins that manage their own
 // object list instead of using the k8s.Store informer system.
 // Used by synthetic views like api-resources that don't watch real K8s resources.

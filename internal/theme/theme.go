@@ -31,6 +31,10 @@ var (
 	Subtle       Color = "#54546D" // SumiInk4 — indicators, YAML markers
 	Prompt       Color = "#727169" // FujiGrey — input prompt labels in overlays
 	Selection    Color = "#FF9E3B" // RoninYellow — multi-select marker foreground
+
+	// Pane context badge — muted so it sits quietly on the top border.
+	ContextOnline  Color = "#8A9A7B" // muted green — pane context badge, connected
+	ContextOffline Color = "#C34043" // autumnRed — pane context badge, offline
 )
 
 // Status colors — Kubernetes resource health.
@@ -106,6 +110,8 @@ func Load(path string) error {
 		setIf(&Subtle, f.UI.Subtle)
 		setIf(&Prompt, f.UI.Prompt)
 		setIf(&Selection, f.UI.Selection)
+		setIf(&ContextOnline, f.UI.ContextOnline)
+		setIf(&ContextOffline, f.UI.ContextOffline)
 	}
 	if f.Status != nil {
 		setIf(&StatusRunning, f.Status.Running)
@@ -160,6 +166,9 @@ type uiColors struct {
 	Subtle       *string `yaml:"subtle"`
 	Prompt       *string `yaml:"prompt"`
 	Selection    *string `yaml:"selection"`
+
+	ContextOnline  *string `yaml:"context_online"`
+	ContextOffline *string `yaml:"context_offline"`
 }
 
 type statusColors struct {

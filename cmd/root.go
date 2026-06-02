@@ -22,6 +22,7 @@ import (
 	"github.com/aohoyd/aku/internal/plugins/clusterroles"
 	"github.com/aohoyd/aku/internal/plugins/configmaps"
 	"github.com/aohoyd/aku/internal/plugins/containers"
+	"github.com/aohoyd/aku/internal/plugins/contexts"
 	"github.com/aohoyd/aku/internal/plugins/cronjobs"
 	"github.com/aohoyd/aku/internal/plugins/customresourcedefinitions"
 	"github.com/aohoyd/aku/internal/plugins/daemonsets"
@@ -346,23 +347,41 @@ func run(cmd *cobra.Command, args []string) error {
 	// failure is skipped silently — so there is no error to handle; a fully
 	// failed scan just yields no extra entries and the global cluster still
 	// connects via the base path.
-	entries := cluster.ScanKubeconfigs(cfg.ContextDirectories(), kubeconfigPath)
+	entries := cluster.ScanKubeconfigs(cfg.ContextDirectories(), cluster.DefaultKubeconfigFiles(kubeconfig))
 
-	// Build the Cluster Session Manager. SetGlobal eagerly creates and connects
-	// the global cluster (context_ == "" means the kubeconfig current-context).
+	// Build the Cluster Session Manager. GetOrCreate eagerly creates and connects
+	// the startup cluster (context_ == "" means the kubeconfig current-context);
+	// the resulting cluster is cached under its resolved context name, which seeds
+	// the initial pane(s).
 	mgr := cluster.NewManager(entries, kubeconfigPath, cfg.APITimeout())
-	globalCluster, connectErr := mgr.SetGlobal(context_)
+	startupCluster, connectErr := mgr.GetOrCreate(context_)
 	if connectErr != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not connect to Kubernetes: %v\n", connectErr)
-		// Continue without k8s - app will show empty lists (degraded global).
+		// Continue without k8s - app will show empty lists (degraded startup).
 	}
 
-	// Pull the global cluster's client for plugin registration. Built-in plugins
+	// The explicit startup context the App seeds initial panes with. Prefer the
+	// connected cluster's resolved name (an empty context_ resolves to the
+	// kubeconfig current-context). On a degraded startup (connect failed, so the
+	// cluster carries an empty context) fall back to a meaningful name so initial
+	// panes are not stamped with "" — which would empty paneContexts() and let a
+	// later SyncRefs tear down clusters. Prefer the explicit --context flag, then
+	// the kubeconfig current-context name.
+	startupContext := startupCluster.Context()
+	if startupContext == "" {
+		if context_ != "" {
+			startupContext = context_
+		} else {
+			startupContext = cluster.CurrentContextName(kubeconfigPath)
+		}
+	}
+
+	// Pull the startup cluster's client for plugin registration. Built-in plugins
 	// are metadata-only and ignore it; helmreleases is the exception — it builds
-	// its helm client from the global client's config (see below).
+	// its helm client from the startup client's config (see below).
 	var k8sClient *k8s.Client
-	if globalCluster != nil {
-		k8sClient = globalCluster.Client()
+	if startupCluster != nil {
+		k8sClient = startupCluster.Client()
 	}
 
 	// Register built-in plugins. These constructors are metadata-only and take no
@@ -433,6 +452,9 @@ func run(cmd *cobra.Command, args []string) error {
 	// API Resources (synthetic view)
 	plugin.Register(apiresources.New())
 
+	// Contexts (synthetic view over the kubeconfig contexts the Manager knows).
+	plugin.Register(contexts.New(mgr))
+
 	// Helm -- always create the resolver so runtime SetChartRef mutations are visible.
 	if cfg.Charts == nil {
 		cfg.Charts = make(map[string]map[string]string)
@@ -465,14 +487,14 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Create app. The Manager is the single source of client/store/discovery;
 	// chartResolver lets the app build per-cluster helm clients lazily.
-	application := app.New(mgr, km, cfg, pfRegistry, chartResolver, specs, detailMode, orientation)
+	application := app.New(mgr, km, cfg, pfRegistry, chartResolver, specs, detailMode, orientation, startupContext)
 
 	// Create program
 	p := tea.NewProgram(application)
 
 	// Wire the send function through the Manager. SetSend propagates to every
-	// already-created cluster's store + warning handler (the global cluster was
-	// created by SetGlobal above) and is recorded for clusters created later.
+	// already-created cluster's store + warning handler (the startup cluster was
+	// created by Connect above) and is recorded for clusters created later.
 	mgr.SetSend(p.Send)
 
 	teardown := func() {

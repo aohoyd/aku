@@ -22,17 +22,10 @@ type NamespaceSelectedMsg struct {
 	Namespace string
 }
 
-// GlobalContextSelectedMsg signals the context picker selected a context to
-// become the new global (baseline) context. Emitted when the picker was opened
-// in global scope (the `gx` binding / context-picker command).
+// GlobalContextSelectedMsg signals the context picker selected a context. It
+// retargets the focused pane's context group (the `gx` binding /
+// context-picker command).
 type GlobalContextSelectedMsg struct {
-	Context string
-}
-
-// PaneContextSelectedMsg signals the context picker selected a context to pin
-// the focused pane to. Emitted when the picker was opened in pane scope (the
-// `gX` binding / pane-context-picker command).
-type PaneContextSelectedMsg struct {
 	Context string
 }
 
@@ -49,8 +42,8 @@ type PaneContextSelectedMsg struct {
 // the Update goroutine. On a dial failure Client is nil and Err is set; no
 // cluster is registered and no ref is taken (so a failed connect leaks nothing).
 //
-// The handler applies the connected cluster to whichever pane(s) are currently
-// pinned to Context and awaiting data — identified by pane context, NOT by
+// The handler applies the connected cluster to whichever pane(s) have
+// Context()==Context and are awaiting data — identified by pane context, NOT by
 // focus, so a focus change between dispatch and arrival cannot drop the update.
 type ClusterReadyMsg struct {
 	Context string

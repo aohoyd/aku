@@ -24,11 +24,16 @@ import (
 // them and continues rather than aborting. The returned slice is sorted by Name
 // for a deterministic flat picker list.
 //
+// defaultPaths are the canonical kubeconfig files (see DefaultKubeconfigFiles):
+// the --kubeconfig flag, the $KUBECONFIG entries, and ~/.kube/config. They are
+// processed first, in order, so their contexts win on a name collision with a
+// directory file (and earlier default paths win over later ones).
+//
 // There is no error return: every failure mode (unparseable kubeconfig,
 // zero-context file, missing/unreadable dir or file) is intentionally skipped
 // silently, so the scan can never fail as a whole. The previous error return was
 // always nil; callers that discarded it no longer need to.
-func ScanKubeconfigs(dirs []string, defaultPath string) []ContextEntry {
+func ScanKubeconfigs(dirs []string, defaultPaths []string) []ContextEntry {
 	var entries []ContextEntry
 	seen := make(map[string]bool)
 
@@ -48,15 +53,23 @@ func ScanKubeconfigs(dirs []string, defaultPath string) []ContextEntry {
 		}
 	}
 
-	// Process the default kubeconfig first so its contexts win on collision.
-	if defaultPath != "" {
-		if info, err := os.Stat(defaultPath); err == nil && !info.IsDir() {
-			addFile(defaultPath)
+	// Process the default kubeconfig files first so their contexts win on
+	// collision (in order, so earlier paths win over later ones).
+	for _, p := range defaultPaths {
+		p = ExpandPath(p)
+		if p == "" {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			addFile(p)
 		}
 	}
 
 	// Walk each configured directory recursively.
 	for _, dir := range dirs {
+		// Expand `~` and environment variables so config values like
+		// `~/.kube/configs` or `$HOME/clusters` resolve as users expect.
+		dir = ExpandPath(dir)
 		if dir == "" {
 			continue
 		}
@@ -85,4 +98,20 @@ func ScanKubeconfigs(dirs []string, defaultPath string) []ContextEntry {
 		return entries[i].Name < entries[j].Name
 	})
 	return entries
+}
+
+// CurrentContextName reads the kubeconfig at path and returns its
+// current-context name, or "" if the file cannot be parsed or names no
+// current-context. It exists so a degraded startup (where the cluster failed to
+// connect and carries an empty context) can still resolve a meaningful context
+// name for seeding initial panes, instead of stamping them with "".
+func CurrentContextName(path string) string {
+	if path == "" {
+		return ""
+	}
+	cfg, err := clientcmd.LoadFromFile(path)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.CurrentContext
 }

@@ -368,7 +368,7 @@ func (d DetailView) View() string {
 
 	baseTitle := d.buildTitle()
 	titleRendered := BuildPanelTitle(baseTitle, d.filterState.DisplayPattern(), d.searchState.DisplayPattern(), d.width, d.inlineSearch)
-	return injectBorderTitle(styled, titleRendered, d.focused)
+	return injectBorderTitle(styled, titleRendered, "", d.focused)
 }
 
 // ApplySearch compiles the pattern and applies the given mode.

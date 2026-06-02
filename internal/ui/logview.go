@@ -707,7 +707,7 @@ func (lv LogView) View() string {
 	styled := borderStyle.Width(lv.width).Height(lv.height).Render(content)
 	baseTitle := lv.buildTitle()
 	titleRendered := BuildPanelTitle(baseTitle, lv.filterState.DisplayPattern(), lv.searchState.DisplayPattern(), lv.width, lv.inlineSearch)
-	return injectBorderTitle(styled, titleRendered, lv.focused)
+	return injectBorderTitle(styled, titleRendered, "", lv.focused)
 }
 
 // buildTitle constructs the title string for the log view border.

@@ -16,6 +16,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// maxBadgeContext caps the width of the context name shown in the top-border
+// badge; longer names are truncated with an ellipsis (see truncateContext).
+const maxBadgeContext = 20
+
 // ResourceList wraps bubbles/table with plugin-driven columns.
 type ResourceList struct {
 	plugin             plugin.ResourcePlugin
@@ -28,7 +32,6 @@ type ResourceList struct {
 	sortState          SortState
 	namespace          string
 	context            string // kube-context this pane is scoped to ("" until app/layer sets it)
-	pinned             bool   // when true, global context switches do not retarget this pane
 	focused            bool
 	width              int
 	height             int
@@ -36,7 +39,8 @@ type ResourceList struct {
 	xOffset            int
 	navStack           NavStack
 	inlineSearch       string
-	contextFooter      string // when non-empty, rendered as a bottom-border footer; "" hides it
+	contextLabel       string // when non-empty, rendered as a right-aligned top-border badge; "" hides it
+	offline            bool   // when true, the context badge is colored red (offline) instead of green
 	lastSearchCursor   int
 	selected           map[types.UID]struct{} // multi-select set
 	cachedColumnWidths []table.Column
@@ -271,29 +275,33 @@ func (r *ResourceList) SetContext(ctx string) {
 	r.context = ctx
 }
 
-// ContextFooter returns the footer text shown on the pane's bottom border.
-// An empty string means no footer is rendered.
-func (r *ResourceList) ContextFooter() string {
-	return r.contextFooter
+// ContextLabel returns the context name shown as the pane's top-border badge.
+// An empty string means no badge is rendered.
+func (r *ResourceList) ContextLabel() string {
+	return r.contextLabel
 }
 
-// SetContextFooter sets the footer text drawn on the pane's bottom border.
-// Passing "" hides the footer. The app owns the "differs from global context"
-// decision and passes the context name to show (or "" to hide); View() stays
-// dumb and renders the footer iff this text is non-empty.
-func (r *ResourceList) SetContextFooter(text string) {
-	r.contextFooter = text
+// SetContextLabel sets the context name drawn as a right-aligned badge on the
+// pane's top border. Passing "" hides the badge. The app owns the "panes use
+// more than one context" decision and passes the context name to show (or "" to
+// hide); View() stays dumb and renders the badge iff this text is non-empty.
+func (r *ResourceList) SetContextLabel(text string) {
+	r.contextLabel = text
 }
 
-// Pinned reports whether this pane is pinned to its context. A pinned pane is
-// not retargeted when the global context changes.
-func (r *ResourceList) Pinned() bool {
-	return r.pinned
+// Offline reports whether the pane's cluster is currently unreachable, which
+// colors the context badge red instead of green.
+func (r *ResourceList) Offline() bool {
+	return r.offline
 }
 
-// SetPinned marks this pane as pinned (or not) to its context.
-func (r *ResourceList) SetPinned(p bool) {
-	r.pinned = p
+// SetOffline marks the pane's cluster as unreachable (true) or reachable
+// (false). When offline, View() colors the context badge red (muted) instead of
+// green. The app owns the connectivity decision (driven from the same
+// per-context connection state the contexts plugin STATUS uses) and clears it
+// automatically once the cluster reconnects; View() stays dumb.
+func (r *ResourceList) SetOffline(offline bool) {
+	r.offline = offline
 }
 
 // EffectiveNamespace returns the namespace used for store operations.
@@ -585,17 +593,24 @@ func (r ResourceList) View() string {
 	styled := borderStyle.Width(r.width).Height(r.height).Render(content)
 
 	titleRendered := BuildPanelTitleWithPrefix(nsPrefix, baseTitle, r.filterState.DisplayPattern(), r.searchState.DisplayPattern(), r.width, r.inlineSearch)
-	out := injectBorderTitle(styled, titleRendered, r.focused)
 
-	// Footer: when the pane's context differs from the global one, the app sets
-	// contextFooter to the context name to display on the bottom border. Reusing
-	// the bottom border line means this does not consume a content row, so the
-	// table height is unchanged (mirrors how the title reuses the top border).
-	if r.contextFooter != "" {
-		footerRendered := TitleIndicatorStyle.Render(" " + r.contextFooter + " ")
-		out = injectBorderFooter(out, footerRendered, r.focused)
+	// Context badge: when panes use more than one context the app sets
+	// contextLabel to this pane's context name (it stays "" otherwise). It is
+	// rendered as a right-aligned segment on the top border, colored muted green
+	// when the pane's cluster is reachable and muted red when offline. Reusing the
+	// top border line means it does not consume a content row, so the table height
+	// is unchanged. injectBorderTitle drops the badge on a too-narrow pane rather
+	// than truncating the title.
+	var rightRendered string
+	if r.contextLabel != "" {
+		style := PaneContextOnlineStyle
+		if r.offline {
+			style = PaneContextOfflineStyle
+		}
+		rightRendered = style.Render(" " + truncateContext(r.contextLabel, maxBadgeContext) + " ")
 	}
-	return out
+
+	return injectBorderTitle(styled, titleRendered, rightRendered, r.focused)
 }
 
 // --- Selection methods ---
@@ -947,8 +962,15 @@ func rowMatchesRegex(row []string, re *regexp.Regexp) bool {
 }
 
 // injectBorderTitle replaces the top border line of a rendered lipgloss box
-// with a custom title string. titleRendered must already be styled.
-func injectBorderTitle(styled, titleRendered string, focused bool) string {
+// with a custom title string and an optional right-aligned segment. Both
+// titleRendered and rightRendered must already be styled; pass "" for
+// rightRendered when there is no right segment.
+//
+// Layout: TopLeft + title + dashes + right + TopRight. The right segment is
+// included only when it fits with at least one dash between it and the title;
+// otherwise it is dropped (the title is never truncated to make room — matching
+// the graceful-skip the title itself already uses when it does not fit).
+func injectBorderTitle(styled, titleRendered, rightRendered string, focused bool) string {
 	lines := strings.Split(styled, "\n")
 	if len(lines) == 0 {
 		return styled
@@ -964,43 +986,21 @@ func injectBorderTitle(styled, titleRendered string, focused bool) string {
 		borderColor = FocusedBorderColor
 	}
 	bc := lipgloss.NewStyle().Foreground(borderColor)
-	dashCount := max(lineWidth-1-titleWidth-1, 0)
+
+	// Drop the right segment unless it fits with at least one dash separating it
+	// from the title (corners + title + 1 dash + right <= line width).
+	rightWidth := lipgloss.Width(rightRendered)
+	if rightRendered != "" && titleWidth+2+1+rightWidth > lineWidth {
+		rightRendered = ""
+		rightWidth = 0
+	}
+
+	dashCount := max(lineWidth-1-titleWidth-rightWidth-1, 0)
 	lines[0] = bc.Render(string(border.TopLeft)) +
 		titleRendered +
 		bc.Render(strings.Repeat(string(border.Top), dashCount)) +
+		rightRendered +
 		bc.Render(string(border.TopRight))
-	return strings.Join(lines, "\n")
-}
-
-// injectBorderFooter replaces the bottom border line of a rendered lipgloss box
-// with a custom footer string. footerRendered must already be styled. Mirrors
-// injectBorderTitle exactly (same ANSI-aware width math via lipgloss.Width, same
-// focused/unfocused border color), but rewrites the last line using the rounded
-// border's Bottom* glyphs. Reusing the bottom border line means no content row
-// is consumed, so the table height is unchanged. If the footer is too wide to
-// fit, the box is returned unchanged (graceful skip), matching injectBorderTitle.
-func injectBorderFooter(styled, footerRendered string, focused bool) string {
-	lines := strings.Split(styled, "\n")
-	if len(lines) == 0 {
-		return styled
-	}
-	last := len(lines) - 1
-	lineWidth := lipgloss.Width(lines[last])
-	footerWidth := lipgloss.Width(footerRendered)
-	if footerWidth+2 >= lineWidth {
-		return styled
-	}
-	border := lipgloss.RoundedBorder()
-	borderColor := UnfocusedBorderColor
-	if focused {
-		borderColor = FocusedBorderColor
-	}
-	bc := lipgloss.NewStyle().Foreground(borderColor)
-	dashCount := max(lineWidth-1-footerWidth-1, 0)
-	lines[last] = bc.Render(string(border.BottomLeft)) +
-		footerRendered +
-		bc.Render(strings.Repeat(string(border.Bottom), dashCount)) +
-		bc.Render(string(border.BottomRight))
 	return strings.Join(lines, "\n")
 }
 

@@ -85,65 +85,85 @@ func TestGetDoesNotCreate(t *testing.T) {
 	}
 }
 
-// TestSyncRefsTearsDownNonGlobalAtZero exercises the SyncRefs reconciliation
-// that replaced the old Acquire/Release contract: a non-global cluster whose
-// pinned-pane count drops to zero is torn down and removed; while it has at
-// least one pinned pane it survives, with refCount equal to the pinned count.
-func TestSyncRefsTearsDownNonGlobalAtZero(t *testing.T) {
+// TestSyncRefsTearsDownAtZero exercises the SyncRefs reconciliation that
+// replaced the old Acquire/Release contract: a cluster whose pane count drops to
+// zero is torn down and removed; while it has at least one referencing pane it
+// survives, with refCount equal to the pane count.
+func TestSyncRefsTearsDownAtZero(t *testing.T) {
 	m, _ := newTestManager(t, nil)
-	if _, err := m.SetGlobal("home"); err != nil {
-		t.Fatalf("SetGlobal(home) err = %v", err)
-	}
 
-	// Install a non-global cluster and pin two panes to it.
+	// Install a cluster and reference it from two panes.
 	if _, err := m.GetOrCreate("alpha"); err != nil {
 		t.Fatalf("GetOrCreate(alpha) err = %v", err)
 	}
 	m.SyncRefs([]string{"alpha", "alpha"})
 	c, ok := m.Get("alpha")
 	if !ok {
-		t.Fatal("alpha torn down with 2 pinned panes")
+		t.Fatal("alpha torn down with 2 referencing panes")
 	}
 	if c.RefCount() != 2 {
 		t.Errorf("alpha refCount = %d, want 2", c.RefCount())
 	}
 
-	// Drop to one pinned pane: still present, count 1.
+	// Drop to one referencing pane: still present, count 1.
 	m.SyncRefs([]string{"alpha"})
 	c, ok = m.Get("alpha")
 	if !ok {
-		t.Fatal("alpha torn down with 1 pinned pane")
+		t.Fatal("alpha torn down with 1 referencing pane")
 	}
 	if c.RefCount() != 1 {
 		t.Errorf("alpha refCount = %d, want 1", c.RefCount())
 	}
 
-	// Zero pinned panes: non-global cluster is torn down and removed.
+	// Zero referencing panes: the cluster is torn down and removed.
 	m.SyncRefs(nil)
 	if _, ok := m.Get("alpha"); ok {
-		t.Error("non-global alpha still present after pinned count reached 0")
+		t.Error("alpha still present after pane count reached 0")
 	}
 }
 
-// TestSyncRefsNeverTearsDownGlobal proves the global context is pinned: SyncRefs
-// with no pinned panes leaves it intact regardless of its refCount.
-func TestSyncRefsNeverTearsDownGlobal(t *testing.T) {
+// TestSyncRefsTearsDownStartupClusterAtZero proves the new SyncRefs has no
+// global/startup exemption: the cluster registered at startup is torn down like
+// any other once no pane references it. The Manager is constructed with a
+// startup context, the cluster registered under it, and then SyncRefs is called
+// with a pane set that does not include the startup context.
+func TestSyncRefsTearsDownStartupClusterAtZero(t *testing.T) {
+	m := NewManager(nil, "startup", time.Second)
+	m.Register(New("startup", "", &k8s.Client{Context: "startup"}, nil, k8s.NewDiscovery(), nil))
+	if _, ok := m.Get("startup"); !ok {
+		t.Fatal("precondition: startup cluster should be registered")
+	}
+
+	// Panes have all moved to another context; nothing references startup.
+	m.SyncRefs([]string{"other"})
+	if _, ok := m.Get("startup"); ok {
+		t.Error("startup cluster still present after no pane references it (no global exemption)")
+	}
+}
+
+// TestSyncRefsKeepsReferencedAndIgnoresEmpty proves a referenced context
+// survives and empty entries in the pane set are ignored (they no longer resolve
+// to any default/global context).
+func TestSyncRefsKeepsReferencedAndIgnoresEmpty(t *testing.T) {
 	m, _ := newTestManager(t, nil)
-	if _, err := m.SetGlobal("home"); err != nil {
-		t.Fatalf("SetGlobal(home) err = %v", err)
+	if _, err := m.GetOrCreate("home"); err != nil {
+		t.Fatalf("GetOrCreate(home) err = %v", err)
 	}
-	m.SyncRefs(nil)
-	if _, ok := m.Get("home"); !ok {
-		t.Errorf("global cluster torn down by SyncRefs, want pinned")
+
+	// "home" referenced, plus a stray empty entry that must be ignored.
+	m.SyncRefs([]string{"home", ""})
+	c, ok := m.Get("home")
+	if !ok {
+		t.Fatalf("home torn down despite a referencing pane")
 	}
-	if m.Global() == nil {
-		t.Errorf("Global() = nil after SyncRefs(nil), want pinned cluster")
+	if c.RefCount() != 1 {
+		t.Errorf("home refCount = %d, want 1 (empty entry must not count)", c.RefCount())
 	}
-	// An empty pinned context resolves to the global one, so it never counts as a
-	// separate teardown candidate.
+
+	// Only empty entries: home is no longer referenced and is torn down.
 	m.SyncRefs([]string{""})
-	if _, ok := m.Get("home"); !ok {
-		t.Errorf("global torn down after SyncRefs with empty ctx, want pinned")
+	if _, ok := m.Get("home"); ok {
+		t.Error("home still present when only empty entries reference it")
 	}
 }
 
@@ -151,24 +171,21 @@ func TestSyncRefsHandlesNilStore(t *testing.T) {
 	// A degraded cluster (registered directly) has a nil store; SyncRefs teardown
 	// must not panic on it.
 	m, _ := newTestManager(t, nil)
-	if _, err := m.SetGlobal("home"); err != nil {
-		t.Fatalf("SetGlobal(home) err = %v", err)
-	}
-	m.Register(New("bad", "", nil, nil, nil, errors.New("boom")), false)
+	m.Register(New("bad", "", nil, nil, nil, errors.New("boom")))
 	if _, ok := m.Get("bad"); !ok {
 		t.Fatal("precondition: degraded cluster should be registered")
 	}
-	// No pinned pane references "bad": teardown removes it without panicking on
-	// the nil store.
+	// No pane references "bad": teardown removes it without panicking on the nil
+	// store.
 	m.SyncRefs(nil)
 	if _, ok := m.Get("bad"); ok {
-		t.Error("degraded non-global cluster still present after teardown")
+		t.Error("degraded cluster still present after teardown")
 	}
 }
 
 // TestConnectErrorDoesNotCacheDegraded proves GetOrCreate does NOT cache a
 // connect-failed cluster: the entry is absent afterward and a subsequent call
-// re-dials, so a transient failure cannot permanently block a global switch.
+// re-dials, so a transient failure cannot permanently block a context switch.
 func TestConnectErrorDoesNotCacheDegraded(t *testing.T) {
 	wantErr := errors.New("dial tcp: refused")
 	m, calls := newTestManager(t, map[string]error{"down": wantErr})
@@ -209,54 +226,40 @@ func TestConnectErrorDoesNotCacheDegraded(t *testing.T) {
 	}
 }
 
-func TestSetGlobalSwitchesGlobalPointer(t *testing.T) {
-	m, _ := newTestManager(t, nil)
-
-	first, err := m.SetGlobal("one")
-	if err != nil {
-		t.Fatalf("SetGlobal(one) err = %v", err)
-	}
-	if m.GlobalContext() != "one" {
-		t.Errorf("GlobalContext() = %q, want %q", m.GlobalContext(), "one")
-	}
-	if m.Global() != first {
-		t.Errorf("Global() != cluster returned by SetGlobal(one)")
-	}
-
-	second, err := m.SetGlobal("two")
-	if err != nil {
-		t.Fatalf("SetGlobal(two) err = %v", err)
-	}
-	if m.GlobalContext() != "two" {
-		t.Errorf("GlobalContext() = %q, want %q", m.GlobalContext(), "two")
-	}
-	if m.Global() != second {
-		t.Errorf("Global() did not switch to the new global cluster")
-	}
-	if first == second {
-		t.Errorf("SetGlobal(two) returned the same cluster as SetGlobal(one)")
-	}
-}
-
-func TestEmptyContextResolvesToGlobal(t *testing.T) {
-	m, calls := newTestManager(t, nil)
-
-	g, err := m.SetGlobal("g")
-	if err != nil {
-		t.Fatalf("SetGlobal(g) err = %v", err)
+// TestGetOrCreateResolvesEmptyToCurrentContext proves the startup seam:
+// GetOrCreate("") dials with an empty context override (so k8s.NewClient picks
+// the kubeconfig current-context), and the resulting cluster is cached under the
+// resolved context name the client reports — letting the App seed panes with an
+// explicit context.
+func TestGetOrCreateResolvesEmptyToCurrentContext(t *testing.T) {
+	m := NewManager(nil, "", time.Second)
+	calls := make(map[string]int)
+	m.connect = func(_ /*file*/ string, ctx string) (*k8s.Client, error) {
+		calls[ctx]++
+		// Simulate k8s.NewClient resolving "" to the kubeconfig current-context.
+		resolved := ctx
+		if resolved == "" {
+			resolved = "current"
+		}
+		return &k8s.Client{Context: resolved}, nil
 	}
 
-	// "" should resolve to the global context and return the same cluster
-	// without a second connect.
-	got, err := m.GetOrCreate("")
+	c, err := m.GetOrCreate("")
 	if err != nil {
 		t.Fatalf(`GetOrCreate("") err = %v`, err)
 	}
-	if got != g {
-		t.Errorf(`GetOrCreate("") returned different cluster than global`)
+	if c.Context() != "current" {
+		t.Errorf("GetOrCreate(\"\").Context() = %q, want %q (resolved current-context)", c.Context(), "current")
 	}
-	if calls["g"] != 1 {
-		t.Errorf("connect called %d times for global, want 1", calls["g"])
+
+	// The cluster is cached under the RESOLVED name so an explicit lookup works.
+	got, ok := m.Get("current")
+	if !ok || got != c {
+		t.Errorf("cluster not cached under resolved name 'current'")
+	}
+	// It must NOT be cached under the empty key.
+	if _, ok := m.Get(""); ok {
+		t.Errorf("cluster cached under empty key, want resolved name only")
 	}
 }
 
@@ -265,9 +268,6 @@ func TestEmptyContextResolvesToGlobal(t *testing.T) {
 // Manager's single-goroutine invariant for state mutation.
 func TestDialDoesNotMutateManagerState(t *testing.T) {
 	m, calls := newTestManager(t, nil)
-	if _, err := m.SetGlobal("home"); err != nil {
-		t.Fatalf("SetGlobal(home) err = %v", err)
-	}
 
 	client, err := m.Dial("alpha")
 	if err != nil {
@@ -285,22 +285,47 @@ func TestDialDoesNotMutateManagerState(t *testing.T) {
 	}
 }
 
-func TestDialResolvesEmptyToGlobal(t *testing.T) {
+// TestDialUsesExplicitContext proves Dial dials exactly the context it is given
+// (no empty-to-default resolution) and never reads or writes the cache.
+func TestDialUsesExplicitContext(t *testing.T) {
 	m, calls := newTestManager(t, nil)
-	if _, err := m.SetGlobal("home"); err != nil {
-		t.Fatalf("SetGlobal(home) err = %v", err)
+
+	client, err := m.Dial("home")
+	if err != nil {
+		t.Fatalf(`Dial("home") err = %v`, err)
 	}
+	if client.Context != "home" {
+		t.Errorf(`Dial("home") dialed ctx %q, want "home"`, client.Context)
+	}
+	if calls["home"] != 1 {
+		t.Errorf("connect for home called %d times, want 1", calls["home"])
+	}
+	if _, ok := m.Get("home"); ok {
+		t.Error("Dial installed a cluster entry; it must not mutate manager state")
+	}
+}
+
+// TestDialEmptyContext documents Dial("") after the removal of the Manager's
+// "global" notion: Dial passes the empty override straight through to connect
+// (where k8s.NewClient would resolve the kubeconfig current-context) and, like
+// any Dial, installs no cluster entry. The empty override is NOT resolved by the
+// Manager itself — resolution happens in connect / k8s.NewClient.
+func TestDialEmptyContext(t *testing.T) {
+	m, calls := newTestManager(t, nil)
+
 	client, err := m.Dial("")
 	if err != nil {
 		t.Fatalf(`Dial("") err = %v`, err)
 	}
-	if client.Context != "home" {
-		t.Errorf(`Dial("") dialed ctx %q, want global "home"`, client.Context)
+	if client == nil {
+		t.Fatal(`Dial("") returned nil client`)
 	}
-	// SetGlobal already connected "home" once; Dial connects it again (it never
-	// reads the cache).
-	if calls["home"] != 2 {
-		t.Errorf("connect for home called %d times, want 2", calls["home"])
+	if calls[""] != 1 {
+		t.Errorf(`connect for "" called %d times, want 1`, calls[""])
+	}
+	// Dial never caches, so no entry under the empty key (or any key).
+	if _, ok := m.Get(""); ok {
+		t.Error(`Dial("") installed a cluster entry; it must not mutate manager state`)
 	}
 }
 

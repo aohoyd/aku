@@ -62,7 +62,7 @@ func TestScanKubeconfigs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries := ScanKubeconfigs([]string{root}, "")
+	entries := ScanKubeconfigs([]string{root}, nil)
 
 	got := names(entries)
 	want := []string{"alpha", "beta", "gamma"}
@@ -89,7 +89,7 @@ func TestScanKubeconfigsDuplicateFirstWriterWins(t *testing.T) {
 	writeKubeconfig(t, a, "dup")
 	writeKubeconfig(t, b, "dup")
 
-	entries := ScanKubeconfigs([]string{root}, "")
+	entries := ScanKubeconfigs([]string{root}, nil)
 
 	count := 0
 	for _, e := range entries {
@@ -116,7 +116,7 @@ func TestScanKubeconfigsDefaultWinsCollision(t *testing.T) {
 	dirFile := filepath.Join(dir, "other.yaml")
 	writeKubeconfig(t, dirFile, "shared", "extra")
 
-	entries := ScanKubeconfigs([]string{dir}, def)
+	entries := ScanKubeconfigs([]string{dir}, []string{def})
 
 	if f := fileFor(entries, "shared"); f != def {
 		t.Fatalf("default path should win collision for 'shared': want %q, got %q", def, f)
@@ -132,7 +132,7 @@ func TestScanKubeconfigsMissingDirSkipped(t *testing.T) {
 	writeKubeconfig(t, good, "ctx1")
 
 	missing := filepath.Join(root, "does-not-exist")
-	entries := ScanKubeconfigs([]string{missing, root}, "")
+	entries := ScanKubeconfigs([]string{missing, root}, nil)
 	if f := fileFor(entries, "ctx1"); f != good {
 		t.Fatalf("ctx1 should be discovered from %q despite a missing dir, got %q", good, f)
 	}
@@ -144,7 +144,7 @@ func TestScanKubeconfigsSorted(t *testing.T) {
 	writeKubeconfig(t, filepath.Join(root, "z.yaml"), "zoo")
 	writeKubeconfig(t, filepath.Join(root, "m.yaml"), "mid", "aaa")
 
-	entries := ScanKubeconfigs([]string{root}, "")
+	entries := ScanKubeconfigs([]string{root}, nil)
 
 	got := names(entries)
 	want := append([]string(nil), got...)
@@ -160,7 +160,7 @@ func TestScanKubeconfigsSorted(t *testing.T) {
 }
 
 func TestScanKubeconfigsEmptyInputs(t *testing.T) {
-	entries := ScanKubeconfigs(nil, "")
+	entries := ScanKubeconfigs(nil, nil)
 	if len(entries) != 0 {
 		t.Fatalf("expected no entries for empty inputs, got %v", names(entries))
 	}
@@ -178,7 +178,7 @@ func TestScanKubeconfigsZeroContextSkipped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries := ScanKubeconfigs([]string{root}, "")
+	entries := ScanKubeconfigs([]string{root}, nil)
 	if len(entries) != 1 {
 		t.Fatalf("expected only the real context, got %d: %+v", len(entries), entries)
 	}
@@ -198,11 +198,99 @@ func TestScanKubeconfigsDefaultPathIsDirectorySkipped(t *testing.T) {
 	// Point defaultPath at a directory, not a file.
 	dirAsDefault := t.TempDir()
 
-	entries := ScanKubeconfigs([]string{root}, dirAsDefault)
+	entries := ScanKubeconfigs([]string{root}, []string{dirAsDefault})
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry (default dir skipped), got %d: %+v", len(entries), entries)
 	}
 	if entries[0].Name != "extra-ctx" {
 		t.Errorf("got %q want %q", entries[0].Name, "extra-ctx")
+	}
+}
+
+// TestScanKubeconfigsMultipleDefaultsAllScanned verifies that every default path
+// is scanned (not just the first): the reported bug was that ~/.kube/config was
+// dropped when $KUBECONFIG named a different file. Both files' contexts must
+// appear, deduped first-writer-wins (earlier default path owns a shared name).
+func TestScanKubeconfigsMultipleDefaultsAllScanned(t *testing.T) {
+	root := t.TempDir()
+	active := filepath.Join(root, "active.yaml")
+	canonical := filepath.Join(root, "config")
+	writeKubeconfig(t, active, "active-ctx", "shared")
+	writeKubeconfig(t, canonical, "kind-kind", "shared")
+
+	entries := ScanKubeconfigs(nil, []string{active, canonical})
+
+	got := names(entries)
+	want := []string{"active-ctx", "kind-kind", "shared"} // sorted
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+	// The canonical file's exclusive context is present (the regression).
+	if f := fileFor(entries, "kind-kind"); f != canonical {
+		t.Fatalf("kind-kind should come from canonical %q, got %q", canonical, f)
+	}
+	// First default path wins the shared name.
+	if f := fileFor(entries, "shared"); f != active {
+		t.Fatalf("shared should come from first default %q, got %q", active, f)
+	}
+}
+
+// TestScanKubeconfigsExpandsTilde verifies a `~/...` directory in the config is
+// resolved against the home directory rather than treated as a literal path
+// (which would silently find nothing). This is the reported bug.
+func TestScanKubeconfigsExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeKubeconfig(t, filepath.Join(home, "configs", "prod.yaml"), "tilde-ctx")
+
+	entries := ScanKubeconfigs([]string{"~/configs"}, nil)
+	if len(entries) != 1 || entries[0].Name != "tilde-ctx" {
+		t.Fatalf("expected tilde-ctx via ~/configs, got %+v", entries)
+	}
+}
+
+// TestScanKubeconfigsExpandsEnvVar verifies a `$VAR/...` directory is resolved
+// via environment-variable expansion.
+func TestScanKubeconfigsExpandsEnvVar(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("AKU_TEST_KUBE_DIR", base)
+	writeKubeconfig(t, filepath.Join(base, "staging.yaml"), "env-ctx")
+
+	entries := ScanKubeconfigs([]string{"$AKU_TEST_KUBE_DIR"}, nil)
+	if len(entries) != 1 || entries[0].Name != "env-ctx" {
+		t.Fatalf("expected env-ctx via $AKU_TEST_KUBE_DIR, got %+v", entries)
+	}
+}
+
+func TestExpandPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("AKU_TEST_VAR", "/var/data")
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"whitespace trimmed", "  /abs/path  ", "/abs/path"},
+		{"absolute unchanged", "/etc/kube", "/etc/kube"},
+		{"tilde only", "~", home},
+		{"tilde slash", "~/configs", filepath.Join(home, "configs")},
+		{"env var", "$AKU_TEST_VAR/sub", "/var/data/sub"},
+		{"braced env var", "${AKU_TEST_VAR}/sub", "/var/data/sub"},
+		{"relative unchanged", "configs/x", "configs/x"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExpandPath(tc.in); got != tc.want {
+				t.Errorf("ExpandPath(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }

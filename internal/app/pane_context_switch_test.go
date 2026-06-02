@@ -77,11 +77,11 @@ func newTestManagerWithContexts(t *testing.T, globalCtx string, pods map[string]
 		return paneFakeClient(ctx, pods[ctx]), nil
 	})
 
-	// Eagerly register the connected global cluster with a real store seeded from
+	// Eagerly register the connected startup cluster with a real store seeded from
 	// its fake dynamic client.
 	gclient := paneFakeClient(globalCtx, pods[globalCtx])
 	gstore := k8s.NewStore(gclient.Dynamic, globalCtx, nil)
-	mgr.Register(cluster.New(globalCtx, "", gclient, gstore, k8s.NewDiscovery(), nil), true)
+	mgr.Register(cluster.New(globalCtx, "", gclient, gstore, k8s.NewDiscovery(), nil))
 
 	return mgr
 }
@@ -100,9 +100,15 @@ func newContextSwitchApp(t *testing.T, mgr *cluster.Manager) App {
 	pods := &mockPlugin{name: "pods", gvr: paneCtxPodsGVR}
 	plugin.Register(pods)
 
-	a := New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
-	a.layout.AddSplit(pods, "default")
-	a.layout.SplitAt(0).SetContext(mgr.GlobalContext())
+	// The startup context is the single eagerly-registered cluster's context
+	// (newTestManagerWithContexts registers exactly one).
+	startupCtx := ""
+	mgr.ForEach(func(c *cluster.Cluster) { startupCtx = c.Context() })
+
+	a := New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical, startupCtx)
+	// The second pane is born carrying the startup context, mirroring the real
+	// inherit-on-split behavior (panes are never created context-less).
+	a.layout.AddSplit(pods, "default", startupCtx)
 	return a
 }
 
@@ -166,9 +172,6 @@ func TestHandlePaneContextSwitch_OptimisticPin(t *testing.T) {
 	got := model.(App)
 
 	pane := got.layout.FocusedSplit()
-	if !pane.Pinned() {
-		t.Fatalf("expected focused pane to be pinned after pane context switch")
-	}
 	if pane.Context() != "staging" {
 		t.Fatalf("expected pane context 'staging', got %q", pane.Context())
 	}
@@ -180,28 +183,27 @@ func TestHandlePaneContextSwitch_OptimisticPin(t *testing.T) {
 	}
 }
 
-func TestHandlePaneContextSwitch_NoOpWhenAlreadyPinnedSame(t *testing.T) {
+func TestHandlePaneContextSwitch_NoOpWhenAlreadyOnSameContext(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global":  {testPod("global-pod", "default")},
 		"staging": {testPod("staging-pod", "default")},
 	})
 	app := newContextSwitchApp(t, mgr)
 	pane := app.layout.FocusedSplit()
-	pane.SetPinned(true)
 	pane.SetContext("staging")
-	// Already pinned to a CONNECTED staging cluster: re-selecting it is a no-op.
+	// Already on a CONNECTED staging cluster: re-selecting it is a no-op.
 	app.mgr.RegisterConnected("staging", paneFakeClient("staging", nil))
 
 	_, cmd := app.handlePaneContextSwitch("staging")
 	if cmd != nil {
-		t.Fatalf("expected no-op (nil cmd) when re-pinning to the same connected context")
+		t.Fatalf("expected no-op (nil cmd) when re-selecting the same connected context")
 	}
 }
 
-// TestHandlePaneContextSwitch_RetriesAfterFailedConnect proves a pane left
-// pinned-but-broken by a failed connect can RETRY: re-selecting the SAME context
+// TestHandlePaneContextSwitch_RetriesAfterFailedConnect proves a pane left on a
+// broken context by a failed connect can RETRY: re-selecting the SAME context
 // when its cluster is NOT connected must re-attempt the dial (non-nil cmd), not
-// silently dead-end on the already-pinned guard.
+// silently dead-end on the already-on-context guard.
 func TestHandlePaneContextSwitch_RetriesAfterFailedConnect(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global":  {testPod("global-pod", "default")},
@@ -209,13 +211,12 @@ func TestHandlePaneContextSwitch_RetriesAfterFailedConnect(t *testing.T) {
 	})
 	app := newContextSwitchApp(t, mgr)
 	pane := app.layout.FocusedSplit()
-	// Pinned to staging but the connect FAILED: no cluster is registered for it.
-	pane.SetPinned(true)
+	// On staging but the connect FAILED: no cluster is registered for it.
 	pane.SetContext("staging")
 
 	_, cmd := app.handlePaneContextSwitch("staging")
 	if cmd == nil {
-		t.Fatal("expected retry connect cmd for pinned-but-broken context, got nil")
+		t.Fatal("expected retry connect cmd for broken context, got nil")
 	}
 	ready := extractClusterReady(t, cmd)
 	if ready.Context != "staging" {
@@ -271,12 +272,12 @@ func TestHandlePaneContextSwitch_SecondPaneStaysOnGlobal(t *testing.T) {
 	})
 	app := newContextSwitchApp(t, mgr)
 
-	// Add a second pane (inherits global, unpinned).
+	// Add a second pane (inherits global).
 	pods := app.layout.FocusedSplit().Plugin()
-	app.layout.AddSplit(pods, "default")
+	app.layout.AddSplit(pods, "default", "")
 	app.layout.SplitAt(1).SetContext("global")
 
-	// Focus the second pane and pin it to staging.
+	// Focus the second pane and switch it to staging.
 	app.layout.FocusSplitAt(1)
 	model, connectCmd := app.handlePaneContextSwitch("staging")
 	app = model.(App)
@@ -284,22 +285,19 @@ func TestHandlePaneContextSwitch_SecondPaneStaysOnGlobal(t *testing.T) {
 	model, _ = app.handleClusterReady(ready)
 	app = model.(App)
 
-	// Pane 0 is untouched: still global, still unpinned.
+	// Pane 0 is untouched: still on global.
 	p0 := app.layout.SplitAt(0)
-	if p0.Pinned() {
-		t.Fatalf("expected pane 0 to remain unpinned")
-	}
 	if p0.Context() != "global" {
 		t.Fatalf("expected pane 0 to stay on global, got %q", p0.Context())
 	}
-	// Pane 1 is pinned to staging.
+	// Pane 1 is now on staging.
 	p1 := app.layout.SplitAt(1)
-	if !p1.Pinned() || p1.Context() != "staging" {
-		t.Fatalf("expected pane 1 pinned to staging, got pinned=%v ctx=%q", p1.Pinned(), p1.Context())
+	if p1.Context() != "staging" {
+		t.Fatalf("expected pane 1 on staging, got ctx=%q", p1.Context())
 	}
 }
 
-func TestHandlePaneContextSwitch_RepinReleasesNoPanic(t *testing.T) {
+func TestHandlePaneContextSwitch_ReswitchNoPanic(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global":  {testPod("global-pod", "default")},
 		"staging": {testPod("staging-pod", "default")},
@@ -307,14 +305,14 @@ func TestHandlePaneContextSwitch_RepinReleasesNoPanic(t *testing.T) {
 	})
 	app := newContextSwitchApp(t, mgr)
 
-	// global -> staging (pin staging, drop global)
+	// global -> staging (switch to staging, drop global)
 	model, c1 := app.handlePaneContextSwitch("staging")
 	app = model.(App)
 	model, _ = app.handleClusterReady(extractClusterReady(t, c1))
 	app = model.(App)
 
-	// staging -> prod (pin prod, drop staging). staging hits refcount 0 and is
-	// torn down; must not panic.
+	// staging -> prod (switch to prod, drop staging). staging hits refcount 0 and
+	// is torn down; must not panic.
 	model, c2 := app.handlePaneContextSwitch("prod")
 	app = model.(App)
 	model, _ = app.handleClusterReady(extractClusterReady(t, c2))
@@ -322,10 +320,7 @@ func TestHandlePaneContextSwitch_RepinReleasesNoPanic(t *testing.T) {
 
 	pane := app.layout.FocusedSplit()
 	if pane.Context() != "prod" {
-		t.Fatalf("expected pane on prod after repin, got %q", pane.Context())
-	}
-	if !pane.Pinned() {
-		t.Fatalf("expected pane to remain pinned after repin")
+		t.Fatalf("expected pane on prod after reswitch, got %q", pane.Context())
 	}
 
 	// The staging cluster should have been released and torn down (no longer in
@@ -336,7 +331,7 @@ func TestHandlePaneContextSwitch_RepinReleasesNoPanic(t *testing.T) {
 	if prod, ok := mgr.Get("prod"); !ok {
 		t.Fatalf("expected prod cluster to remain referenced")
 	} else if prod.RefCount() != 1 {
-		t.Fatalf("expected prod refCount 1 (one pinned pane), got %d", prod.RefCount())
+		t.Fatalf("expected prod refCount 1 (one pane), got %d", prod.RefCount())
 	}
 }
 
@@ -355,7 +350,7 @@ func TestHandleClusterReady_FailedConnectLeaksNoRef(t *testing.T) {
 	})
 	gclient := paneFakeClient("global", []*unstructured.Unstructured{testPod("global-pod", "default")})
 	gstore := k8s.NewStore(gclient.Dynamic, "global", nil)
-	mgr.Register(cluster.New("global", "", gclient, gstore, k8s.NewDiscovery(), nil), true)
+	mgr.Register(cluster.New("global", "", gclient, gstore, k8s.NewDiscovery(), nil))
 
 	app := newContextSwitchApp(t, mgr)
 
@@ -391,21 +386,167 @@ func TestHandleClusterReady_FailedConnectLeaksNoRef(t *testing.T) {
 		t.Fatalf("failed connect leaked a manager entry for broken context")
 	}
 
-	// The pane is left pinned-but-empty so the user can switch again.
+	// The pane is left on the broken context but empty so the user can switch again.
 	pane := app.layout.FocusedSplit()
-	if !pane.Pinned() || pane.Context() != "broken" {
-		t.Fatalf("expected pane to stay pinned to broken, got pinned=%v ctx=%q", pane.Pinned(), pane.Context())
+	if pane.Context() != "broken" {
+		t.Fatalf("expected pane to stay on broken, got ctx=%q", pane.Context())
 	}
 	if pane.Len() != 0 {
 		t.Fatalf("expected pane empty after failed connect, got %d objects", pane.Len())
 	}
 }
 
-// TestHandleClusterReady_AppliesToNonFocusedPinnedPane proves that when focus
+// TestHandleClusterReady_FailedConnectMarksPaneOffline proves a failed async
+// connect flags the affected pane with an "⚠ offline" marker, returns without an
+// inline connect, leaves OTHER panes untouched (online), and leaks no manager
+// entry for the failed context.
+func TestHandleClusterReady_FailedConnectMarksPaneOffline(t *testing.T) {
+	entries := []cluster.ContextEntry{{Name: "global"}, {Name: "broken"}}
+	mgr := cluster.NewManager(entries, "", 0)
+	mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
+		if ctx == "broken" {
+			return nil, errors.New("dial failed")
+		}
+		return paneFakeClient(ctx, nil), nil
+	})
+	gclient := paneFakeClient("global", []*unstructured.Unstructured{testPod("global-pod", "default")})
+	gstore := k8s.NewStore(gclient.Dynamic, "global", nil)
+	mgr.Register(cluster.New("global", "", gclient, gstore, k8s.NewDiscovery(), nil))
+
+	app := newContextSwitchApp(t, mgr)
+
+	// A second pane stays on the (healthy) global context.
+	pods := app.layout.FocusedSplit().Plugin()
+	app.layout.AddSplit(pods, "default", "")
+	app.layout.SplitAt(1).SetContext("global")
+
+	// Focus pane 1 and switch it to the broken context.
+	app.layout.FocusSplitAt(1)
+	model, connectCmd := app.handlePaneContextSwitch("broken")
+	app = model.(App)
+	if connectCmd == nil {
+		t.Fatalf("expected connect command")
+	}
+
+	ready := extractClusterReady(t, connectCmd)
+	if ready.Err == nil {
+		t.Fatalf("expected a dial error in ClusterReadyMsg")
+	}
+	model, _ = app.handleClusterReady(ready)
+	app = model.(App)
+
+	// The broken pane is flagged offline.
+	broken := app.layout.SplitAt(1)
+	if broken.Context() != "broken" {
+		t.Fatalf("expected pane 1 to stay on broken, got %q", broken.Context())
+	}
+	if !broken.Offline() {
+		t.Fatal("expected the failed pane to be marked offline")
+	}
+
+	// The OTHER pane (on global) is intact and NOT offline.
+	p0 := app.layout.SplitAt(0)
+	if p0.Context() != "global" {
+		t.Fatalf("expected pane 0 to stay on global, got %q", p0.Context())
+	}
+	if p0.Offline() {
+		t.Fatal("expected the global pane to remain online (not flagged offline)")
+	}
+
+	// No manager entry was leaked for the failed context.
+	if _, ok := mgr.Get("broken"); ok {
+		t.Fatalf("failed connect leaked a manager entry for broken context")
+	}
+	// The global cluster is untouched.
+	if g, ok := mgr.Get("global"); !ok || !g.Connected() {
+		t.Fatal("global cluster must remain connected after a failed connect on another pane")
+	}
+}
+
+// TestHandleClusterReady_OfflineMarkerRecovers proves the offline marker clears
+// automatically once the cluster becomes connected and the sync path runs: a
+// pane left offline by a failed dial recovers when a subsequent successful
+// connect registers a live cluster and the heartbeat/sync path recomputes the
+// markers.
+func TestHandleClusterReady_OfflineMarkerRecovers(t *testing.T) {
+	entries := []cluster.ContextEntry{{Name: "global"}, {Name: "flaky"}}
+	mgr := cluster.NewManager(entries, "", 0)
+	fail := true
+	mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
+		if ctx == "flaky" && fail {
+			return nil, errors.New("dial failed")
+		}
+		return paneFakeClient(ctx, nil), nil
+	})
+	gclient := paneFakeClient("global", []*unstructured.Unstructured{testPod("global-pod", "default")})
+	gstore := k8s.NewStore(gclient.Dynamic, "global", nil)
+	mgr.Register(cluster.New("global", "", gclient, gstore, k8s.NewDiscovery(), nil))
+
+	app := newContextSwitchApp(t, mgr)
+
+	// First switch fails: the pane is flagged offline.
+	model, c1 := app.handlePaneContextSwitch("flaky")
+	app = model.(App)
+	model, _ = app.handleClusterReady(extractClusterReady(t, c1))
+	app = model.(App)
+	if !app.layout.FocusedSplit().Offline() {
+		t.Fatal("precondition: pane should be offline after the failed dial")
+	}
+
+	// The cluster recovers: simulate it becoming connected by registering a live
+	// client (as a successful connect would), then run the sync path.
+	fail = false
+	app.mgr.RegisterConnected("flaky", paneFakeClient("flaky", nil))
+	app.syncPaneFooters()
+
+	if app.layout.FocusedSplit().Offline() {
+		t.Fatal("expected the offline marker to clear once the cluster is connected")
+	}
+}
+
+// TestHandleClusterHealth_ClearsOfflineMarkerOnRecovery proves the production
+// recovery trigger: when a heartbeat tick is processed after the cluster has
+// reconnected, handleClusterHealth's sync path clears the pane's offline marker.
+func TestHandleClusterHealth_ClearsOfflineMarkerOnRecovery(t *testing.T) {
+	entries := []cluster.ContextEntry{{Name: "global"}, {Name: "flaky"}}
+	mgr := cluster.NewManager(entries, "", 0)
+	fail := true
+	mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
+		if ctx == "flaky" && fail {
+			return nil, errors.New("dial failed")
+		}
+		return paneFakeClient(ctx, nil), nil
+	})
+	gclient := paneFakeClient("global", []*unstructured.Unstructured{testPod("global-pod", "default")})
+	gstore := k8s.NewStore(gclient.Dynamic, "global", nil)
+	mgr.Register(cluster.New("global", "", gclient, gstore, k8s.NewDiscovery(), nil))
+
+	app := newContextSwitchApp(t, mgr)
+
+	model, c1 := app.handlePaneContextSwitch("flaky")
+	app = model.(App)
+	model, _ = app.handleClusterReady(extractClusterReady(t, c1))
+	app = model.(App)
+	if !app.layout.FocusedSplit().Offline() {
+		t.Fatal("precondition: pane should be offline after the failed dial")
+	}
+
+	// Cluster comes back; a heartbeat tick lands and drives the recovery sync.
+	fail = false
+	app.mgr.RegisterConnected("flaky", paneFakeClient("flaky", nil))
+	model, _ = app.handleClusterHealth(msgs.ClusterHealthMsg{Context: "flaky", Online: true})
+	app = model.(App)
+
+	if app.layout.FocusedSplit().Offline() {
+		t.Fatal("expected heartbeat recovery to clear the offline marker")
+	}
+}
+
+// TestHandleClusterReady_AppliesToNonFocusedMatchingPane proves that when focus
 // moves between dispatching the connect and receiving ClusterReadyMsg, the
-// handler still populates the correct (now non-focused) pinned pane — instead of
-// dropping the message because it no longer matches the focused pane.
-func TestHandleClusterReady_AppliesToNonFocusedPinnedPane(t *testing.T) {
+// handler still populates the correct (now non-focused) matching pane — instead
+// of dropping the message because it no longer matches the focused pane.
+func TestHandleClusterReady_AppliesToNonFocusedMatchingPane(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global":  {testPod("global-pod", "default")},
 		"staging": {testPod("staging-a", "default"), testPod("staging-b", "default")},
@@ -414,10 +555,10 @@ func TestHandleClusterReady_AppliesToNonFocusedPinnedPane(t *testing.T) {
 
 	// Add a second pane following global, focus it. Pane 0 stays on global.
 	pods := app.layout.FocusedSplit().Plugin()
-	app.layout.AddSplit(pods, "default")
+	app.layout.AddSplit(pods, "default", "")
 	app.layout.SplitAt(1).SetContext("global")
 
-	// Focus pane 0 and pin it to staging (dispatch connect).
+	// Focus pane 0 and switch it to staging (dispatch connect).
 	app.layout.FocusSplitAt(0)
 	model, connectCmd := app.handlePaneContextSwitch("staging")
 	app = model.(App)
@@ -426,21 +567,21 @@ func TestHandleClusterReady_AppliesToNonFocusedPinnedPane(t *testing.T) {
 	// Move focus to pane 1 BEFORE the ready msg is handled.
 	app.layout.FocusSplitAt(1)
 
-	// Deliver ClusterReadyMsg: it must populate pane 0 (the pinned, awaiting,
+	// Deliver ClusterReadyMsg: it must populate pane 0 (the matching, awaiting,
 	// non-focused pane), not silently drop because focus moved.
 	model, _ = app.handleClusterReady(ready)
 	app = model.(App)
 
 	p0 := app.layout.SplitAt(0)
-	if !p0.Pinned() || p0.Context() != "staging" {
-		t.Fatalf("expected pane 0 pinned to staging, got pinned=%v ctx=%q", p0.Pinned(), p0.Context())
+	if p0.Context() != "staging" {
+		t.Fatalf("expected pane 0 on staging, got ctx=%q", p0.Context())
 	}
 	if p0.Namespace() != "default" {
 		t.Fatalf("expected pane 0 to land on staging default ns, got %q", p0.Namespace())
 	}
 
-	// The staging cluster must be registered and ref'd by exactly the one pinned
-	// pane (pane 0) — not leaked, not dropped.
+	// The staging cluster must be registered and ref'd by exactly the one
+	// matching pane (pane 0) — not leaked, not dropped.
 	staging, ok := mgr.Get("staging")
 	if !ok {
 		t.Fatalf("expected staging cluster registered after ready")
@@ -452,15 +593,16 @@ func TestHandleClusterReady_AppliesToNonFocusedPinnedPane(t *testing.T) {
 	// Drive the staging informer; pane 0 populates with staging's two pods.
 	app = deliverResourceUpdate(t, app, "staging", 2)
 	if app.layout.SplitAt(0).Len() != 2 {
-		t.Fatalf("expected non-focused pinned pane 0 to show 2 staging objects, got %d", app.layout.SplitAt(0).Len())
+		t.Fatalf("expected non-focused matching pane 0 to show 2 staging objects, got %d", app.layout.SplitAt(0).Len())
 	}
 }
 
-// TestHandlePaneContextSwitch_RapidRepinReconcilesRefs proves the double-switch
-// race is fixed: re-pinning A->B before A's ClusterReadyMsg arrives leaves
-// exactly B ref'd and A not ref'd (A torn down, no leak), regardless of message
-// ordering, because refcounts are reconciled against the pane's CURRENT context.
-func TestHandlePaneContextSwitch_RapidRepinReconcilesRefs(t *testing.T) {
+// TestHandlePaneContextSwitch_RapidReswitchReconcilesRefs proves the
+// double-switch race is fixed: switching A->B before A's ClusterReadyMsg arrives
+// leaves exactly B ref'd and A not ref'd (A torn down, no leak), regardless of
+// message ordering, because refcounts are reconciled against the pane's CURRENT
+// context.
+func TestHandlePaneContextSwitch_RapidReswitchReconcilesRefs(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global": {testPod("global-pod", "default")},
 		"alpha":  {testPod("alpha-pod", "default")},
@@ -468,12 +610,12 @@ func TestHandlePaneContextSwitch_RapidRepinReconcilesRefs(t *testing.T) {
 	})
 	app := newContextSwitchApp(t, mgr)
 
-	// Pin to alpha (dispatch connect A) but DO NOT deliver its ready msg yet.
+	// Switch to alpha (dispatch connect A) but DO NOT deliver its ready msg yet.
 	model, cA := app.handlePaneContextSwitch("alpha")
 	app = model.(App)
 	readyA := extractClusterReady(t, cA)
 
-	// Before A arrives, re-pin to beta (dispatch connect B).
+	// Before A arrives, re-switch to beta (dispatch connect B).
 	model, cB := app.handlePaneContextSwitch("beta")
 	app = model.(App)
 	readyB := extractClusterReady(t, cB)
@@ -485,16 +627,16 @@ func TestHandlePaneContextSwitch_RapidRepinReconcilesRefs(t *testing.T) {
 	app = model.(App)
 
 	pane := app.layout.FocusedSplit()
-	if !pane.Pinned() || pane.Context() != "beta" {
-		t.Fatalf("expected pane pinned to beta after rapid re-pin, got pinned=%v ctx=%q", pane.Pinned(), pane.Context())
+	if pane.Context() != "beta" {
+		t.Fatalf("expected pane on beta after rapid re-switch, got ctx=%q", pane.Context())
 	}
 
-	// alpha must NOT be referenced: no pane is pinned to it, so even though A's
+	// alpha must NOT be referenced: no pane is on it, so even though A's
 	// late ready msg registered it momentarily, SyncRefs tore it back down.
 	if a, ok := mgr.Get("alpha"); ok {
-		t.Fatalf("expected alpha torn down (no pinned pane), still present with refCount %d", a.RefCount())
+		t.Fatalf("expected alpha torn down (no pane references it), still present with refCount %d", a.RefCount())
 	}
-	// beta is ref'd by exactly the one pinned pane.
+	// beta is ref'd by exactly the one matching pane.
 	beta, ok := mgr.Get("beta")
 	if !ok {
 		t.Fatalf("expected beta cluster registered and referenced")
@@ -510,28 +652,28 @@ func TestHandlePaneContextSwitch_RapidRepinReconcilesRefs(t *testing.T) {
 	}
 }
 
-// TestCloseSplit_PinnedToGlobalContext proves a pane pinned (via gX) to the
-// CURRENT global context, then closed, neither panics nor mis-counts: SyncRefs
-// reconciles against the remaining pinned panes and never tears down the global
-// cluster, so global survives and is still usable.
-func TestCloseSplit_PinnedToGlobalContext(t *testing.T) {
+// TestCloseSplit_ClosesSplitOnStartupContext proves that closing one of two
+// panes on the startup context neither panics nor mis-counts: SyncRefs reconciles
+// against the remaining panes, and because one pane still references the startup
+// context its cluster survives and is still usable.
+func TestCloseSplit_ClosesSplitOnStartupContext(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global": {testPod("global-pod", "default")},
 	})
 	app := newContextSwitchApp(t, mgr)
 
-	// Add a second pane and pin it explicitly to the GLOBAL context name.
+	// Add a second pane on the startup context name.
 	pods := app.layout.FocusedSplit().Plugin()
-	app.layout.AddSplit(pods, "default")
+	app.layout.AddSplit(pods, "default", "")
 	app.layout.SplitAt(app.layout.SplitCount() - 1).SetContext("global")
 	app.layout.FocusSplitAt(app.layout.SplitCount() - 1)
-	app = pinFocusedTo(t, app, "global")
 
-	if app.layout.FocusedSplit().Context() != "global" || !app.layout.FocusedSplit().Pinned() {
-		t.Fatalf("precondition: focused pane should be pinned to global")
+	if app.layout.FocusedSplit().Context() != "global" {
+		t.Fatalf("precondition: focused pane should be on the startup context")
 	}
 
-	// Close the global-pinned pane. Must not panic and global must survive.
+	// Close one pane. Must not panic; the startup cluster must survive because the
+	// other pane still references it.
 	app.layout.FocusSplitAt(app.layout.SplitCount() - 1)
 	before := app.layout.SplitCount()
 	model, _ := app.executeCommand("close-current-panel")
@@ -542,10 +684,10 @@ func TestCloseSplit_PinnedToGlobalContext(t *testing.T) {
 	}
 	g, ok := mgr.Get("global")
 	if !ok {
-		t.Fatal("global cluster must never be torn down by close")
+		t.Fatal("startup cluster must not be torn down while a pane still references it")
 	}
 	if g == nil || !g.Connected() {
-		t.Fatal("global cluster should remain connected after closing a pane pinned to it")
+		t.Fatal("startup cluster should remain connected after closing one referencing pane")
 	}
 }
 
@@ -563,7 +705,7 @@ func TestHandleClusterReady_FailedConnect_PaneEmptyAndWarned(t *testing.T) {
 	})
 	gclient := paneFakeClient("global", []*unstructured.Unstructured{testPod("global-pod", "default")})
 	gstore := k8s.NewStore(gclient.Dynamic, "global", nil)
-	mgr.Register(cluster.New("global", "", gclient, gstore, k8s.NewDiscovery(), nil), true)
+	mgr.Register(cluster.New("global", "", gclient, gstore, k8s.NewDiscovery(), nil))
 
 	app := newContextSwitchApp(t, mgr)
 
@@ -579,6 +721,44 @@ func TestHandleClusterReady_FailedConnect_PaneEmptyAndWarned(t *testing.T) {
 	}
 	if et := app.statusBar.ErrText(); et == "" {
 		t.Fatal("expected a status error after a failed connect")
+	}
+}
+
+// TestHandleClusterReady_SuccessClearsOfflineMarker proves the SUCCESS path of
+// handleClusterReady clears a pane's "⚠ offline" marker once its context
+// reconnects. A pane marked offline (e.g. by a prior failed connect) must come
+// back online when a connected cluster arrives — this is the success-path
+// counterpart to handleClusterHealth's recovery. It guards against removing the
+// success path's syncPaneFooters call (the only thing that clears the marker
+// here).
+func TestHandleClusterReady_SuccessClearsOfflineMarker(t *testing.T) {
+	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
+		"global":  {testPod("global-pod", "default")},
+		"staging": {testPod("staging-pod", "default")},
+	})
+	app := newContextSwitchApp(t, mgr)
+
+	// Switch the focused pane to staging (dispatch the async connect) and mark the
+	// pane offline, simulating the state left by a prior failed connect.
+	model, connectCmd := app.handlePaneContextSwitch("staging")
+	app = model.(App)
+	pane := app.layout.FocusedSplit()
+	pane.SetOffline(true)
+	if !pane.Offline() {
+		t.Fatalf("precondition: pane should be marked offline")
+	}
+
+	// Deliver a SUCCESSFUL ClusterReadyMsg for staging. The success path installs
+	// the connected client and refreshes footers, which must clear the marker.
+	ready := extractClusterReady(t, connectCmd)
+	if ready.Err != nil {
+		t.Fatalf("precondition: expected a successful connect, got err %v", ready.Err)
+	}
+	model, _ = app.handleClusterReady(ready)
+	app = model.(App)
+
+	if app.layout.FocusedSplit().Offline() {
+		t.Fatal("expected pane offline marker cleared after a successful reconnect")
 	}
 }
 
@@ -691,7 +871,7 @@ func TestHandleClusterReady_PresentResourceSubscribes(t *testing.T) {
 }
 
 // TestResourceUpdatedMsg_ContextRouting proves the strict per-context routing in
-// app.go: a pane pinned to "staging" is updated ONLY by a ResourceUpdatedMsg
+// app.go: a pane on "staging" is updated ONLY by a ResourceUpdatedMsg
 // tagged Context:"staging", never by one tagged with another live context.
 func TestResourceUpdatedMsg_ContextRouting(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{

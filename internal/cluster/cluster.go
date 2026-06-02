@@ -1,8 +1,8 @@
 // Package cluster provides a session manager that owns one Cluster per
 // kube-context. Each Cluster bundles its own Client, Store, and Discovery so
 // resources from different clusters never collide. Clusters are created lazily
-// on first use and reference-counted; the global context is pinned and never
-// torn down by ref-count.
+// on first use and reference-counted; a context referenced by zero panes is
+// torn down.
 package cluster
 
 import (
@@ -29,10 +29,9 @@ type Cluster struct {
 	err       error
 
 	// refCount tracks how many panes currently reference this cluster. It is
-	// reconciled by Manager.SyncRefs against the set of panes currently pinned to
-	// this context (one ref per pinned pane). When it reaches zero the Manager
-	// tears the cluster down, unless the cluster is the global one (which is
-	// pinned and never torn down).
+	// reconciled by Manager.SyncRefs against the set of panes currently
+	// referencing this context (one ref per pane). When it reaches zero the
+	// Manager tears the cluster down.
 	refCount int
 }
 
@@ -53,8 +52,9 @@ func New(context, file string, client *k8s.Client, store *k8s.Store, discovery *
 }
 
 // The accessor methods below are nil-receiver-safe: a nil *Cluster (e.g. the
-// result of Manager.Global() before any global cluster is created, as in tests)
-// behaves like a fully degraded cluster — empty context, nil client/store/
+// result of Manager.Get() for a context whose cluster has not been created yet,
+// as in tests) behaves like a fully degraded cluster — empty context, nil
+// client/store/
 // discovery, not connected. This matters because a typed-nil *Cluster wrapped in
 // the plugin.Cluster interface is NOT interface-nil, so plugin.StoreOf would
 // otherwise call Store() on a nil pointer and panic.
@@ -112,7 +112,7 @@ func (c *Cluster) Err() error {
 func (c *Cluster) Connected() bool { return c != nil && c.client != nil && c.err == nil }
 
 // RefCount returns the current reference count (the number of panes the Manager
-// believes are pinned to this cluster). It is primarily an observability/test
+// believes reference this cluster). It is primarily an observability/test
 // seam for asserting the per-pane refcount invariant; production code reconciles
 // it via Manager.SyncRefs rather than reading this directly. Nil-receiver-safe.
 func (c *Cluster) RefCount() int {

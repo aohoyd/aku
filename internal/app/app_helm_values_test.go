@@ -52,7 +52,7 @@ func setupHelmAppWithRelease(t *testing.T, hc helm.Client, releaseName, ns strin
 	a.helmClient = hc
 	p := helmreleases.NewWithClient(hc)
 	plugin.Register(p)
-	a.layout.AddSplit(p, ns)
+	a.layout.AddSplit(p, ns, "")
 	obj := &unstructured.Unstructured{}
 	obj.SetName(releaseName)
 	obj.SetNamespace(ns)
@@ -146,7 +146,7 @@ func TestRefreshDetailPanelOpts_ValuesModeNonHelmFallsBackToManifest(t *testing.
 	a := newTestApp()
 	pods := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
 	plugin.Register(pods)
-	a.layout.AddSplit(pods, "default")
+	a.layout.AddSplit(pods, "default", "")
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
 	obj.SetNamespace("default")

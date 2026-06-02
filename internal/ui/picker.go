@@ -43,6 +43,22 @@ func (p *Picker[T]) SetItems(items []T) {
 	p.applyFilter()
 }
 
+// SetDisplay swaps the per-item display function and reapplies the filter so the
+// overlay rows reflect the new rendering. The display function is presentation
+// only: filtering and the selected value still operate on the raw item, so
+// changing it never affects what a selection yields.
+func (p *Picker[T]) SetDisplay(display func(T) string) {
+	p.cfg.Display = display
+	p.applyFilter()
+}
+
+// DisplayOf returns the rendered display string for an item using the current
+// display function. It is presentation only and is primarily useful for tests
+// that assert per-row rendering.
+func (p Picker[T]) DisplayOf(item T) string {
+	return p.cfg.Display(item)
+}
+
 // Open activates the picker, resets state, creates the filter input.
 func (p *Picker[T]) Open() {
 	p.overlay.Reset()

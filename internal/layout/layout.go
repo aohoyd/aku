@@ -86,11 +86,15 @@ func New(width, height, logBufSize int, defaultTimeRange string, defaultSinceSec
 	}
 }
 
-// AddSplit adds a new split pane for the given plugin.
-func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace string) {
+// AddSplit adds a new split pane for the given plugin, seeded with the given
+// namespace and kube-context. The context is set at creation so the pane is
+// never observed with an empty context (which would otherwise flicker the
+// wrong context badge before a later SetContext landed).
+func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace, context string) {
 	w, h := l.splitDimensions(l.SplitCount() + 1)
 	rl := ui.NewResourceList(p, w, h)
 	rl.SetNamespace(namespace)
+	rl.SetContext(context)
 
 	// Blur all existing splits
 	for i := range l.splits {

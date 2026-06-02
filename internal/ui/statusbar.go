@@ -104,6 +104,12 @@ func (s *StatusBar) ContextName() string {
 	return s.contextName
 }
 
+// Online reports whether the health badge is currently in its online (green)
+// state. Intended for tests asserting the badge tracks the focused pane.
+func (s *StatusBar) Online() bool {
+	return s.online
+}
+
 func truncateContext(name string, max int) string {
 	if ansi.StringWidth(name) <= max {
 		return name

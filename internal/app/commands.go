@@ -41,6 +41,18 @@ func (a App) focusedSelection() (*ui.ResourceList, *unstructured.Unstructured, b
 
 func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 	switch {
+	// Per-pane context switch dispatched by the contexts plugin's Commander:
+	// "pane-switch-context <name>". Matched before the generic goto-/split-
+	// prefixes (it carries an argument).
+	case strings.HasPrefix(command, "pane-switch-context "):
+		ctxName := strings.TrimSpace(strings.TrimPrefix(command, "pane-switch-context "))
+		return a.handlePaneSwitchContext(ctxName)
+
+	// Open the contexts plugin IN the focused pane (gX): push the current
+	// resource onto the nav stack so Esc returns to it.
+	case command == "goto-contexts":
+		return a.handleGotoContexts()
+
 	// Navigation: goto-<resource>
 	case strings.HasPrefix(command, "goto-"):
 		resourceName := strings.TrimPrefix(command, "goto-")
@@ -112,6 +124,14 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
+		// Check Commander first so a context-switch plugin (which maps Enter to an
+		// app command string) takes precedence over goto/drill-down behavior.
+		if commander, ok := focused.Plugin().(plugin.Commander); ok {
+			if cmd, isCmd := commander.Command(sel); isCmd {
+				return a.executeCommand(cmd)
+			}
+		}
+
 		// Check goto first
 		if goToer, ok := focused.Plugin().(plugin.GoToer); ok {
 			if resource, ns, isGoto := goToer.GoTo(sel); isGoto {
@@ -163,6 +183,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			// Horizontal: left = FocusPrev
 			a.keyTrie.Reset()
 			a.layout.FocusPrev()
+			a = a.syncStatusBarContext()
 			var descCmd tea.Cmd
 			a, descCmd = a.refreshDetailPanel()
 			var cmd tea.Cmd
@@ -183,6 +204,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			// Horizontal: right = FocusNext
 			a.keyTrie.Reset()
 			a.layout.FocusNext()
+			a = a.syncStatusBarContext()
 			var descCmd tea.Cmd
 			a, descCmd = a.refreshDetailPanel()
 			var cmd tea.Cmd
@@ -197,6 +219,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			// Vertical: up = FocusPrev
 			a.keyTrie.Reset()
 			a.layout.FocusPrev()
+			a = a.syncStatusBarContext()
 			var descCmd tea.Cmd
 			a, descCmd = a.refreshDetailPanel()
 			var cmd tea.Cmd
@@ -224,6 +247,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			// Vertical: down = FocusNext
 			a.keyTrie.Reset()
 			a.layout.FocusNext()
+			a = a.syncStatusBarContext()
 			var descCmd tea.Cmd
 			a, descCmd = a.refreshDetailPanel()
 			var cmd tea.Cmd
@@ -263,6 +287,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 	case command == "focus-next-split":
 		a.keyTrie.Reset()
 		a.layout.FocusNext()
+		a = a.syncStatusBarContext()
 		var descCmd tea.Cmd
 		a, descCmd = a.refreshDetailPanel()
 		var cmd tea.Cmd
@@ -463,16 +488,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 	// Context picker (global scope: gx)
 	case command == "context-picker":
 		a.activeOverlay = overlayContextPicker
-		a.contextPicker.SetScope(true)
 		a.contextPicker.SetContexts(a.contextNames())
-		a.contextPicker.Open()
-		return a, nil
-
-	// Context picker (pane scope: gX)
-	case command == "pane-context-picker":
-		a.activeOverlay = overlayContextPicker
-		a.contextPicker.SetScope(false)
-		a.contextPicker.SetContexts(a.contextNames())
+		a.contextPicker.SetAnnotations(a.distinctPaneContexts(), a.contextFor(nil))
 		a.contextPicker.Open()
 		return a, nil
 
@@ -990,18 +1007,18 @@ func (a App) closeRightPanel() App {
 // resources it held. Callers must guarantee SplitCount() > 1 (the last split is
 // never closed).
 //
-// Refcount invariant enforced here: a split holds exactly one manager reference
-// iff it is PINNED to a NON-GLOBAL context (Task 9 takes that ref via Acquire on
-// pin; a pane following global holds no ref). So on close we Release(closingCtx)
-// only in that case, keeping Acquire/Release balanced with handlePaneContextSwitch.
+// Every pane references exactly one context. A cluster's refcount is the number
+// of remaining panes referencing it; SyncRefs recomputes this from the live
+// pane set and tears a cluster down when its count reaches zero. There is no
+// global exemption — even the startup cluster is torn down once no pane uses it.
 //
 // Order matters: the closing split's (gvr, ns) is unsubscribed on the CLOSING
-// split's OWN cluster store FIRST (resolved before removal — Release may tear the
-// cluster down and drop the store), then the split is removed from the layout (so
-// unsubscribeOnStoreIfUnused's "still in use?" scan no longer sees the closing
-// pane), then Release decrements the ref. If several panes share the same pinned
-// context, Release just decrements and the Manager tears down only at the last
-// one.
+// split's OWN cluster store FIRST (resolved before removal — SyncRefs may tear
+// the cluster down and drop the store), then the split is removed from the
+// layout (so unsubscribeOnStoreIfUnused's "still in use?" scan no longer sees
+// the closing pane), then SyncRefs reconciles refcounts against the remaining
+// panes. If several panes share the closing context, SyncRefs keeps the cluster
+// alive and tears it down only when the last referencing pane is gone.
 func (a App) closeFocusedSplit() App {
 	closing := a.layout.FocusedSplit()
 	if closing == nil {
@@ -1013,8 +1030,8 @@ func (a App) closeFocusedSplit() App {
 	closingNs := closing.EffectiveNamespace()
 
 	// Resolve the closing split's cluster store BEFORE removal/reconcile:
-	// SyncRefs can tear down a non-global cluster and drop its store, so we must
-	// grab it while the cluster is still live.
+	// SyncRefs can tear down any cluster no pane references and drop its store, so
+	// we must grab it while the cluster is still live.
 	closingStore := a.storeFor(closing)
 
 	a.keyTrie.Reset()
@@ -1025,10 +1042,9 @@ func (a App) closeFocusedSplit() App {
 	// the "still in use?" scan does not count the just-closed pane.
 	a.unsubscribeOnStoreIfUnused(closingStore, closingCtx, closingGVR, closingNs)
 
-	// Reconcile manager refcounts against the panes that remain pinned; a
-	// non-global cluster no remaining pane references is torn down here. The
-	// global is never torn down.
-	a.mgr.SyncRefs(a.pinnedContexts())
+	// Reconcile manager refcounts against the remaining panes; a cluster no
+	// remaining pane references is torn down here (no global exemption).
+	a.mgr.SyncRefs(a.paneContexts())
 
 	return a
 }
@@ -1121,11 +1137,8 @@ func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 	}
 
 	// New panes inherit the currently-focused pane's context (the cluster the
-	// user is looking at). Resolve its default namespace from that cluster.
-	inheritCtx := a.mgr.GlobalContext()
-	if f := a.layout.FocusedSplit(); f != nil {
-		inheritCtx = f.Context()
-	}
+	// user is looking at). Resolve the default namespace from that cluster.
+	inheritCtx := a.contextFor(a.layout.FocusedSplit())
 	ns := "default"
 	if cl := a.clusterFor(a.layout.FocusedSplit()); cl != nil && cl.Client() != nil {
 		ns = cl.Client().Namespace
@@ -1137,13 +1150,15 @@ func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 	}
 
 	a.keyTrie.Reset()
-	a.layout.AddSplit(p, ns)
-	// New splits inherit the global context (no footer), but keep footers in
-	// sync across all panes for consistency.
+	// The new pane is born carrying inheritCtx, so the footer sync below sees
+	// the correct context immediately (no wrong-context flicker).
+	a.layout.AddSplit(p, ns, inheritCtx)
 	a.syncPaneFooters()
 	a.layout.FocusResources()
 	newSplit := a.layout.FocusedSplit()
-	newSplit.SetContext(inheritCtx)
+	// A new split changes the pane count for inheritCtx; refresh the contexts
+	// plugin's PANES column before it (re-)populates.
+	a.syncContextPaneCounts()
 	populateCmd := a.subscribeAndPopulate(newSplit, p, newSplit.EffectiveNamespace())
 
 	var descCmd tea.Cmd
@@ -1152,6 +1167,111 @@ func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 	a, cmd = a.syncLogPanel()
 	a.statusBar.SetHints(a.currentHints())
 	return a, tea.Batch(populateCmd, descCmd, cmd)
+}
+
+// contextsPlugin returns the registered synthetic contexts plugin, if present.
+func (a App) contextsPlugin() (plugin.ResourcePlugin, bool) {
+	return plugin.ByName("contexts")
+}
+
+// syncContextPaneCounts pushes the current per-context pane counts into the
+// contexts plugin (if registered and capable) so its PANES column stays
+// accurate. Called whenever pane contexts change or the contexts view is shown.
+func (a App) syncContextPaneCounts() {
+	p, ok := a.contextsPlugin()
+	if !ok {
+		return
+	}
+	if setter, ok := p.(plugin.PaneCountSetter); ok {
+		setter.SetPaneCounts(a.distinctPaneContexts())
+	}
+}
+
+// handleGotoContexts opens the synthetic contexts plugin IN the focused pane,
+// pushing the current resource onto the pane's nav stack so Esc/back returns to
+// the prior resource (reusing the drill-down nav machinery). The pane keeps its
+// current context; selecting a row dispatches "pane-switch-context <name>".
+func (a App) handleGotoContexts() (tea.Model, tea.Cmd) {
+	p, ok := a.contextsPlugin()
+	if !ok {
+		cmd := a.statusBar.SetError("contexts view unavailable")
+		return a, cmd
+	}
+
+	focused := a.layout.FocusedSplit()
+	if focused == nil {
+		return a, nil
+	}
+
+	if a.layout.AnyZoomed() {
+		a.layout.UnzoomAll()
+		a = a.syncIndicators()
+	}
+
+	// Refresh the PANES column before building rows.
+	a.syncContextPaneCounts()
+
+	var children []*unstructured.Unstructured
+	if sp, ok := p.(plugin.SelfPopulating); ok {
+		children = sp.Objects()
+	}
+
+	// Push the current resource onto the nav stack so back/Esc returns to it.
+	// parentName carries the focused pane's context purely as a label.
+	a.keyTrie.Reset()
+	a.envResolved = false
+	focused.PushNav(p, children, focused.Context(), "", "", "")
+	if a.layout.RightPanelVisible() {
+		a.layout.FocusResources()
+	}
+
+	var descCmd tea.Cmd
+	a, descCmd = a.refreshDetailPanel()
+	var cmd tea.Cmd
+	a, cmd = a.syncLogPanel()
+	a.statusBar.SetHints(a.currentHints())
+	return a, tea.Batch(descCmd, cmd)
+}
+
+// handlePaneSwitchContext switches the focused pane to ctxName via the async
+// per-pane path, then returns the pane to the resource it was showing before
+// the contexts list was opened. If the contexts view was reached by drilling in
+// (gX), the prior resource is restored by popping the nav stack; the
+// subsequent context switch then re-points that restored resource at ctxName.
+// A fresh oX split that has the contexts plugin as its root (no prior resource)
+// lands on the default pods plugin instead.
+func (a App) handlePaneSwitchContext(ctxName string) (tea.Model, tea.Cmd) {
+	a.activeOverlay = overlayNone
+
+	focused := a.layout.FocusedSplit()
+	if focused == nil {
+		return a, nil
+	}
+
+	// Return to the prior resource before switching context so the pane ends up
+	// showing pods/the-prior-resource on the new cluster, NOT the contexts list.
+	if focused.InDrillDown() {
+		// gX path: the contexts view sits on top of the real resource. Pop back to
+		// it. PopNav restores the snapshot's (old) context; the switch below
+		// overwrites it with ctxName.
+		focused.PopNav()
+	} else if focused.Plugin().Name() == "contexts" {
+		// Fresh oX split rooted on the contexts plugin: no prior resource to return
+		// to — land on the default pods plugin.
+		if pods, ok := plugin.ByName("pods"); ok {
+			focused.SetPlugin(pods)
+			focused.ResetNav()
+		} else {
+			// "pods" not registered: leave nav reset (so the pane is not stuck on the
+			// contexts list) and surface the failure rather than silently keeping the
+			// contexts view after the switch.
+			focused.ResetNav()
+			return a, a.statusBar.SetError("cannot switch context: 'pods' plugin not registered")
+		}
+	}
+
+	// Switch the (now-restored) pane to the chosen context via the async path.
+	return a.handlePaneContextSwitch(ctxName)
 }
 
 func (a App) handleView(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
@@ -1402,7 +1522,7 @@ func (a App) unsubscribeIfUnused(gvr schema.GroupVersionResource, namespace stri
 	}
 	// Unsubscribe on the focused split's cluster store (the GVR/ns being torn
 	// down belongs to the operation that triggered this, which runs on the
-	// focused pane's cluster). Through Task 6 there is a single cluster.
+	// focused pane's cluster).
 	if store := a.storeForFocused(); store != nil {
 		store.Unsubscribe(gvr, namespace)
 	}
@@ -1420,152 +1540,117 @@ func (a App) contextNames() []string {
 	return names
 }
 
-// handleGlobalContextSwitch changes the app's baseline (global) cluster and
-// retargets every pane that is still following global (not pinned) onto the new
-// cluster. Pinned panes are left untouched.
+// handleGroupContextSwitch retargets the focused pane's whole context group
+// (every pane currently on the focused pane's context) onto the chosen cluster.
+// It is dispatched by the context-picker overlay (the `gx` binding); despite the
+// historical "global" name in the message type (GlobalContextSelectedMsg), there
+// is no global baseline — this retargets a group, not a process-wide default.
 //
-// Connect strategy: synchronous, with a GetOrCreate-first guard. Manager.
-// SetGlobal sets the global pointer unconditionally (even for a degraded
-// cluster), so a naive SetGlobal-then-check would leave global pointing at a
-// broken cluster when the switch fails. Instead we GetOrCreate the target first
-// and only call SetGlobal once we know it connected — so a failed switch never
-// moves the global off the working cluster. (Per the plan, async connect via
-// ClusterReadyMsg is introduced for the per-pane path in Task 9; the global
-// switch stays synchronous here, matching how startup connects.)
-func (a App) handleGlobalContextSwitch(ctx string) (tea.Model, tea.Cmd) {
+// Connect strategy: ASYNC. Like handlePaneContextSwitch, this NEVER dials inline
+// on the Bubble Tea Update goroutine — a hung exec-credential plugin must not be
+// able to freeze the UI. Instead it optimistically retargets the focused-context
+// group (clear objects, show a "connecting…" status) and dispatches
+// asyncConnectCmd(mgr, chosen) to dial off-thread. When the resulting
+// msgs.ClusterReadyMsg lands, handleClusterReady installs the cluster and
+// populates EVERY pane whose Context()==chosen — which, after this optimistic
+// retarget, is exactly the moved group.
+//
+// gx and gX converge on the same async machinery; gx differs only in that it
+// retargets the whole focused-context group rather than a single pane.
+func (a App) handleGroupContextSwitch(ctx string) (tea.Model, tea.Cmd) {
 	a.activeOverlay = overlayNone
 
-	// No-op if we're already on this context.
-	if ctx == a.mgr.GlobalContext() {
-		return a, nil
-	}
+	// The focused pane's current context is the group reference: it identifies
+	// which panes move and which old store to clean up. Falls back to the startup
+	// context when there is no focused pane. Capture it BEFORE mutating anything.
+	target := a.contextFor(a.layout.FocusedSplit())
 
-	// Connect (or look up) the target cluster WITHOUT yet promoting it to
-	// global. If it fails to connect, report the error and keep the current
-	// working global — do not retarget any panes.
-	cl, err := a.mgr.GetOrCreate(ctx)
-	if err != nil || cl == nil || !cl.Connected() {
-		msg := fmt.Sprintf("context %s: failed to connect", ctx)
-		if err != nil {
-			msg = fmt.Sprintf("context %s: %s", ctx, err)
+	// No-op only when the whole group is already on this context AND its cluster
+	// is connected. A group left on a broken context by a failed connect must be
+	// able to retry: re-selecting the same context re-attempts the dial rather
+	// than dead-ending here (mirrors handlePaneContextSwitch's retry guard).
+	if ctx == target {
+		if cl, ok := a.mgr.Get(ctx); ok && cl.Connected() {
+			return a, nil
 		}
-		cmd := a.statusBar.SetError(msg)
-		return a, cmd
 	}
 
-	// Remember the old global so we can clean up its now-unused informers.
-	oldGlobal := a.mgr.GlobalContext()
-	oldStore := a.storeForContext(oldGlobal)
+	// Remember the old context group's store so we can clean up its now-unused
+	// informers after the optimistic retarget.
+	oldStore := a.storeForContext(target)
 
-	// Promote the connected cluster to global.
-	if _, err := a.mgr.SetGlobal(ctx); err != nil {
-		cmd := a.statusBar.SetError(fmt.Sprintf("context %s: %s", ctx, err))
-		return a, cmd
-	}
+	// Update the status bar to reflect the focused pane's new context (name plus
+	// online/offline color). On an optimistic switch the cluster is usually not
+	// connected yet, so the badge shows offline until ClusterReadyMsg arrives
+	// (unless ctx already has a live cluster, e.g. another pane uses it).
+	a = a.setStatusBarContext(ctx)
 
-	// Update the status bar to reflect the new baseline.
-	a.statusBar.SetContextName(ctx)
-	newNs := ""
-	if cl.Client() != nil {
-		newNs = cl.Client().Namespace
-	}
-
-	// Stop any log stream — log streams are bound to their cluster's client and
-	// the focused pane may be following global.
-	wasLogMode := a.layout.IsLogMode()
+	// Stop any log stream — log streams are bound to their cluster's client.
 	a = a.stopLogStream()
 	a.layout.SetLogMode(false)
 	a.envResolved = false
 
-	// Retarget every following (unpinned) pane onto the new global cluster.
+	// Optimistically retarget every pane in the focused pane's context group onto
+	// the chosen cluster, clearing stale data from the old cluster. Panes on other
+	// contexts are left untouched. The new cluster's data arrives later via
+	// ClusterReadyMsg → handleClusterReady, which populates all panes matching the
+	// chosen context.
 	type prevSub struct {
 		gvr schema.GroupVersionResource
 		ns  string
 	}
 	var oldSubs []prevSub
-	var populateCmds []tea.Cmd
 	for i := range a.layout.SplitCount() {
 		split := a.layout.SplitAt(i)
-		if split == nil || split.Pinned() {
+		if split == nil || split.Context() != target {
 			continue
 		}
 
 		// Capture the pane's previous (gvr, ns) for old-store cleanup.
 		oldSubs = append(oldSubs, prevSub{gvr: split.Plugin().GVR(), ns: split.EffectiveNamespace()})
 
-		// Point the pane at the new global, landing on its default namespace,
-		// and clear stale data from the old cluster.
-		split.SetContext(ctx)
-		if newNs != "" {
-			split.SetNamespace(newNs)
-		}
-		split.ResetNav()
-		split.SetObjects(nil)
-
-		// Best-effort missing-resource check: if the new cluster's discovery is
-		// populated and does not know this GVR, leave the pane empty with an
-		// informational message rather than subscribing. Synthetic (_ktui) GVRs
-		// have no informer and are always "available". When discovery has not
-		// refreshed yet (IsEmpty) we cannot be authoritative, so we subscribe
-		// and rely on an empty informer yielding an empty list; the discovery
-		// refresh dispatched below will populate the index for next time.
-		gvr := split.Plugin().GVR()
-		if gvr.Group != "_ktui" && cl.Discovery() != nil && !cl.Discovery().IsEmpty() {
-			if _, ok := cl.Discovery().KindForGVR(gvr); !ok {
-				continue
-			}
-		}
-
-		if cmd := a.subscribeAndPopulate(split, split.Plugin(), split.EffectiveNamespace()); cmd != nil {
-			populateCmds = append(populateCmds, cmd)
+		// Only clear the pane's nav/objects when its context is actually changing.
+		// On a same-context retry (ctx==target after a failed connect) the user's
+		// drill-down state is preserved; the retry just re-dials and re-populates.
+		// On a genuine context change the optimistic clear stays in place: nav is
+		// reset and stale data dropped, with fresh data arriving via
+		// handleClusterReady once the dial returns.
+		if ctx != split.Context() {
+			split.SetContext(ctx)
+			split.ResetNav()
+			split.SetObjects(nil)
 		}
 	}
 
-	// Clean up informers on the OLD global store that no retargeted pane needs
-	// anymore. The old cluster itself is NOT torn down — it remains a valid
-	// cluster the user may switch back to, and pinned panes may still use it.
+	// Reconcile manager refcounts against the panes' new contexts. The target
+	// cluster may not be in the Manager yet (still dialing); SyncRefs counts what
+	// it can now and is called again in handleClusterReady once the dial returns.
+	// If the old context group is now empty, its cluster is torn down here.
+	a.mgr.SyncRefs(a.paneContexts())
+
+	// Clean up informers on the OLD store that no retargeted pane needs anymore.
+	// If the old cluster still has panes it remains live; SyncRefs above tore it
+	// down only when zero panes reference it.
 	if oldStore != nil {
 		for _, sub := range oldSubs {
-			a.unsubscribeOnStoreIfUnused(oldStore, oldGlobal, sub.gvr, sub.ns)
+			a.unsubscribeOnStoreIfUnused(oldStore, target, sub.gvr, sub.ns)
 		}
-	}
-
-	// Refresh discovery for the new global and re-arm the heartbeat on the new
-	// global's client so connectivity status tracks the new cluster. Both mirror
-	// the cmds Init() dispatches at startup.
-	cmds := populateCmds
-	if disc := cl.Discovery(); disc != nil && cl.Client() != nil {
-		typed := cl.Client().Typed
-		newCtx := ctx
-		cmds = append(cmds, func() tea.Msg {
-			resources, derr := disc.Refresh(typed)
-			return k8s.APIResourcesDiscoveredMsg{Context: newCtx, Resources: resources, Err: derr}
-		})
-	}
-	if cl.Client() != nil {
-		cmds = append(cmds, initialHeartbeatCmd(ctx, cl.Client()))
-	}
-
-	// Restore detail/log panel state.
-	if wasLogMode {
-		if focused := a.layout.FocusedSplit(); focused != nil && isLoggablePlugin(focused.Plugin().Name()) {
-			a.layout.SetLogMode(true)
-			if lv := a.layout.LogView(); lv != nil {
-				lv.ClearAndRestart()
-				lv.SetUnavailable(true)
-			}
-		}
-	}
-	var descCmd tea.Cmd
-	a, descCmd = a.refreshDetailPanel()
-	if descCmd != nil {
-		cmds = append(cmds, descCmd)
 	}
 
 	a.statusBar.SetHints(a.currentHints())
 	a = a.syncIndicators()
 
-	return a, tea.Batch(cmds...)
+	// Refresh footer labels and offline markers. On a same-context reconnect retry
+	// (ctx==target, cluster not connected) the panes keep their nav and objects
+	// (M5 nav-preservation), but syncPaneFooters re-runs syncPaneOffline so any
+	// pane on a degraded cluster shows the "⚠ offline" cue rather than presenting
+	// stale data as live. It touches only the footer/offline marker, never nav.
+	a.syncPaneFooters()
+
+	// Dial off-thread; handleClusterReady completes the switch and populates the
+	// retargeted group when msgs.ClusterReadyMsg arrives.
+	cmd := a.statusBar.SetWarning(fmt.Sprintf("connecting to %s…", ctx))
+	return a, tea.Batch(cmd, asyncConnectCmd(a.mgr, ctx))
 }
 
 // storeForContext returns the informer store for a given context name without
@@ -1581,7 +1666,7 @@ func (a App) storeForContext(ctx string) *k8s.Store {
 // remaining pane bound to ctxName still needs that pair (either as its visible
 // resource or as a parent in its drill-down nav stack). Synthetic (_ktui) GVRs
 // have no informer and are skipped. This mirrors unsubscribeIfUnused but targets
-// an explicit store/context, which the global switch needs because the panes
+// an explicit store/context, which the group switch needs because the panes
 // have already been retargeted off the old store.
 func (a App) unsubscribeOnStoreIfUnused(store *k8s.Store, ctxName string, gvr schema.GroupVersionResource, namespace string) {
 	if store == nil || gvr.Group == "_ktui" {
@@ -1616,31 +1701,30 @@ func asyncConnectCmd(mgr *cluster.Manager, ctxName string) tea.Cmd {
 	}
 }
 
-// handlePaneContextSwitch pins the focused pane to ctxName and runs it live on
-// that cluster, simultaneously with other panes on other clusters (true
+// handlePaneContextSwitch re-points the focused pane to ctxName and runs it live
+// on that cluster, simultaneously with other panes on other clusters (true
 // side-by-side multi-cluster).
 //
-// Approach (optimistic pin, no pending-map): the focused pane is immediately
-// pinned and re-pointed at ctxName, its stale data cleared, and a "connecting"
-// status shown. The actual connect happens off-thread (asyncConnectCmd); when
+// Approach (optimistic, no pending-map): the focused pane is immediately
+// re-pointed at ctxName, its stale data cleared, and a "connecting" status
+// shown. The actual connect happens off-thread (asyncConnectCmd); when
 // msgs.ClusterReadyMsg arrives, handleClusterReady completes the switch
-// (subscribe/populate) or surfaces an error, leaving the pane pinned-but-empty
-// on failure so the user can switch again. The awaiting pane is identified on
-// completion by (Pinned && Context()==ctxName) — see handleClusterReady.
+// (subscribe/populate) or surfaces an error, leaving the pane on its context but
+// empty on failure so the user can switch again. The awaiting pane(s) are
+// identified on completion by Context()==msg.Context — see handleClusterReady.
 //
-// Picking any context always PINS the pane (even when ctxName equals the global
-// context — the footer added in Task 10 simply will not show in that case).
-// There is no "unpin / follow global" affordance here; that is out of scope.
+// There is no "global context" concept: every pane simply carries a context, and
+// the focused pane is the source of truth for new-split defaults and the status
+// bar.
 //
 // Refcount bookkeeping is reconciliation-based (idempotent, order-independent):
-// after every pin/repin/close we call Manager.SyncRefs(pinnedContexts()), which
-// makes each cluster's refCount equal the number of panes currently pinned to it
-// and tears down any non-global cluster with zero pinned panes. The global is
-// never torn down. This is robust under rapid re-pins and focus changes: a stale
-// ClusterReadyMsg for a context no pane is pinned to anymore reconciles to zero
-// and is cleaned up. The actual connect (k8s.NewClient) happens off-thread in
-// asyncConnectCmd via Manager.Dial; install + reconcile happen on the Update
-// goroutine in handleClusterReady.
+// after every switch/close we call Manager.SyncRefs(paneContexts()), which makes
+// each cluster's refCount equal the number of panes currently on it and tears
+// down any cluster with zero referencing panes. This is robust under rapid
+// re-switches and focus changes: a stale ClusterReadyMsg for a context no pane
+// is on anymore reconciles to zero and is cleaned up. The actual connect
+// (k8s.NewClient) happens off-thread in asyncConnectCmd via Manager.Dial;
+// install + reconcile happen on the Update goroutine in handleClusterReady.
 func (a App) handlePaneContextSwitch(ctxName string) (tea.Model, tea.Cmd) {
 	a.activeOverlay = overlayNone
 
@@ -1650,13 +1734,12 @@ func (a App) handlePaneContextSwitch(ctxName string) (tea.Model, tea.Cmd) {
 	}
 
 	old := focused.Context()
-	wasPinned := focused.Pinned()
 
-	// No-op only when already pinned to this exact context AND its cluster is
-	// connected. A pane left pinned-but-broken by a failed connect must be able to
-	// retry: re-selecting the same context re-attempts the dial rather than
+	// No-op only when already on this exact context AND its cluster is
+	// connected. A pane left on a broken context by a failed connect must be able
+	// to retry: re-selecting the same context re-attempts the dial rather than
 	// dead-ending here.
-	if wasPinned && old == ctxName {
+	if old == ctxName {
 		if cl, ok := a.mgr.Get(ctxName); ok && cl.Connected() {
 			return a, nil
 		}
@@ -1668,52 +1751,66 @@ func (a App) handlePaneContextSwitch(ctxName string) (tea.Model, tea.Cmd) {
 	a.layout.SetLogMode(false)
 	a.envResolved = false
 
-	// Optimistically pin and re-point the pane, clearing stale data from the old
-	// cluster. The new cluster's data arrives via ClusterReadyMsg.
-	focused.SetPinned(true)
+	// Optimistically re-point the pane at the new context, clearing stale data
+	// from the old cluster. The new cluster's data arrives via ClusterReadyMsg.
 	focused.SetContext(ctxName)
 	focused.ResetNav()
 	focused.SetObjects(nil)
 
-	// Reconcile refcounts against the new pinned set. The target cluster may not
-	// be in the Manager yet (still dialing); SyncRefs counts what it can now and
-	// is called again in handleClusterReady once the dial returns. Any cluster the
-	// pane just stopped pinning (its old context) that no other pane holds is torn
+	// Reconcile refcounts against the panes' new contexts. The target cluster may
+	// not be in the Manager yet (still dialing); SyncRefs counts what it can now
+	// and is called again in handleClusterReady once the dial returns. The cluster
+	// the pane just left (its old context) that no other pane references is torn
 	// down here.
-	a.mgr.SyncRefs(a.pinnedContexts())
+	a.mgr.SyncRefs(a.paneContexts())
+
+	// The focused pane now carries ctxName, so reflect it in the status bar
+	// (offline until the dial resolves in handleClusterReady).
+	a = a.setStatusBarContext(ctxName)
 
 	cmd := a.statusBar.SetWarning(fmt.Sprintf("connecting to %s…", ctxName))
 	return a, tea.Batch(cmd, asyncConnectCmd(a.mgr, ctxName))
 }
 
-// pinnedContexts returns the set of contexts currently pinned by some pane — the
-// authoritative input to Manager.SyncRefs. A pane contributes its context iff it
-// is pinned and its context is non-empty.
-func (a App) pinnedContexts() []string {
-	var ctxs []string
-	for i := 0; i < a.layout.SplitCount(); i++ {
-		split := a.layout.SplitAt(i)
-		if split == nil || !split.Pinned() {
-			continue
-		}
-		if c := split.Context(); c != "" {
-			ctxs = append(ctxs, c)
+// paneContexts returns the multiset of contexts currently referenced by some
+// pane — the authoritative input to Manager.SyncRefs. A pane contributes its
+// context iff that context is non-empty. It is the keys-with-repetition view of
+// distinctPaneContexts (which carries per-context counts).
+func (a App) paneContexts() []string {
+	counts := a.distinctPaneContexts()
+	ctxs := make([]string, 0, len(counts))
+	for ctx, n := range counts {
+		for i := 0; i < n; i++ {
+			ctxs = append(ctxs, ctx)
 		}
 	}
 	return ctxs
 }
 
 // handleClusterReady completes a per-pane connect once the async connect cmd
-// reports back. It applies the connected cluster to the focused pane when that
-// pane is pinned to msg.Context and awaiting data; on failure it surfaces an
-// error and leaves the pane pinned-but-empty.
+// reports back. It applies the connected cluster to every pane whose
+// Context() == msg.Context (across all splits, not just the focused one); on
+// failure it surfaces an error and leaves those panes on their context but empty,
+// marking them offline (an "⚠ offline" marker).
 func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 	client, _ := msg.Client.(*k8s.Client)
 	if msg.Err != nil || client == nil {
 		// Failed dial: nothing was registered and no ref was taken. Reconcile so a
-		// context the user re-pinned away from is torn down, then report the error
-		// and leave the awaiting pane(s) pinned-but-empty so the user can retry.
-		a.mgr.SyncRefs(a.pinnedContexts())
+		// context no pane references anymore is torn down, then report the error
+		// and leave the awaiting pane(s) on their context but empty so the user can
+		// retry. Mark every pane on the failed context offline so it carries an
+		// "⚠ offline" marker; OTHER panes/clusters are untouched. Because the failed
+		// dial registers no cluster, syncPaneFooters leaves this marker in place
+		// (only a connected cluster clears it), and it recovers automatically when
+		// a later successful connect/heartbeat marks the cluster connected.
+		a.mgr.SyncRefs(a.paneContexts())
+		for i := range a.layout.SplitCount() {
+			split := a.layout.SplitAt(i)
+			if split != nil && split.Context() == msg.Context {
+				split.SetOffline(true)
+			}
+		}
+		a.syncPaneFooters()
 		errMsg := fmt.Sprintf("context %s: failed to connect", msg.Context)
 		if msg.Err != nil {
 			errMsg = fmt.Sprintf("context %s: %s", msg.Context, msg.Err)
@@ -1729,17 +1826,36 @@ func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 	// heartbeat loops.
 	cl, newlyConnected := a.mgr.RegisterConnected(msg.Context, client)
 
-	// Reconcile refcounts against the panes currently pinned. If no pane is pinned
-	// to msg.Context anymore (the requester re-pinned elsewhere), this tears the
-	// just-registered cluster back down — no leak.
-	a.mgr.SyncRefs(a.pinnedContexts())
+	// Reconcile refcounts: SyncRefs makes each cluster's refcount equal the
+	// number of panes whose context references it, and tears down any cluster
+	// that no remaining pane references (no global exemption). If no pane
+	// references msg.Context anymore (the requester retargeted elsewhere), this
+	// tears the just-registered cluster back down — no leak.
+	a.mgr.SyncRefs(a.paneContexts())
 
 	if cl == nil || !cl.Connected() {
+		// The just-registered cluster is gone or not connected (e.g. SyncRefs tore
+		// it down because no pane references it, or RegisterConnected rejected the
+		// client). Mirror the failed-dial path: mark every pane on this context
+		// offline and refresh footers so the "⚠ offline" marker is shown.
+		for i := range a.layout.SplitCount() {
+			split := a.layout.SplitAt(i)
+			if split != nil && split.Context() == msg.Context {
+				split.SetOffline(true)
+			}
+		}
+		a.syncPaneFooters()
 		cmd := a.statusBar.SetError(fmt.Sprintf("context %s: failed to connect", msg.Context))
 		return a, cmd
 	}
 
 	var cmds []tea.Cmd
+
+	// Clear the transient "connecting…" warning set by the (group/pane) context
+	// switch. SetError("") below only clears the error slot, not the warning slot,
+	// so without this the "connecting…" banner would linger for its full 5s
+	// timeout after the connect already succeeded.
+	a.statusBar.SetWarning("")
 
 	// Arm discovery + heartbeat only on the cluster's first connect.
 	if newlyConnected && cl.Client() != nil {
@@ -1754,17 +1870,17 @@ func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, initialHeartbeatCmd(msg.Context, cl.Client()))
 	}
 
-	// Apply to EVERY pinned split awaiting this context (identified by pane
-	// context across ALL splits, NOT by focus — if the user moved focus between
-	// dispatch and arrival, the correct non-focused pinned pane is still
-	// populated). Re-applying to an already-populated pane is harmless.
+	// Apply to every matching split awaiting this context (identified by
+	// Context()==msg.Context across ALL splits, NOT by focus — if the user moved
+	// focus between dispatch and arrival, the correct non-focused matching pane is
+	// still populated). Re-applying to an already-populated pane is harmless.
 	defaultNs := ""
 	if cl.Client() != nil {
 		defaultNs = cl.Client().Namespace
 	}
 	for i := range a.layout.SplitCount() {
 		split := a.layout.SplitAt(i)
-		if split == nil || !split.Pinned() || split.Context() != msg.Context {
+		if split == nil || split.Context() != msg.Context {
 			continue
 		}
 		if defaultNs != "" {
@@ -1787,9 +1903,16 @@ func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// A pane's context is now live: refresh per-pane footers so a pane that
-	// differs from the global context shows its footer.
+	// A pane's context is now live: refresh per-pane footers (a footer is shown
+	// when more than one distinct context exists across panes), and refresh the
+	// contexts plugin's pane counts so a visible contexts view's STATUS glyph
+	// reflects the new state.
 	a.syncPaneFooters()
+	a.syncContextPaneCounts()
+
+	// The dial resolved, so refresh the status-bar badge: if the focused pane is
+	// on the now-connected context its online color flips to green.
+	a = a.syncStatusBarContext()
 
 	// Clear the transient "connecting…" status now that we are live.
 	a.statusBar.SetError("")

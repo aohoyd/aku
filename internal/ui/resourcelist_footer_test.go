@@ -9,108 +9,164 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// lastLine returns the final rendered line of a multi-line box view.
-func lastLine(view string) string {
-	lines := strings.Split(view, "\n")
-	return lines[len(lines)-1]
+// firstLine returns the top rendered line of a multi-line box view (the border
+// line that carries the title and the context badge).
+func firstLine(view string) string {
+	return strings.Split(view, "\n")[0]
 }
 
-// TestResourceListFooterShown verifies that a non-empty context footer is drawn
-// on the pane's bottom border and contains the context name.
-func TestResourceListFooterShown(t *testing.T) {
+// TestResourceListContextBadgeShown verifies that a non-empty context label is
+// drawn on the pane's TOP border and contains the context name.
+func TestResourceListContextBadgeShown(t *testing.T) {
 	rl := NewResourceList(&testPlugin{}, 40, 10)
 	rl.SetObjects([]*unstructured.Unstructured{makeObj("pod-a")})
-	rl.SetContextFooter("staging")
+	rl.SetContextLabel("staging")
 
-	out := rl.View()
-	bottom := ansi.Strip(lastLine(out))
-	if !strings.Contains(bottom, "staging") {
-		t.Fatalf("expected bottom border to contain context name, got %q", bottom)
+	top := ansi.Strip(firstLine(rl.View()))
+	if !strings.Contains(top, "staging") {
+		t.Fatalf("expected top border to contain context name, got %q", top)
 	}
 }
 
-// TestResourceListFooterHidden verifies that an empty footer leaves the bottom
-// border as a plain border with no context name.
-func TestResourceListFooterHidden(t *testing.T) {
+// TestResourceListContextBadgeHidden verifies that an empty label leaves the top
+// border free of any context name.
+func TestResourceListContextBadgeHidden(t *testing.T) {
 	rl := NewResourceList(&testPlugin{}, 40, 10)
 	rl.SetObjects([]*unstructured.Unstructured{makeObj("pod-a")})
-	rl.SetContextFooter("")
+	rl.SetContextLabel("")
 
-	out := rl.View()
-	bottom := ansi.Strip(lastLine(out))
-	if strings.Contains(bottom, "staging") {
-		t.Fatalf("expected no footer text on bottom border, got %q", bottom)
-	}
-	// A plain bottom border carries no letters at all.
-	for _, r := range bottom {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			t.Fatalf("expected plain border with no letters, got %q", bottom)
-		}
+	top := ansi.Strip(firstLine(rl.View()))
+	if strings.Contains(top, "staging") {
+		t.Fatalf("expected no context badge on top border, got %q", top)
 	}
 }
 
-// TestResourceListFooterDoesNotChangeHeight verifies the footer reuses the
-// bottom border line: the rendered view has the same number of lines with or
-// without a footer (no content row consumed, no table-height change).
-func TestResourceListFooterDoesNotChangeHeight(t *testing.T) {
+// TestResourceListContextBadgeColorReflectsOffline verifies the badge is colored
+// with the offline (red) style when the pane is offline and the online (green)
+// style otherwise. Both render the SAME name string through different styles, so
+// the rendered ANSI substring is an unambiguous color check.
+func TestResourceListContextBadgeColorReflectsOffline(t *testing.T) {
+	online := NewResourceList(&testPlugin{}, 40, 10)
+	online.SetObjects([]*unstructured.Unstructured{makeObj("pod-a")})
+	online.SetContextLabel("staging")
+	online.SetOffline(false)
+
+	offline := NewResourceList(&testPlugin{}, 40, 10)
+	offline.SetObjects([]*unstructured.Unstructured{makeObj("pod-a")})
+	offline.SetContextLabel("staging")
+	offline.SetOffline(true)
+
+	wantOnline := PaneContextOnlineStyle.Render(" staging ")
+	wantOffline := PaneContextOfflineStyle.Render(" staging ")
+
+	if got := firstLine(online.View()); !strings.Contains(got, wantOnline) {
+		t.Fatalf("online pane: top border missing online-styled badge")
+	}
+	if got := firstLine(offline.View()); !strings.Contains(got, wantOffline) {
+		t.Fatalf("offline pane: top border missing offline-styled badge")
+	}
+	// The two styles must be visually distinct (different ANSI), or the offline
+	// state would be invisible.
+	if wantOnline == wantOffline {
+		t.Fatalf("online and offline badge styles render identically")
+	}
+}
+
+// TestResourceListContextBadgeDoesNotChangeHeight verifies the badge reuses the
+// top border line: the rendered view has the same number of lines with or
+// without a badge (no content row consumed, no table-height change).
+func TestResourceListContextBadgeDoesNotChangeHeight(t *testing.T) {
 	objs := []*unstructured.Unstructured{makeObj("pod-a"), makeObj("pod-b")}
 
-	noFooter := NewResourceList(&testPlugin{}, 40, 10)
-	noFooter.SetObjects(objs)
-	withFooter := NewResourceList(&testPlugin{}, 40, 10)
-	withFooter.SetObjects(objs)
-	withFooter.SetContextFooter("staging")
+	noBadge := NewResourceList(&testPlugin{}, 40, 10)
+	noBadge.SetObjects(objs)
+	withBadge := NewResourceList(&testPlugin{}, 40, 10)
+	withBadge.SetObjects(objs)
+	withBadge.SetContextLabel("staging")
 
-	gotNo := strings.Count(noFooter.View(), "\n")
-	gotWith := strings.Count(withFooter.View(), "\n")
-	if gotNo != gotWith {
-		t.Fatalf("footer changed line count: without=%d with=%d", gotNo, gotWith)
+	if gotNo, gotWith := strings.Count(noBadge.View(), "\n"), strings.Count(withBadge.View(), "\n"); gotNo != gotWith {
+		t.Fatalf("badge changed line count: without=%d with=%d", gotNo, gotWith)
 	}
 }
 
-// TestResourceListFooterWidthDoesNotOverflow verifies that a very long context
-// name does not break the box: every rendered line keeps the same width and the
-// line count is unchanged (the footer is skipped/truncated gracefully when it
-// cannot fit, mirroring injectBorderTitle's width guard).
-func TestResourceListFooterWidthDoesNotOverflow(t *testing.T) {
+// TestResourceListContextBadgeWidthDoesNotOverflow verifies that a very long
+// context name does not break the box: every rendered line keeps the same width
+// (the badge is dropped gracefully when it cannot fit, mirroring
+// injectBorderTitle's width guard).
+func TestResourceListContextBadgeWidthDoesNotOverflow(t *testing.T) {
 	rl := NewResourceList(&testPlugin{}, 40, 10)
 	rl.SetObjects([]*unstructured.Unstructured{makeObj("pod-a")})
-	rl.SetContextFooter(strings.Repeat("very-long-context-name", 10))
+	rl.SetContextLabel(strings.Repeat("very-long-context-name", 10))
 
-	out := rl.View()
-	lines := strings.Split(out, "\n")
+	lines := strings.Split(rl.View(), "\n")
 	if len(lines) < 2 {
 		t.Fatalf("expected a multi-line box, got %d lines", len(lines))
 	}
 	want := lipgloss.Width(lines[0])
 	for i, ln := range lines {
 		if w := lipgloss.Width(ln); w != want {
-			t.Fatalf("line %d width %d != expected box width %d (footer overflowed)", i, w, want)
+			t.Fatalf("line %d width %d != expected box width %d (badge overflowed)", i, w, want)
 		}
 	}
 }
 
-// TestInjectBorderFooterMirrorsTitle is a focused unit test on the helper: it
-// rewrites the last line of a box with the footer and leaves the first line
-// (title border) untouched, keeping the box width consistent.
-func TestInjectBorderFooterMirrorsTitle(t *testing.T) {
+// TestContextBadgeNameTruncatedToCap verifies a long context name is capped to
+// maxBadgeContext columns with an ellipsis before it reaches the badge.
+func TestContextBadgeNameTruncatedToCap(t *testing.T) {
+	long := strings.Repeat("ctx-", 20) // 80 cols, well over the cap
+	got := truncateContext(long, maxBadgeContext)
+	if w := ansi.StringWidth(got); w > maxBadgeContext {
+		t.Fatalf("truncated name width %d exceeds cap %d", w, maxBadgeContext)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("expected truncated name to end with ellipsis, got %q", got)
+	}
+}
+
+// TestInjectBorderTitleRightSegment is a focused unit test on the helper: the
+// right segment is placed before the right corner when it fits, dropped when the
+// box is too narrow (the title is never truncated), and absent when "".
+func TestInjectBorderTitleRightSegment(t *testing.T) {
 	box := lipgloss.NewStyle().
 		BorderStyle(lipgloss.RoundedBorder()).
-		Width(30).Height(4).
+		Width(40).Height(4).
 		Render("content")
 
-	footer := TitleIndicatorStyle.Render(" prod ")
-	out := injectBorderFooter(box, footer, true)
+	title := TitleStyle.Render("pods (3)")
+	right := PaneContextOnlineStyle.Render(" staging ")
 
-	origLines := strings.Split(box, "\n")
-	outLines := strings.Split(out, "\n")
-	if len(origLines) != len(outLines) {
-		t.Fatalf("injectBorderFooter changed line count: %d -> %d", len(origLines), len(outLines))
+	// Wide box: both title and right segment present, width unchanged.
+	out := injectBorderTitle(box, title, right, true)
+	top := ansi.Strip(firstLine(out))
+	if !strings.Contains(top, "pods (3)") || !strings.Contains(top, "staging") {
+		t.Fatalf("wide box: expected both title and right segment, got %q", top)
 	}
-	if got := lipgloss.Width(outLines[len(outLines)-1]); got != lipgloss.Width(origLines[0]) {
-		t.Fatalf("footer line width %d != box width %d", got, lipgloss.Width(origLines[0]))
+	if lipgloss.Width(firstLine(out)) != lipgloss.Width(firstLine(box)) {
+		t.Fatalf("wide box: top border width changed")
 	}
-	if !strings.Contains(ansi.Strip(outLines[len(outLines)-1]), "prod") {
-		t.Fatalf("expected footer text on last line, got %q", ansi.Strip(outLines[len(outLines)-1]))
+
+	// No right segment: title only.
+	out = injectBorderTitle(box, title, "", true)
+	if top := ansi.Strip(firstLine(out)); strings.Contains(top, "staging") {
+		t.Fatalf("empty right: expected no right segment, got %q", top)
+	}
+
+	// Narrow box: wide enough for the title (~10 cols padded) but not for the
+	// title plus the ~9-col right segment, so the badge is dropped while the title
+	// survives.
+	narrow := lipgloss.NewStyle().
+		BorderStyle(lipgloss.RoundedBorder()).
+		Width(18).Height(4).
+		Render("content")
+	out = injectBorderTitle(narrow, title, right, true)
+	top = ansi.Strip(firstLine(out))
+	if strings.Contains(top, "staging") {
+		t.Fatalf("narrow box: expected right segment dropped, got %q", top)
+	}
+	if !strings.Contains(top, "pods (3)") {
+		t.Fatalf("narrow box: title should survive, got %q", top)
+	}
+	if lipgloss.Width(firstLine(out)) != lipgloss.Width(firstLine(narrow)) {
+		t.Fatalf("narrow box: top border width changed")
 	}
 }

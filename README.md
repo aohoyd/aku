@@ -47,7 +47,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Fuzzy resource picker (`:`) and namespace picker (`Ctrl+n`)
 - Regex search (`/`) and filter (`Ctrl+/`) in both list and detail views
 - Column sorting by name, namespace, age, status, or kind
-- Multi-cluster context switching: global (`gx`) or per-pane (`gX`) with side-by-side live panes on different clusters
+- Multi-cluster context switching: global overlay picker (`gx`), in-pane contexts list (`gX`), or open it in a new split (`oX`) for side-by-side live panes on different clusters
 - Fully customizable keybindings via YAML
 
 **Mouse (optional)**
@@ -155,7 +155,7 @@ When mouse support is enabled, aku captures mouse events for click focus, wheel 
 
 To copy text while mouse support is enabled, hold Option (iTerm2, macOS Terminal) or Shift (most Linux terminals) while dragging to bypass aku and use the terminal's native selection.
 
-`contexts.directories` lists extra directories aku scans recursively (in addition to the active `$KUBECONFIG`/`~/.kube/config`) for kubeconfig files. Every context across those files becomes switchable; files that aren't valid kubeconfigs or contain zero contexts are skipped. aku keeps one **global** context (the app's baseline cluster) and new panes inherit the focused pane's context (which is the global context unless you are focused on a pinned pane). `gx` opens a fuzzy picker to switch the global context, retargeting every pane still following global; it connects synchronously (the switch completes once the cluster is reachable). `gX` pins the focused pane to a different context so it ignores future global switches; it connects asynchronously — the status bar briefly shows a "connecting…" message and the pane then populates once the cluster is reachable. Any pane whose context differs from the global context shows that context name in a footer at the bottom of the pane. On switch, a pane lands on the chosen context's default namespace (the kubeconfig `namespace:` field, else `default`); if the pane's current resource type doesn't exist on the new cluster it shows an empty list and a short message in the status bar (there is no inline annotation in the list). That missing-resource check requires the cluster's API discovery to have been populated; until then the pane simply shows an empty list. Different panes can run live on different clusters at the same time, each with its own watches.
+`contexts.directories` lists extra directories aku scans recursively (in addition to the active `$KUBECONFIG`/`~/.kube/config`) for kubeconfig files. Every context across those files becomes switchable; files that aren't valid kubeconfigs or contain zero contexts are skipped. There is no "pinned" pane — every pane simply carries a context, and the focused pane is the source of truth (its context drives new-split defaults and the status bar). `gx` opens a fuzzy overlay picker that moves every pane sharing the focused pane's context to the chosen cluster (focused-context-group move), connecting asynchronously. `gX` opens an in-pane contexts list (a resource view) in the focused pane; Enter switches that pane's context. `oX` opens the contexts list in a new split, so you can bring up another cluster side-by-side. The contexts view has columns NAME, CLUSTER, SERVER, STATUS, and PANES, where STATUS is `●` connected, `○` offline/degraded, or `–` not yet dialed. The `gx` overlay annotates each row: contexts currently open get a `●` marker plus their pane count, and the focused pane's current context is highlighted. All context switches dial asynchronously off the Update goroutine, so the UI never freezes — even when a cluster is unreachable, the pane shows an `⚠ offline` marker instead of hanging. Pane context labels are shown only when more than one distinct context is open across panes; when every pane shares one context, labels are hidden. On switch, a pane lands on the chosen context's default namespace (the kubeconfig `namespace:` field, else `default`); if the pane's current resource type doesn't exist on the new cluster it shows an empty list and a short message in the status bar (there is no inline annotation in the list). That missing-resource check requires the cluster's API discovery to have been populated; until then the pane simply shows an empty list. Different panes can run live on different clusters at the same time, each with its own watches.
 
 ### keymap.yaml
 
@@ -217,8 +217,9 @@ syntax:
 | `%` | Toggle layout orientation |
 | `Ctrl+n` | Namespace picker |
 | `:` | Resource picker |
-| `gx` | Switch global context |
-| `gX` | Pin focused pane to a context |
+| `gx` | Move focused pane's context group to another cluster (overlay picker) |
+| `gX` | Open contexts list in focused pane |
+| `oX` | Open contexts list in a new split |
 | `?` | Help overlay |
 | `y` | YAML view (resets values variant to manifest for helm releases) |
 | `d` | Describe view |
@@ -241,6 +242,7 @@ syntax:
 | `Ctrl+d` | Delete selected |
 | `g + p/d/s/v/c/n` | Go to pods/deployments/secrets/services/configmaps/namespaces |
 | `o + p/d/s/v/c` | Open split: pods/deployments/secrets/services/configmaps |
+| `gX` / `oX` | Open the contexts list (`g` in current pane, `o` in a new split) |
 | `S + n/N/a/s` | Sort by name/namespace/age/status |
 
 ### Detail Panel

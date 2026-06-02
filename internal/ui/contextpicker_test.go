@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/aohoyd/aku/internal/msgs"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestContextPickerOpenShowsItems(t *testing.T) {
@@ -61,10 +62,9 @@ func TestContextPickerEscCancels(t *testing.T) {
 	}
 }
 
-func TestContextPickerGlobalScopeEmitsGlobalMsg(t *testing.T) {
+func TestContextPickerEmitsGlobalMsg(t *testing.T) {
 	cp := NewContextPicker(40, 20)
 	cp.SetContexts([]string{"prod", "staging"})
-	cp.SetScope(true)
 	cp.Open()
 
 	updated, cmd := cp.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -84,47 +84,89 @@ func TestContextPickerGlobalScopeEmitsGlobalMsg(t *testing.T) {
 	}
 }
 
-func TestContextPickerPaneScopeEmitsPaneMsg(t *testing.T) {
-	cp := NewContextPicker(40, 20)
-	cp.SetContexts([]string{"prod", "staging"})
-	cp.SetScope(false)
-	cp.Open()
+func TestContextPickerAnnotationsMarkInUse(t *testing.T) {
+	cp := NewContextPicker(60, 20)
+	cp.SetContexts([]string{"ctxA", "ctxB", "ctxC"})
+	cp.SetAnnotations(map[string]int{"ctxA": 2, "ctxB": 1}, "")
 
-	updated, cmd := cp.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if updated.Active() {
-		t.Fatal("context picker should close after selection")
+	// ctxA: in use by 2 panes.
+	a := ansi.Strip(cp.DisplayOf("ctxA"))
+	if !strings.HasPrefix(a, inUseMarker+" ctxA") {
+		t.Fatalf("ctxA should start with in-use marker and name, got %q", a)
 	}
-	if cmd == nil {
-		t.Fatal("Enter should produce a command")
+	if !strings.Contains(a, "(2)") {
+		t.Fatalf("ctxA should show pane count (2), got %q", a)
 	}
-	msg := cmd()
-	pm, ok := msg.(msgs.PaneContextSelectedMsg)
-	if !ok {
-		t.Fatalf("expected PaneContextSelectedMsg, got %T", msg)
+
+	// ctxB: in use by 1 pane.
+	b := ansi.Strip(cp.DisplayOf("ctxB"))
+	if !strings.HasPrefix(b, inUseMarker+" ctxB") {
+		t.Fatalf("ctxB should start with in-use marker and name, got %q", b)
 	}
-	if pm.Context != "prod" {
-		t.Fatalf("expected context 'prod', got %q", pm.Context)
+	if !strings.Contains(b, "(1)") {
+		t.Fatalf("ctxB should show pane count (1), got %q", b)
+	}
+
+	// ctxC: not in use — no marker, no count.
+	c := ansi.Strip(cp.DisplayOf("ctxC"))
+	if strings.Contains(c, inUseMarker) {
+		t.Fatalf("ctxC should not be marked in-use, got %q", c)
+	}
+	if strings.Contains(c, "(") {
+		t.Fatalf("ctxC should not show a pane count, got %q", c)
+	}
+	if c != "ctxC" {
+		t.Fatalf("ctxC should render as bare name, got %q", c)
 	}
 }
 
-func TestContextPickerScopeSwitchableAcrossOpens(t *testing.T) {
-	cp := NewContextPicker(40, 20)
-	cp.SetContexts([]string{"prod"})
+func TestContextPickerAnnotationsHighlightFocused(t *testing.T) {
+	cp := NewContextPicker(60, 20)
+	cp.SetContexts([]string{"ctxA", "ctxB"})
+	cp.SetAnnotations(map[string]int{"ctxA": 1}, "ctxB")
 
-	// First open in global scope.
-	cp.SetScope(true)
-	cp.Open()
-	_, cmd := cp.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if _, ok := cmd().(msgs.GlobalContextSelectedMsg); !ok {
-		t.Fatalf("first selection should be global")
+	// The focused context's row must carry the focused style (raw output
+	// differs from a plain render of the same name).
+	focusedRaw := cp.DisplayOf("ctxB")
+	if focusedRaw == ansi.Strip(focusedRaw) {
+		t.Fatalf("focused context row should be styled, got unstyled %q", focusedRaw)
+	}
+	if !strings.Contains(focusedRaw, ContextFocusedStyle.Render("ctxB")) {
+		t.Fatalf("focused context row should use ContextFocusedStyle, got %q", focusedRaw)
 	}
 
-	// Reopen in pane scope; the same picker must now emit a pane message.
-	cp.SetScope(false)
+	// A non-focused, non-in-use context renders as the bare name.
+	cp2 := NewContextPicker(60, 20)
+	cp2.SetContexts([]string{"ctxB"})
+	cp2.SetAnnotations(nil, "other")
+	if got := cp2.DisplayOf("ctxB"); got != "ctxB" {
+		t.Fatalf("non-focused unmarked context should be bare name, got %q", got)
+	}
+}
+
+func TestContextPickerAnnotationsSelectionValueIsBare(t *testing.T) {
+	cp := NewContextPicker(60, 20)
+	cp.SetContexts([]string{"ctxA", "ctxB"})
+	cp.SetAnnotations(map[string]int{"ctxA": 3}, "ctxA")
 	cp.Open()
-	_, cmd = cp.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	if _, ok := cmd().(msgs.PaneContextSelectedMsg); !ok {
-		t.Fatalf("second selection should be pane-scoped")
+
+	// Filtered values must remain bare context names regardless of annotations.
+	filtered := cp.Filtered()
+	if len(filtered) != 2 || filtered[0] != "ctxA" {
+		t.Fatalf("filtered values should be bare names, got %v", filtered)
+	}
+
+	// Selecting the first (annotated, focused) row yields the bare name.
+	_, cmd := cp.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("Enter should produce a command")
+	}
+	gm, ok := cmd().(msgs.GlobalContextSelectedMsg)
+	if !ok {
+		t.Fatalf("expected GlobalContextSelectedMsg, got %T", cmd())
+	}
+	if gm.Context != "ctxA" {
+		t.Fatalf("selected value should be bare context name, got %q", gm.Context)
 	}
 }
 

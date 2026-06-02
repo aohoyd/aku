@@ -57,4 +57,13 @@ var (
 	// Title
 	TitleStyle          = lipgloss.NewStyle().Bold(true).Foreground(theme.Highlight).Padding(0, 1)
 	TitleIndicatorStyle = lipgloss.NewStyle().Foreground(theme.Subtle)
+
+	// Context picker annotations
+	ContextInUseStyle   = lipgloss.NewStyle().Foreground(theme.StatusRunning).Bold(true)
+	ContextFocusedStyle = lipgloss.NewStyle().Foreground(theme.Selection).Bold(true)
+	ContextPaneCntStyle = lipgloss.NewStyle().Foreground(theme.Muted)
+
+	// Pane context badge — right-aligned on the top border, colored by connectivity.
+	PaneContextOnlineStyle  = lipgloss.NewStyle().Foreground(theme.ContextOnline)
+	PaneContextOfflineStyle = lipgloss.NewStyle().Foreground(theme.ContextOffline)
 )

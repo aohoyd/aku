@@ -49,7 +49,7 @@ func TestOverlayRectPopulatedWhenActive(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Open the help overlay.
 	model, _ := app.executeCommand("help")
@@ -88,7 +88,7 @@ func TestOverlayRectClearedOnClose(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Open the help overlay and render to populate the rect.
 	model, _ := app.executeCommand("help")
@@ -124,7 +124,7 @@ func TestOverlayRectUpdatesOnSwitch(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Open help overlay.
 	model, _ := app.executeCommand("help")
@@ -187,8 +187,8 @@ func makeWheelApp(t *testing.T) App {
 	plugin.Register(podsPlugin)
 	plugin.Register(svcsPlugin)
 
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(svcsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(svcsPlugin, "default", "")
 	app.layout.FocusSplitAt(0)
 
 	// Populate each split with objects so cursor movement is observable.
@@ -967,7 +967,7 @@ func TestTripleClickFiresSingleDoubleClick(t *testing.T) {
 
 // TestSingleClickBehaviorPreservedWithClock verifies that installing a
 // virtual clock and the executeCommand spy does not break the single-click
-// focus/cursor logic from Task 9.
+// focus/cursor logic.
 func TestSingleClickBehaviorPreservedWithClock(t *testing.T) {
 	h := newDoubleClickHarness(t)
 	h.app.layout.FocusSplitAt(1)

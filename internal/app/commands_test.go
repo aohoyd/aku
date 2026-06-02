@@ -58,11 +58,24 @@ func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (
 	return render.Content{Raw: s, Display: s}, nil
 }
 
-// newTestManager returns a Manager with no clusters created. mgr.Global()
+// newTestManager returns a Manager with no clusters created. mgr.Get(ctx)
 // returns nil, which the App's clusterFor/storeFor/clientForFocused helpers
 // treat the same way the old nil client/store did.
 func newTestManager() *cluster.Manager {
 	return cluster.NewManager(nil, "", 0)
+}
+
+// restampPanes points every existing split (and the App's startup context) at
+// ctx, so a helper that rebinds the Manager after New() keeps the panes resolving
+// to the rebound cluster. Mirrors what startup seeding does in New().
+func restampPanes(app App, ctx string) App {
+	app.startupContext = ctx
+	for i := 0; i < app.layout.SplitCount(); i++ {
+		if s := app.layout.SplitAt(i); s != nil {
+			s.SetContext(ctx)
+		}
+	}
+	return app
 }
 
 // newTestApp creates an App suitable for testing with no k8s client or store.
@@ -70,10 +83,10 @@ func newTestApp() App {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	return New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	return New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
 }
 
-// newAppWithClient creates an App whose single global cluster wraps the given
+// newAppWithClient creates an App whose single startup cluster wraps the given
 // client. The cluster's context is taken from client.Context, and its store is
 // built from client.Dynamic (nil when the client has no dynamic interface). It
 // replaces the old pattern of assigning App.k8sClient directly.
@@ -86,23 +99,23 @@ func newAppWithClient(client *k8s.Client) App {
 	if client != nil && client.Dynamic != nil {
 		store = k8s.NewStore(client.Dynamic, client.Context, nil)
 	}
-	mgr.Register(cluster.New(client.Context, "", client, store, k8s.NewDiscovery(), nil), true)
-	return New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	mgr.Register(cluster.New(client.Context, "", client, store, k8s.NewDiscovery(), nil))
+	return New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical, client.Context)
 }
 
-// withGlobalStore rebinds the App's global cluster to one wrapping the given
+// withGlobalStore rebinds the App's startup cluster to one wrapping the given
 // store, preserving the existing layout/state. It replaces the old pattern of
 // assigning App.store directly: tests build a store, populate it, and route the
 // app's reads through it. The cluster carries a default-namespace client so
 // helpers that read client.Namespace keep working.
 func withGlobalStore(app App, store *k8s.Store) App {
 	mgr := cluster.NewManager(nil, "", 0)
-	mgr.Register(cluster.New("", "", &k8s.Client{Namespace: "default"}, store, k8s.NewDiscovery(), nil), true)
+	mgr.Register(cluster.New("", "", &k8s.Client{Namespace: "default"}, store, k8s.NewDiscovery(), nil))
 	app.mgr = mgr
-	return app
+	return restampPanes(app, "")
 }
 
-// withGlobalClient rebinds the App global cluster to one wrapping the given
+// withGlobalClient rebinds the App startup cluster to one wrapping the given
 // client (with a store derived from client.Dynamic), preserving the existing
 // layout/state. Use this — instead of newAppWithClient — when the test has
 // already configured app state (log mode, pf registry, splits) before attaching
@@ -113,9 +126,9 @@ func withGlobalClient(app App, client *k8s.Client) App {
 	if client != nil && client.Dynamic != nil {
 		store = k8s.NewStore(client.Dynamic, client.Context, nil)
 	}
-	mgr.Register(cluster.New(client.Context, "", client, store, k8s.NewDiscovery(), nil), true)
+	mgr.Register(cluster.New(client.Context, "", client, store, k8s.NewDiscovery(), nil))
 	app.mgr = mgr
-	return app
+	return restampPanes(app, client.Context)
 }
 
 func TestSearchOpenCommand(t *testing.T) {
@@ -158,7 +171,7 @@ func TestGotoCommand(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add initial split with pods
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Verify initial state: focused split has pods plugin
 	focused := app.layout.FocusedSplit()
@@ -204,7 +217,7 @@ func TestSplitCommand(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add initial split with pods
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 	if app.layout.SplitCount() != 1 {
 		t.Fatalf("expected 1 split initially, got %d", app.layout.SplitCount())
 	}
@@ -243,7 +256,7 @@ func TestSplitResetsFocusFromDetails(t *testing.T) {
 	plugin.Register(podsPlugin)
 	plugin.Register(deploymentsPlugin)
 
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 	app.layout.ShowRightPanel()
 	app.layout.FocusDetails()
 
@@ -278,8 +291,8 @@ func TestQuitWithMultipleSplits(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add two splits
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 	if app.layout.SplitCount() != 2 {
 		t.Fatalf("expected 2 splits, got %d", app.layout.SplitCount())
 	}
@@ -312,7 +325,7 @@ func TestQuitWithOneSplit(t *testing.T) {
 	plugin.Register(podsPlugin)
 
 	// Add one split
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 	if app.layout.SplitCount() != 1 {
 		t.Fatalf("expected 1 split, got %d", app.layout.SplitCount())
 	}
@@ -346,8 +359,8 @@ func TestFocusDownVerticalCommand(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add two splits: pods (idx 0) then deployments (idx 1, focused)
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	// After adding two splits, focus should be on the last one added (idx 1)
 	if app.layout.FocusIndex() != 1 {
@@ -387,8 +400,8 @@ func TestFocusUpVerticalCommand(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add two splits: pods (idx 0) then deployments (idx 1, focused)
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	// After adding two splits, focus should be on the last one added (idx 1)
 	if app.layout.FocusIndex() != 1 {
@@ -421,7 +434,7 @@ func TestViewYAMLCommand(t *testing.T) {
 	}
 
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Set objects on the focused split so Selected() returns non-nil
 	obj := &unstructured.Unstructured{}
@@ -454,7 +467,7 @@ func TestViewDescribeCommand(t *testing.T) {
 	}
 
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Set objects on the focused split so Selected() returns non-nil
 	obj := &unstructured.Unstructured{}
@@ -487,7 +500,7 @@ func TestClosePanelCommand(t *testing.T) {
 	}
 
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Set objects on the focused split so Selected() returns non-nil
 	obj := &unstructured.Unstructured{}
@@ -532,7 +545,7 @@ func TestDetailScrollMode(t *testing.T) {
 	}
 
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Set objects on the focused split so Selected() returns non-nil
 	obj := &unstructured.Unstructured{}
@@ -588,8 +601,8 @@ func TestFocusSwitchRefreshesPanel(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add two splits
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	// Set objects on both splits
 	podObj := &unstructured.Unstructured{}
@@ -639,7 +652,7 @@ func TestGotoRefreshesPanel(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add initial split with pods
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	podObj := &unstructured.Unstructured{}
 	podObj.SetName("my-pod")
@@ -676,7 +689,7 @@ func TestSortCommand(t *testing.T) {
 	}
 
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	focused := app.layout.FocusedSplit()
 	// Default sort should be NAME ascending
@@ -710,14 +723,14 @@ func TestScopedKeyPodsExecBinding(t *testing.T) {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
 
 	podsPlugin := &mockPlugin{
 		name: "pods",
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Simulate pressing 'x' via handleKey — should resolve to 'exec' because we're on pods
 	model, _ := app.handleKey(tea.KeyPressMsg{Code: rune('x'), Text: "x"})
@@ -733,14 +746,14 @@ func TestScopedKeyDeploymentNoExec(t *testing.T) {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
 
 	deploymentsPlugin := &mockPlugin{
 		name: "deployments",
 		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 	}
 	plugin.Register(deploymentsPlugin)
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	// x should NOT be in the deployments trie (it's a pods-only binding)
 	// After pressing x, the trie should have swallowed it (resolved with empty command)
@@ -761,7 +774,7 @@ func TestAutoReloadPreservesScrollPosition(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -802,7 +815,7 @@ func TestHorizontalScrollInDetailMode(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -849,7 +862,7 @@ func TestCtrlRRefreshesDetailPanel(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -897,8 +910,8 @@ func TestContextSwitchResetsMidSequence(t *testing.T) {
 
 	plugin.Register(podsPlugin)
 	plugin.Register(deploymentsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	// Start a key sequence (press 'g' for goto prefix)
 	model, _ := app.handleKey(tea.KeyPressMsg{Code: rune('g'), Text: "g"})
@@ -927,7 +940,7 @@ func TestGGChordResolvesGotoTop(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Press first 'g' — should enter trie mid-sequence
 	model, _ := app.handleKey(tea.KeyPressMsg{Code: rune('g'), Text: "g"})
@@ -957,7 +970,7 @@ func TestUppercaseGResolvesGotoBottom(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Add multiple objects so GotoBottom has somewhere to go
 	objs := make([]*unstructured.Unstructured, 20)
@@ -1005,7 +1018,7 @@ func TestGGChordInDetailScrollMode(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -1050,7 +1063,7 @@ func TestViewYAMLFocusedCommand(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -1079,7 +1092,7 @@ func TestViewDescribeFocusedCommand(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -1108,7 +1121,7 @@ func TestViewLogsFocusedCommand(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -1137,7 +1150,7 @@ func TestViewFocusedNoSelection(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 	// No objects set — Selected() returns nil
 
 	model, _ := app.executeCommand("view-yaml-focused")
@@ -1159,7 +1172,7 @@ func TestClosePanelFromDetailScroll(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -1197,7 +1210,7 @@ func TestCursorUpDownCommands(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	objs := make([]*unstructured.Unstructured, 5)
 	for i := range objs {
@@ -1237,7 +1250,7 @@ func TestEnterDetailCommand(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -1270,7 +1283,7 @@ func TestFocusLeftVerticalExitsDetail(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -1302,7 +1315,7 @@ func TestClearOverlayCommand(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -1327,7 +1340,7 @@ func TestClearOverlayExitsDetailScrollFirst(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -1356,7 +1369,7 @@ func TestHelpCommand(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	model, _ := app.executeCommand("help")
 	app = model.(App)
@@ -1383,8 +1396,8 @@ func TestNamespaceSwitchFocusedPaneOnly(t *testing.T) {
 	plugin.Register(svcsPlugin)
 
 	// Add two splits: pods in "default", services in "default"
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(svcsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(svcsPlugin, "default", "")
 
 	// Focus is on split 1 (services). Switch its namespace to "staging".
 	model, _ := app.handleNamespaceSwitch("staging")
@@ -1416,7 +1429,7 @@ func TestGotoPreservesNamespace(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add split with pods in "staging"
-	app.layout.AddSplit(podsPlugin, "staging")
+	app.layout.AddSplit(podsPlugin, "staging", "")
 
 	// Goto deployments — namespace should be preserved
 	model, _ := app.executeCommand("goto-deployments")
@@ -1446,7 +1459,7 @@ func TestSplitInheritsNamespace(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add initial split with pods in "production"
-	app.layout.AddSplit(podsPlugin, "production")
+	app.layout.AddSplit(podsPlugin, "production", "")
 
 	// Split with deployments — should inherit "production"
 	model, _ := app.executeCommand("split-deployments")
@@ -1482,8 +1495,8 @@ func TestQuitCleansUpNamespace(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Two splits in different namespaces
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "staging")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "staging", "")
 
 	// Quit should close the focused split (staging/deployments)
 	model, cmd := app.executeCommand("quit")
@@ -1513,7 +1526,7 @@ func TestNamespaceSwitchSameNsNoop(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Switching to the same namespace should be a no-op
 	model, _ := app.handleNamespaceSwitch("default")
@@ -1549,7 +1562,7 @@ func TestEnterDetailDrillDown(t *testing.T) {
 		childPlugin: childPlugin,
 		children:    []*unstructured.Unstructured{childObj},
 	}
-	a.layout.AddSplit(drillable, "default")
+	a.layout.AddSplit(drillable, "default", "")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
 	})
@@ -1578,7 +1591,7 @@ func TestEnterDetailDrillDownEmptyChildren(t *testing.T) {
 		childPlugin: childPlugin,
 		children:    []*unstructured.Unstructured{}, // empty children
 	}
-	a.layout.AddSplit(drillable, "default")
+	a.layout.AddSplit(drillable, "default", "")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
 	})
@@ -1609,7 +1622,7 @@ func TestClearOverlayNavBack(t *testing.T) {
 		childPlugin: childPlugin,
 		children:    []*unstructured.Unstructured{childObj},
 	}
-	a.layout.AddSplit(drillable, "default")
+	a.layout.AddSplit(drillable, "default", "")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
 	})
@@ -1664,7 +1677,7 @@ func TestEnterDetailNamespaceGoto(t *testing.T) {
 		mockPlugin:     mockPlugin{name: "namespaces", gvr: schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}},
 		targetResource: "pods",
 	}
-	a.layout.AddSplit(nsPlugin, "")
+	a.layout.AddSplit(nsPlugin, "", "")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "kube-system"}}},
 	})
@@ -1707,7 +1720,7 @@ func TestMultiLevelDrillDown(t *testing.T) {
 		children:    []*unstructured.Unstructured{{Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}}}},
 	}
 
-	a.layout.AddSplit(deployPlugin, "default")
+	a.layout.AddSplit(deployPlugin, "default", "")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "nginx-deploy"}}},
 	})
@@ -1760,7 +1773,7 @@ func TestEnterDetailDrillDownSetsParentUID(t *testing.T) {
 		childPlugin: childPlugin,
 		children:    []*unstructured.Unstructured{childObj},
 	}
-	a.layout.AddSplit(drillable, "default")
+	a.layout.AddSplit(drillable, "default", "")
 
 	parentObj := &unstructured.Unstructured{
 		Object: map[string]any{"metadata": map[string]any{
@@ -1804,7 +1817,7 @@ func TestClearOverlayMultiLevelPreservesParentContext(t *testing.T) {
 		children:    []*unstructured.Unstructured{{Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}}}},
 	}
 
-	a.layout.AddSplit(deployPlugin, "default")
+	a.layout.AddSplit(deployPlugin, "default", "")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "nginx-deploy", "uid": "deploy-uid-123"}}},
 	})
@@ -1890,10 +1903,10 @@ func TestHandleGotoSelfPopulating(t *testing.T) {
 
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
-	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
 
 	// Add initial split with pods so goto has a focused split
-	a.layout.AddSplit(podsPlugin, "default")
+	a.layout.AddSplit(podsPlugin, "default", "")
 
 	// Navigate to api-resources via goto
 	model, _ := a.executeCommand("goto-api-resources")
@@ -1931,9 +1944,9 @@ func TestEnterDetailApiResourcesGoto(t *testing.T) {
 
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
-	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
 
-	a.layout.AddSplit(gotoPlugin, "default")
+	a.layout.AddSplit(gotoPlugin, "default", "")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "deployments"}}},
 	})
@@ -1964,7 +1977,7 @@ func TestEnterDetailDrillDownNilChildren(t *testing.T) {
 		childPlugin: childPlugin,
 		children:    nil, // nil children — should still push nav, not goto
 	}
-	a.layout.AddSplit(drillable, "default")
+	a.layout.AddSplit(drillable, "default", "")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "deploy-1"}}},
 	})
@@ -2005,7 +2018,7 @@ func TestHandleGotoPreservesNamespaceAcrossClusterScoped(t *testing.T) {
 	plugin.Register(podsPlugin)
 
 	// Add initial split and set namespace
-	a.layout.AddSplit(podsPlugin, "production")
+	a.layout.AddSplit(podsPlugin, "production", "")
 	focused := a.layout.FocusedSplit()
 
 	// Go to cluster-scoped resource — namespace preserved internally
@@ -2049,7 +2062,7 @@ func TestHandleSplitInheritsNamespaceFromClusterScoped(t *testing.T) {
 	plugin.Register(podsPlugin)
 
 	// Add initial split with namespace, then switch to cluster-scoped
-	a.layout.AddSplit(podsPlugin, "staging")
+	a.layout.AddSplit(podsPlugin, "staging", "")
 	model, _ := a.handleGoto("testnodes", "")
 	a = model.(App)
 
@@ -2072,7 +2085,7 @@ func TestReloadAllCommand(t *testing.T) {
 	plugin.Register(podsPlugin)
 
 	// Add initial split with pods
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Set some objects
 	focused := app.layout.FocusedSplit()
@@ -2119,7 +2132,7 @@ func TestReloadAllWithDrillDown(t *testing.T) {
 	plugin.Register(podsPlugin)
 	plugin.Register(containersPlugin)
 
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 	focused := app.layout.FocusedSplit()
 
 	// Push a drill-down
@@ -2153,7 +2166,7 @@ func TestReloadAllWithDetailPanel(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Show detail panel
 	app.layout.ShowRightPanel()
@@ -2182,7 +2195,7 @@ func TestReloadAllPreservesLogMode(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Enable log mode with right panel visible
 	app.layout.SetLogMode(true)
@@ -2223,7 +2236,7 @@ func TestQuitWithRightPanelPerformsFullCleanup(t *testing.T) {
 	}
 
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Set objects so Selected() returns non-nil
 	obj := &unstructured.Unstructured{}
@@ -2272,7 +2285,7 @@ func TestRefreshDetailPanelOrLogNonLogMode(t *testing.T) {
 	app := newTestApp()
 	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
 	plugin.Register(p)
-	app.layout.AddSplit(p, "default")
+	app.layout.AddSplit(p, "default", "")
 	split := app.layout.FocusedSplit()
 	obj := &unstructured.Unstructured{}
 	obj.SetName("pod-1")
@@ -2297,7 +2310,7 @@ func TestCursorDownInLogModeReturnsCmd(t *testing.T) {
 	app := newTestApp()
 	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
 	plugin.Register(p)
-	app.layout.AddSplit(p, "default")
+	app.layout.AddSplit(p, "default", "")
 	split := app.layout.FocusedSplit()
 	objs := []*unstructured.Unstructured{
 		func() *unstructured.Unstructured {
@@ -2334,7 +2347,7 @@ func TestLogDebounceStaleFire(t *testing.T) {
 	app := newTestApp()
 	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
 	plugin.Register(p)
-	app.layout.AddSplit(p, "default")
+	app.layout.AddSplit(p, "default", "")
 	split := app.layout.FocusedSplit()
 	obj := &unstructured.Unstructured{}
 	obj.SetName("pod-1")
@@ -2361,7 +2374,7 @@ func TestLogDebounceAfterExitLogMode(t *testing.T) {
 	app := newTestApp()
 	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
 	plugin.Register(p)
-	app.layout.AddSplit(p, "default")
+	app.layout.AddSplit(p, "default", "")
 
 	// Simulate: was in log mode, debounce scheduled, then user exited log mode
 	app.logDebounceSeq = 1
@@ -2407,7 +2420,7 @@ func TestHandleGoto_StopsLogStreamOnNonLoggable(t *testing.T) {
 	plugin.Register(podsPlugin)
 	plugin.Register(deploymentsPlugin)
 
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	podObj := &unstructured.Unstructured{}
 	podObj.SetName("my-pod")
@@ -2444,7 +2457,7 @@ func TestHandleGoto_ResumesLogStreamOnLoggable(t *testing.T) {
 	plugin.Register(podsPlugin)
 	plugin.Register(deploymentsPlugin)
 
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	podObj := &unstructured.Unstructured{}
 	podObj.SetName("my-pod")
@@ -2498,8 +2511,8 @@ func TestFocusDown_SyncsLogPanel(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Split 0: pods, Split 1: deployments
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	podObj := &unstructured.Unstructured{}
 	podObj.SetName("my-pod")
@@ -2558,7 +2571,7 @@ func TestSplitCommandSyncsLogPanel(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add initial split with pods and enable log mode
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 	app.layout.SetLogMode(true)
 
 	// Verify log mode is on and LogView is available
@@ -2597,7 +2610,7 @@ func TestGotoLoggablePluginWithNoSelectionSkipsRestart(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Start with pods, enable log mode, then goto deployments
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 	app.layout.SetLogMode(true)
 
 	model, _ := app.executeCommand("goto-deployments")
@@ -2637,7 +2650,7 @@ func TestSyncLogPanel_NotBypassedByDescribeMode(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	podObj := &unstructured.Unstructured{}
 	podObj.SetName("my-pod")
@@ -2677,7 +2690,7 @@ func TestHandleViewLogsNonLoggablePlugin(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add split with deployments and populate with a fake object
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 	focused := app.layout.FocusedSplit()
 	obj := &unstructured.Unstructured{}
 	obj.SetName("my-deployment")
@@ -2704,7 +2717,7 @@ func TestSubstituteVarsParent(t *testing.T) {
 			gvr:  schema.GroupVersionResource{Group: "_ktui", Version: "v1", Resource: "containers"},
 		}
 		plugin.Register(containersPlugin)
-		app.layout.AddSplit(containersPlugin, "default")
+		app.layout.AddSplit(containersPlugin, "default", "")
 
 		// Build a container object with a synthetic _pod field
 		obj := &unstructured.Unstructured{
@@ -2743,7 +2756,7 @@ func TestSubstituteVarsParent(t *testing.T) {
 			gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 		}
 		plugin.Register(podsPlugin)
-		app.layout.AddSplit(podsPlugin, "default")
+		app.layout.AddSplit(podsPlugin, "default", "")
 
 		obj := &unstructured.Unstructured{}
 		obj.SetName("my-pod")
@@ -2768,7 +2781,7 @@ func TestSubstituteVarsParent(t *testing.T) {
 			gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 		}
 		plugin.Register(deploymentsPlugin)
-		app.layout.AddSplit(deploymentsPlugin, "default")
+		app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 		obj := &unstructured.Unstructured{}
 		obj.SetName("my-deploy")
@@ -2794,7 +2807,7 @@ func TestLogInsertMarkerCommand(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 	app.layout.SetLogMode(true)
 	app.layout.ShowRightPanel()
 
@@ -2816,7 +2829,7 @@ func TestCloseCurrentPanelClosesRightPanel(t *testing.T) {
 	}
 
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Set objects so Selected() returns non-nil
 	obj := &unstructured.Unstructured{}
@@ -2860,8 +2873,8 @@ func TestCloseCurrentPanelClosesSplit(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add two splits
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 	if app.layout.SplitCount() != 2 {
 		t.Fatalf("expected 2 splits, got %d", app.layout.SplitCount())
 	}
@@ -2882,34 +2895,34 @@ func TestCloseCurrentPanelClosesSplit(t *testing.T) {
 	}
 }
 
-// pinFocusedTo pins the focused pane to ctxName by driving the same
+// switchFocusedTo retargets the focused pane to ctxName by driving the same
 // handlePaneContextSwitch -> ClusterReadyMsg path the real app uses, so the
-// Manager ref for ctxName is Acquired exactly as in production. Returns the
-// resulting App.
-func pinFocusedTo(t *testing.T, a App, ctxName string) App {
+// Manager refcount for ctxName reflects the pane exactly as in production.
+// Returns the resulting App.
+func switchFocusedTo(t *testing.T, a App, ctxName string) App {
 	t.Helper()
 	model, connectCmd := a.handlePaneContextSwitch(ctxName)
 	a = model.(App)
 	if connectCmd == nil {
-		t.Fatalf("expected a connect command pinning to %q", ctxName)
+		t.Fatalf("expected a connect command switching to %q", ctxName)
 	}
 	ready := extractClusterReady(t, connectCmd)
 	if ready.Err != nil {
-		t.Fatalf("unexpected connect error pinning to %q: %v", ctxName, ready.Err)
+		t.Fatalf("unexpected connect error switching to %q: %v", ctxName, ready.Err)
 	}
 	model, _ = a.handleClusterReady(ready)
 	return model.(App)
 }
 
-// TestCloseSplit_ReleasesLastPinnedCluster verifies that closing the last pane
-// pinned to a non-global context Releases its ref, driving the cluster's refCount
-// to zero so the Manager tears it down and removes it from the map.
+// TestCloseSplit_ReleasesLastReferencedCluster verifies that closing the last
+// pane referencing a context drives the cluster's refcount to zero so SyncRefs
+// tears it down and removes it from the map.
 //
-// newContextSwitchApp starts with one split (the global pods pane created by
-// New); the focused pane is that split. We pin it to staging (Acquire) then close
-// it. A second pane is added first so closing is allowed (the last split is never
-// closed) and so the focus returns to a global pane afterward.
-func TestCloseSplit_ReleasesLastPinnedCluster(t *testing.T) {
+// newContextSwitchApp starts with one split (the startup pods pane created by
+// New); the focused pane is that split. We retarget it to staging then close it.
+// A second pane is added first so closing is allowed (the last split is never
+// closed) and so the focus returns to a remaining pane afterward.
+func TestCloseSplit_ReleasesLastReferencedCluster(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global":  {testPod("global-pod", "default")},
 		"staging": {testPod("staging-pod", "default")},
@@ -2919,66 +2932,67 @@ func TestCloseSplit_ReleasesLastPinnedCluster(t *testing.T) {
 	// Add a second global pane so we can close the staging one (>1 split) and end
 	// up focused on a remaining global pane.
 	pods := app.layout.FocusedSplit().Plugin()
-	app.layout.AddSplit(pods, "default")
+	app.layout.AddSplit(pods, "default", "")
 	app.layout.SplitAt(app.layout.SplitCount() - 1).SetContext("global")
 
-	// Focus the new pane and pin it to staging — this Acquires staging (refCount 1).
+	// Focus the new pane and retarget it to staging — staging's refcount is 1.
 	app.layout.FocusSplitAt(app.layout.SplitCount() - 1)
-	app = pinFocusedTo(t, app, "staging")
+	app = switchFocusedTo(t, app, "staging")
 
 	if _, ok := mgr.Get("staging"); !ok {
-		t.Fatalf("precondition: expected staging cluster present after pin")
+		t.Fatalf("precondition: expected staging cluster present after retarget")
 	}
 	before := app.layout.SplitCount()
 
-	// Close the staging-pinned pane. Release should drive staging to refCount 0
-	// and the Manager should tear it down + remove it from the map.
+	// Close the staging pane. SyncRefs should drive staging to refcount 0 and the
+	// Manager should tear it down + remove it from the map.
 	app = app.closeFocusedSplit()
 
 	if app.layout.SplitCount() != before-1 {
 		t.Fatalf("expected %d splits after close, got %d", before-1, app.layout.SplitCount())
 	}
 	if _, ok := mgr.Get("staging"); ok {
-		t.Fatalf("expected staging cluster torn down (removed) after closing its last pinned pane")
+		t.Fatalf("expected staging cluster torn down (removed) after closing its last referencing pane")
 	}
 }
 
-// TestCloseSplit_SharedPinnedClusterNotTornDown verifies that closing one of two
-// panes pinned to the same non-global context only decrements the refcount; the
+// TestCloseSplit_SharedReferencedClusterNotTornDown verifies that closing one of
+// two panes referencing the same context only decrements the refcount; the
 // cluster stays alive for the remaining pane, and is torn down only when the last
 // one closes.
-func TestCloseSplit_SharedPinnedClusterNotTornDown(t *testing.T) {
+func TestCloseSplit_SharedReferencedClusterNotTornDown(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global":  {testPod("global-pod", "default")},
 		"staging": {testPod("staging-pod", "default")},
 	})
 	app := newContextSwitchApp(t, mgr)
 
-	// The app starts with one global pane (index 0). Pin it to staging (Acquire #1).
+	// The app starts with one startup pane (index 0). Retarget it to staging
+	// (staging refcount 1).
 	pods := app.layout.SplitAt(0).Plugin()
 	app.layout.FocusSplitAt(0)
-	app = pinFocusedTo(t, app, "staging")
+	app = switchFocusedTo(t, app, "staging")
 
-	// Add a second pane and pin it to staging too (Acquire #2). Each pane holds
-	// its own ref, so staging's refCount is 2.
-	app.layout.AddSplit(pods, "default")
-	app.layout.SplitAt(app.layout.SplitCount() - 1).SetContext("global") // inherits global before pin
+	// Add a second pane and retarget it to staging too. Each referencing pane
+	// counts, so staging's refcount is 2.
+	app.layout.AddSplit(pods, "default", "")
+	app.layout.SplitAt(app.layout.SplitCount() - 1).SetContext("global") // inherits startup ctx before retarget
 	app.layout.FocusSplitAt(app.layout.SplitCount() - 1)
-	app = pinFocusedTo(t, app, "staging")
+	app = switchFocusedTo(t, app, "staging")
 
 	if _, ok := mgr.Get("staging"); !ok {
-		t.Fatalf("precondition: expected staging cluster present with two pinned panes")
+		t.Fatalf("precondition: expected staging cluster present with two referencing panes")
 	}
 
-	// Close the focused (second) staging pane. refCount drops 2 -> 1; staging must
+	// Close the focused (second) staging pane. refcount drops 2 -> 1; staging must
 	// remain because pane 0 still references it.
 	app = app.closeFocusedSplit()
 
 	if _, ok := mgr.Get("staging"); !ok {
-		t.Fatalf("expected staging cluster to survive: another pinned pane still uses it")
+		t.Fatalf("expected staging cluster to survive: another referencing pane still uses it")
 	}
 
-	// Focus the remaining staging pane and close it: refCount drops 1 -> 0 and the
+	// Focus the remaining staging pane and close it: refcount drops 1 -> 0 and the
 	// Manager tears it down. (closeFocusedSplit requires >1 split, which holds
 	// here because the app retains its baseline panes.)
 	for i := range app.layout.SplitCount() {
@@ -2989,22 +3003,22 @@ func TestCloseSplit_SharedPinnedClusterNotTornDown(t *testing.T) {
 	}
 	app = app.closeFocusedSplit()
 	if _, ok := mgr.Get("staging"); ok {
-		t.Fatalf("expected staging cluster torn down after closing its last pinned pane")
+		t.Fatalf("expected staging cluster torn down after closing its last referencing pane")
 	}
 }
 
-// TestCloseSplit_FollowingGlobalDoesNotReleaseGlobal verifies that closing a
-// pane that FOLLOWS GLOBAL (unpinned) does not tear down the global cluster — the
-// pane held no ref, and the global is pinned in the Manager regardless.
-func TestCloseSplit_FollowingGlobalDoesNotReleaseGlobal(t *testing.T) {
+// TestCloseSplit_StillReferencedContextSurvives verifies that closing one of two
+// panes on the same context leaves that context's cluster intact, because the
+// remaining pane still references it (SyncRefs keeps it at refCount >= 1).
+func TestCloseSplit_StillReferencedContextSurvives(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global": {testPod("global-pod", "default")},
 	})
 	app := newContextSwitchApp(t, mgr)
 
-	// Add a second pane following global (unpinned), focus it, then close it.
+	// Add a second pane on the same context, focus it, then close it.
 	pods := app.layout.FocusedSplit().Plugin()
-	app.layout.AddSplit(pods, "default")
+	app.layout.AddSplit(pods, "default", "")
 	app.layout.SplitAt(app.layout.SplitCount() - 1).SetContext("global")
 	app.layout.FocusSplitAt(app.layout.SplitCount() - 1)
 	before := app.layout.SplitCount()
@@ -3014,18 +3028,19 @@ func TestCloseSplit_FollowingGlobalDoesNotReleaseGlobal(t *testing.T) {
 	if app.layout.SplitCount() != before-1 {
 		t.Fatalf("expected %d splits after close, got %d", before-1, app.layout.SplitCount())
 	}
-	// Global is always present (never torn down by Release).
-	if _, ok := mgr.Get("global"); !ok {
-		t.Fatalf("expected global cluster to remain after closing a following pane")
+	// split[0] still references "global", so its cluster survives.
+	c, ok := mgr.Get("global")
+	if !ok {
+		t.Fatalf("expected global cluster to remain while a pane still references it")
 	}
-	if g := mgr.Global(); g == nil || g.Context() != "global" {
-		t.Fatalf("expected global pointer intact, got %v", g)
+	if c == nil || c.Context() != "global" {
+		t.Fatalf("expected global cluster intact, got %v", c)
 	}
 }
 
 // TestReloadAll_MultiClusterNoChangeToRefcounts verifies reload-all re-subscribes
-// across all live clusters (one global pane + one pinned pane) without panicking
-// and without changing refcounts — both clusters remain present afterward.
+// across all live clusters (one startup-context pane + one staging pane) without
+// panicking and without changing refcounts — both clusters remain present afterward.
 func TestReloadAll_MultiClusterNoChangeToRefcounts(t *testing.T) {
 	mgr := newTestManagerWithContexts(t, "global", map[string][]*unstructured.Unstructured{
 		"global":  {testPod("global-pod", "default")},
@@ -3033,17 +3048,17 @@ func TestReloadAll_MultiClusterNoChangeToRefcounts(t *testing.T) {
 	})
 	app := newContextSwitchApp(t, mgr)
 
-	// The app starts with one global pane (index 0). Add a second pane and pin it
-	// to staging (Acquire staging).
+	// The app starts with one startup-context pane (index 0). Add a second pane and
+	// switch it to staging (Acquire staging).
 	pods := app.layout.FocusedSplit().Plugin()
 	stagingIdx := app.layout.SplitCount() // the about-to-be-added pane's index
-	app.layout.AddSplit(pods, "default")
+	app.layout.AddSplit(pods, "default", "")
 	app.layout.SplitAt(stagingIdx).SetContext("global")
 	app.layout.FocusSplitAt(stagingIdx)
-	app = pinFocusedTo(t, app, "staging")
+	app = switchFocusedTo(t, app, "staging")
 
 	if _, ok := mgr.Get("staging"); !ok {
-		t.Fatalf("precondition: expected staging present after pin")
+		t.Fatalf("precondition: expected staging present after switch")
 	}
 	before := app.layout.SplitCount()
 
@@ -3061,13 +3076,13 @@ func TestReloadAll_MultiClusterNoChangeToRefcounts(t *testing.T) {
 	if _, ok := mgr.Get("staging"); !ok {
 		t.Fatalf("expected staging cluster present after reload (reload must not Release)")
 	}
-	// Pane bindings are unchanged: the global pane still follows global, the
-	// staging pane is still pinned to staging.
-	if p0 := app.layout.SplitAt(0); p0.Context() != "global" || p0.Pinned() {
-		t.Fatalf("expected pane 0 to remain following global, got ctx=%q pinned=%v", p0.Context(), p0.Pinned())
+	// Pane bindings are unchanged: pane 0 still on global, the staging pane still
+	// on staging.
+	if p0 := app.layout.SplitAt(0); p0.Context() != "global" {
+		t.Fatalf("expected pane 0 to remain on global, got ctx=%q", p0.Context())
 	}
-	if ps := app.layout.SplitAt(stagingIdx); ps.Context() != "staging" || !ps.Pinned() {
-		t.Fatalf("expected staging pane to remain pinned to staging, got ctx=%q pinned=%v", ps.Context(), ps.Pinned())
+	if ps := app.layout.SplitAt(stagingIdx); ps.Context() != "staging" {
+		t.Fatalf("expected staging pane to remain on staging, got ctx=%q", ps.Context())
 	}
 }
 
@@ -3080,7 +3095,7 @@ func TestCloseCurrentPanelNoopWithOneSplit(t *testing.T) {
 	}
 
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	if app.layout.SplitCount() != 1 {
 		t.Fatalf("expected 1 split, got %d", app.layout.SplitCount())
@@ -3107,7 +3122,7 @@ func TestSubstituteVarsCleanValues(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("my-pod")
@@ -3136,7 +3151,7 @@ func TestDebugNodeShowsConfirmDialog(t *testing.T) {
 		},
 	}
 	plugin.Register(nodesPlugin)
-	app.layout.AddSplit(nodesPlugin, "default")
+	app.layout.AddSplit(nodesPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("worker-1")
@@ -3174,7 +3189,7 @@ func TestDebugPrivilegedShowsConfirmDialog(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -3226,7 +3241,7 @@ func TestDebugNonPrivilegedNoConfirmDialog(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
@@ -3270,7 +3285,7 @@ func TestDebugConfirmResultCancelled(t *testing.T) {
 		},
 	}
 	plugin.Register(nodesPlugin)
-	app.layout.AddSplit(nodesPlugin, "default")
+	app.layout.AddSplit(nodesPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("worker-1")
@@ -3435,7 +3450,7 @@ func TestSubstituteVarsRejectsShellMetacharacters(t *testing.T) {
 				gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 			}
 			plugin.Register(podsPlugin)
-			app.layout.AddSplit(podsPlugin, "default")
+			app.layout.AddSplit(podsPlugin, "default", "")
 
 			obj := &unstructured.Unstructured{}
 			obj.SetName(tt.objName)
@@ -3516,7 +3531,7 @@ func TestGotoQualifiedName(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Use qualified name to navigate to cert-manager certificates specifically.
 	model, _ := app.handleGoto("certificates.cert-manager.io/v1", "")
@@ -3545,7 +3560,7 @@ func TestGotoBareName(t *testing.T) {
 
 	plugin.Register(podsPlugin)
 	plugin.Register(deploymentsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Bare name should still work (backward compat).
 	model, _ := app.handleGoto("deployments", "")
@@ -3573,7 +3588,7 @@ func TestHandleGotoGVR(t *testing.T) {
 	}
 	plugin.Register(certManagerCerts)
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Navigate using GVR string.
 	model, _ := app.handleGotoGVR("cert-manager.io/v1/certificates")
@@ -3602,7 +3617,7 @@ func TestHandleGotoGVR_CoreGroup(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 	}
 	plugin.Register(deploymentsPlugin)
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	// Navigate using core group GVR (no group prefix).
 	model, _ := app.handleGotoGVR("v1/pods")
@@ -3630,7 +3645,7 @@ func TestResourcePickerGotoGVR(t *testing.T) {
 	}
 	plugin.Register(certManagerCerts)
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Use resource picker command to navigate via GVR.
 	model, _ := app.handleResourcePickerCommand("goto-gvr cert-manager.io/v1/certificates")
@@ -3653,7 +3668,7 @@ func TestHandleGotoGVR_InvalidFormat(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Single segment — invalid.
 	model, _ := app.handleGotoGVR("pods")
@@ -3677,7 +3692,7 @@ func TestDescribeKeySingleNamespace(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetKind("Pod")
@@ -3701,7 +3716,7 @@ func TestDescribeKeyAllNamespaces(t *testing.T) {
 	}
 	plugin.Register(podsPlugin)
 	// Empty namespace means all-namespaces
-	app.layout.AddSplit(podsPlugin, "")
+	app.layout.AddSplit(podsPlugin, "", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetKind("Pod")
@@ -3730,7 +3745,7 @@ func TestDescribeKeyNoSelection(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	if got := app.detailKey(); got != "" {
 		t.Fatalf("detailKey() with no selection = %q, want \"\"", got)
@@ -3743,7 +3758,7 @@ func TestDescribeRefreshOnResourceIdentityChange(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store so the ResourceUpdatedMsg handler can call store.List
 	store := k8s.NewStore(nil, "", nil)
@@ -3809,7 +3824,7 @@ func TestDescribePanelClearedOnEmptyList(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store
 	store := k8s.NewStore(nil, "", nil)
@@ -3850,7 +3865,7 @@ func TestDescribeSameResourceUsesDebounce(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store
 	store := k8s.NewStore(nil, "", nil)
@@ -3896,7 +3911,7 @@ func TestDescribeDebounceNotResetByUnrelatedGVR(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store and populate with one pod
 	store := k8s.NewStore(nil, "", nil)
@@ -3933,7 +3948,7 @@ func TestDescribeDebounceFiresForMatchingGVR(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store and populate with one pod
 	store := k8s.NewStore(nil, "", nil)
@@ -3969,7 +3984,7 @@ func TestDescribeDebounceFiresForEventsGVR(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store and populate with one pod
 	store := k8s.NewStore(nil, "", nil)
@@ -4006,7 +4021,7 @@ func TestDescribeDebounceFiresForSecretsGVRWhenEnvResolved(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	store := k8s.NewStore(nil, "", nil)
 	app = withGlobalStore(app, store)
@@ -4044,7 +4059,7 @@ func TestDescribeDebounceSkipsSecretsGVRWhenNotEnvResolved(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	store := k8s.NewStore(nil, "", nil)
 	app = withGlobalStore(app, store)
@@ -4082,7 +4097,7 @@ func TestLastDescribedKeyClearedOnPanelClose(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Populate with one pod
 	pod := &unstructured.Unstructured{}
@@ -4113,7 +4128,7 @@ func TestLastDetailKeySetAfterModeSwitch(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Populate with one pod
 	pod := &unstructured.Unstructured{}
@@ -4145,7 +4160,7 @@ func TestYAMLRefreshOnResourceIdentityChange(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store so the ResourceUpdatedMsg handler can call store.List
 	store := k8s.NewStore(nil, "", nil)
@@ -4202,7 +4217,7 @@ func TestLogRestartOnResourceIdentityChange(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store so the ResourceUpdatedMsg handler can call store.List
 	store := k8s.NewStore(nil, "", nil)
@@ -4263,7 +4278,7 @@ func TestYAMLReloadSkipsUnrelatedGVR(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store and populate with one pod
 	store := k8s.NewStore(nil, "", nil)
@@ -4312,7 +4327,7 @@ func TestYAMLReloadFiresForMatchingGVR(t *testing.T) {
 	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
 	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Create a store and populate with one pod
 	store := k8s.NewStore(nil, "", nil)
@@ -4351,7 +4366,7 @@ func TestSearchDebounceStaleFire(t *testing.T) {
 	app := newTestApp()
 	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
 	plugin.Register(p)
-	app.layout.AddSplit(p, "default")
+	app.layout.AddSplit(p, "default", "")
 	split := app.layout.FocusedSplit()
 	obj := &unstructured.Unstructured{}
 	obj.SetName("pod-1")
@@ -4376,7 +4391,7 @@ func TestSearchChangedEmptyPatternClearsImmediately(t *testing.T) {
 	app := newTestApp()
 	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
 	plugin.Register(p)
-	app.layout.AddSplit(p, "default")
+	app.layout.AddSplit(p, "default", "")
 	split := app.layout.FocusedSplit()
 	obj := &unstructured.Unstructured{}
 	obj.SetName("pod-1")
@@ -4426,7 +4441,7 @@ func TestToggleOrientationCommand(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Default orientation should be vertical
 	if app.layout.Orientation() != layout.OrientationVertical {
@@ -4456,7 +4471,7 @@ func TestFocusRightVerticalFocusesDetails(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -4497,8 +4512,8 @@ func TestDirectionalFocusHorizontalMode(t *testing.T) {
 	plugin.Register(deploymentsPlugin)
 
 	// Add two splits
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -4543,7 +4558,7 @@ func TestDirectionalFocusHorizontalDownFocusesDetails(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -4577,7 +4592,7 @@ func TestDirectionalFocusHorizontalUpExitsDetail(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -4621,8 +4636,8 @@ func TestFocusDownVerticalNextSplit(t *testing.T) {
 	plugin.Register(podsPlugin)
 	plugin.Register(deploymentsPlugin)
 
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	// Focus is on split 1. focus-down should wrap to 0.
 	model, _ := app.executeCommand("focus-down")
@@ -4655,8 +4670,8 @@ func TestFocusRightHorizontalNextSplit(t *testing.T) {
 	plugin.Register(podsPlugin)
 	plugin.Register(deploymentsPlugin)
 
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	// Switch to horizontal
 	model, _ := app.executeCommand("toggle-orientation")
@@ -4685,7 +4700,7 @@ func TestTogglePanelFocusRoundTrip(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -4724,7 +4739,7 @@ func TestTogglePanelFocusNoopWithoutRightPanel(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	// Right panel is hidden, resources focused — toggle should be no-op
 	if !app.layout.FocusedResources() {
@@ -4751,8 +4766,8 @@ func TestFocusNextSplitCycles(t *testing.T) {
 	}
 	plugin.Register(podsPlugin)
 	plugin.Register(deploymentsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	if app.layout.FocusIndex() != 1 {
 		t.Fatalf("expected focus at index 1, got %d", app.layout.FocusIndex())
@@ -4829,7 +4844,7 @@ func TestViewHelmValuesUserCommand_NonHelmRowIsNoOp(t *testing.T) {
 		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
 	}
 	plugin.Register(podsPlugin)
-	app.layout.AddSplit(podsPlugin, "default")
+	app.layout.AddSplit(podsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("test-pod")
@@ -4885,7 +4900,7 @@ func TestViewHelmValuesUserCommand_NoSelectionIsNoOp(t *testing.T) {
 	a.helmClient = hc
 	p := helmreleases.NewWithClient(hc)
 	plugin.Register(p)
-	a.layout.AddSplit(p, "default")
+	a.layout.AddSplit(p, "default", "")
 	// No objects seeded: focusedSelection returns ok=false.
 
 	model, cmd := a.executeCommand("view-helm-values-user")
@@ -4907,7 +4922,7 @@ func TestViewHelmValuesUserCommand_NilHelmClient(t *testing.T) {
 	a.helmClient = nil
 	p := helmreleases.NewWithClient(nil)
 	plugin.Register(p)
-	a.layout.AddSplit(p, "default")
+	a.layout.AddSplit(p, "default", "")
 	obj := &unstructured.Unstructured{}
 	obj.SetName("rel")
 	obj.SetNamespace("default")
@@ -4966,7 +4981,7 @@ func setupRestartPendingApp(t *testing.T) App {
 		gvr:  deploymentsGVRForRestart,
 	}
 	plugin.Register(deploymentsPlugin)
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	obj := &unstructured.Unstructured{}
 	obj.SetName("web")
@@ -5077,7 +5092,7 @@ func setupRolloutRestartDispatchApp(t *testing.T, count int) (App, []*unstructur
 		gvr:  deploymentsGVRForRestart,
 	}
 	plugin.Register(deploymentsPlugin)
-	app.layout.AddSplit(deploymentsPlugin, "default")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
 
 	objs := make([]*unstructured.Unstructured, 0, count)
 	for i := 0; i < count; i++ {
@@ -5479,7 +5494,7 @@ func TestExecuteDelete(t *testing.T) {
 
 				p := &mockPlugin{name: "pods", gvr: podsGVR}
 				plugin.Register(p)
-				app.layout.AddSplit(p, "default")
+				app.layout.AddSplit(p, "default", "")
 				app.layout.FocusedSplit().SetObjects(targets)
 
 			case "helm":
@@ -5490,7 +5505,7 @@ func TestExecuteDelete(t *testing.T) {
 				app.helmClient = hc
 				p := helmreleases.NewWithClient(hc)
 				plugin.Register(p)
-				app.layout.AddSplit(p, "default")
+				app.layout.AddSplit(p, "default", "")
 				app.layout.FocusedSplit().SetObjects(targets)
 
 			case "portforward":
@@ -5513,7 +5528,7 @@ func TestExecuteDelete(t *testing.T) {
 				app.pfRegistry = reg
 				p := portforwards.New(reg)
 				plugin.Register(p)
-				app.layout.AddSplit(p, "default")
+				app.layout.AddSplit(p, "default", "")
 				app.layout.FocusedSplit().SetObjects(targets)
 			}
 
@@ -5579,7 +5594,7 @@ func TestExecuteDelete_K8s_N1_FailureWraps(t *testing.T) {
 
 	p := &mockPlugin{name: "pods", gvr: podsGVR}
 	plugin.Register(p)
-	app.layout.AddSplit(p, "default")
+	app.layout.AddSplit(p, "default", "")
 	app.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{target})
 
 	_, cmd := app.executeDelete([]*unstructured.Unstructured{target}, false)
@@ -5624,7 +5639,7 @@ func TestExecuteDelete_PortForward_PartialUnknownID(t *testing.T) {
 	app.pfRegistry = reg
 	p := portforwards.New(reg)
 	plugin.Register(p)
-	app.layout.AddSplit(p, "default")
+	app.layout.AddSplit(p, "default", "")
 
 	known := makePodObj(knownID, "default")
 	unknown := makePodObj("pf-does-not-exist", "default")
@@ -5980,16 +5995,16 @@ func appWithManager(t *testing.T, ctxNames ...string) App {
 		entries[i] = cluster.ContextEntry{Name: n, File: "/dev/null"}
 	}
 	mgr := cluster.NewManager(entries, "", 0)
-	// Lazily-created clusters (the non-global contexts) connect via this stub.
+	// Lazily-created clusters (the non-startup contexts) connect via this stub.
 	mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
 		return fakeClientFor(ctx), nil
 	})
-	// Register the global (first context) eagerly with a real store so the
-	// default global pane subscribes correctly.
+	// Register the startup (first context) eagerly with a real store so the
+	// initial pane subscribes correctly.
 	gctx := ctxNames[0]
 	gclient := fakeClientFor(gctx)
 	gstore := k8s.NewStore(gclient.Dynamic, gctx, nil)
-	mgr.Register(cluster.New(gctx, "", gclient, gstore, k8s.NewDiscovery(), nil), true)
+	mgr.Register(cluster.New(gctx, "", gclient, gstore, k8s.NewDiscovery(), nil))
 
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
@@ -6000,12 +6015,12 @@ func appWithManager(t *testing.T, ctxNames ...string) App {
 	plugin.Register(deploymentsPlugin)
 
 	// New() with empty specs seeds a single pods pane and stamps it with the
-	// global context.
-	return New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical)
+	// startup context.
+	return New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical, gctx)
 }
 
 // addSplit adds a following split for the named registered plugin and stamps it
-// with the current global context (mirroring handleSplit's inherit behavior),
+// with the focused pane's context (mirroring handleSplit's inherit behavior),
 // returning the updated App.
 func addSplit(t *testing.T, a App, pluginName string) App {
 	t.Helper()
@@ -6013,70 +6028,127 @@ func addSplit(t *testing.T, a App, pluginName string) App {
 	if !ok {
 		t.Fatalf("plugin %q not registered", pluginName)
 	}
-	a.layout.AddSplit(p, "default")
+	inherit := a.contextFor(a.layout.FocusedSplit())
+	a.layout.AddSplit(p, "default", "")
 	if sp := a.layout.FocusedSplit(); sp != nil {
-		sp.SetContext(a.mgr.GlobalContext())
+		sp.SetContext(inherit)
 	}
 	return a
 }
 
-func TestGlobalContextSwitchRetargetsFollowingPanes(t *testing.T) {
+// TestGlobalContextSwitchRetargetsFocusedGroupAsync exercises the full async
+// retarget of the focused pane's context group end-to-end: every pane in the
+// group moves to the new context optimistically, and lands on the new cluster's
+// default namespace once the dial returns. Other-context panes being left
+// untouched is covered by TestGlobalContextSwitchLeavesOtherGroupsUntouched.
+func TestGlobalContextSwitchRetargetsFocusedGroupAsync(t *testing.T) {
 	a := appWithManager(t, "ctx-a", "ctx-b")
 	// ctx-b connects lazily; give it a distinct default namespace so we can
-	// assert the following pane lands on it.
+	// assert the retargeted pane lands on it.
 	connectWithNamespaces(a, map[string]string{"ctx-b": "team-b"})
 
-	// Add a second following (unpinned) split. Both panes follow global (ctx-a).
+	// Add a second split in the focused context group (both panes on ctx-a).
 	a = addSplit(t, a, "deployments")
 	if got := a.layout.SplitCount(); got != 2 {
 		t.Fatalf("expected 2 splits, got %d", got)
 	}
 
-	model, _ := a.handleGlobalContextSwitch("ctx-b")
+	// The switch is async: it optimistically retargets the group's context and
+	// dispatches an off-thread dial. The new namespace/data land in
+	// handleClusterReady once the dial returns.
+	model, cmd := a.handleGroupContextSwitch("ctx-b")
 	app := model.(App)
 
-	if app.mgr.GlobalContext() != "ctx-b" {
-		t.Fatalf("expected global ctx-b, got %q", app.mgr.GlobalContext())
+	// Both panes' contexts move immediately (optimistic retarget).
+	if got := app.contextFor(app.layout.FocusedSplit()); got != "ctx-b" {
+		t.Fatalf("expected focused pane context ctx-b, got %q", got)
 	}
 	for i := range app.layout.SplitCount() {
 		sp := app.layout.SplitAt(i)
 		if sp.Context() != "ctx-b" {
 			t.Errorf("split %d: expected context ctx-b, got %q", i, sp.Context())
 		}
-		if sp.Namespace() != "team-b" {
-			t.Errorf("split %d: expected namespace team-b, got %q", i, sp.Namespace())
-		}
 	}
 	if app.activeOverlay != overlayNone {
 		t.Errorf("expected overlay closed, got %v", app.activeOverlay)
 	}
+
+	// Complete the async connect; now every retargeted pane lands on ctx-b's
+	// default namespace.
+	if cmd == nil {
+		t.Fatalf("expected a non-nil connect command")
+	}
+	ready := extractClusterReady(t, cmd)
+	if ready.Context != "ctx-b" {
+		t.Fatalf("expected ClusterReadyMsg for ctx-b, got %q", ready.Context)
+	}
+	model, _ = app.handleClusterReady(ready)
+	app = model.(App)
+	for i := range app.layout.SplitCount() {
+		sp := app.layout.SplitAt(i)
+		if sp.Namespace() != "team-b" {
+			t.Errorf("split %d: expected namespace team-b, got %q", i, sp.Namespace())
+		}
+	}
 }
 
-func TestGlobalContextSwitchLeavesPinnedPanesUntouched(t *testing.T) {
+// TestGlobalContextSwitchRetargetsFocusedGroup verifies the group semantics: a
+// switch retargets every pane on the focused pane's context, leaving panes on
+// other contexts untouched. Here both panes share ctx-a (the focused group), so
+// both move to ctx-b.
+func TestGlobalContextSwitchRetargetsFocusedGroup(t *testing.T) {
 	a := appWithManager(t, "ctx-a", "ctx-b")
 	connectWithNamespaces(a, map[string]string{"ctx-b": "team-b"})
 
-	// Add a second split and pin it to ctx-a explicitly.
+	// Add a second split, explicitly on ctx-a (the focused group) with a custom
+	// namespace.
 	a = addSplit(t, a, "deployments")
-	pinned := a.layout.SplitAt(1)
-	pinned.SetPinned(true)
-	pinned.SetContext("ctx-a")
-	pinned.SetNamespace("pinned-ns")
+	second := a.layout.SplitAt(1)
+	second.SetContext("ctx-a")
+	second.SetNamespace("second-ns")
+	a.layout.FocusSplitAt(0)
 
-	model, _ := a.handleGlobalContextSwitch("ctx-b")
+	model, cmd := a.handleGroupContextSwitch("ctx-b")
 	app := model.(App)
 
-	// Following pane (index 0) retargeted to ctx-b.
+	// Both panes (the whole ctx-a group) retarget their context immediately.
+	for i := range app.layout.SplitCount() {
+		if got := app.layout.SplitAt(i).Context(); got != "ctx-b" {
+			t.Errorf("split %d: expected ctx-b, got %q", i, got)
+		}
+	}
+
+	// Completing the async connect lands the whole group on ctx-b's default ns.
+	ready := extractClusterReady(t, cmd)
+	model, _ = app.handleClusterReady(ready)
+	app = model.(App)
+	for i := range app.layout.SplitCount() {
+		if got := app.layout.SplitAt(i).Namespace(); got != "team-b" {
+			t.Errorf("split %d: expected namespace team-b, got %q", i, got)
+		}
+	}
+}
+
+// TestGlobalContextSwitchLeavesOtherGroupsUntouched verifies that a pane on a
+// different context than the focused group is NOT retargeted.
+func TestGlobalContextSwitchLeavesOtherGroupsUntouched(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b", "ctx-c")
+	connectWithNamespaces(a, map[string]string{"ctx-b": "team-b", "ctx-c": "team-c"})
+
+	// split[0] on ctx-a (focused group), split[1] explicitly on ctx-c.
+	a = addSplit(t, a, "deployments")
+	other := a.layout.SplitAt(1)
+	other.SetContext("ctx-c")
+	a.layout.FocusSplitAt(0)
+
+	model, _ := a.handleGroupContextSwitch("ctx-b")
+	app := model.(App)
+
 	if got := app.layout.SplitAt(0).Context(); got != "ctx-b" {
-		t.Errorf("following pane: expected ctx-b, got %q", got)
+		t.Errorf("focused-group split: expected ctx-b, got %q", got)
 	}
-	// Pinned pane (index 1) untouched.
-	pinnedAfter := app.layout.SplitAt(1)
-	if pinnedAfter.Context() != "ctx-a" {
-		t.Errorf("pinned pane: expected ctx-a, got %q", pinnedAfter.Context())
-	}
-	if pinnedAfter.Namespace() != "pinned-ns" {
-		t.Errorf("pinned pane: expected namespace pinned-ns, got %q", pinnedAfter.Namespace())
+	if got := app.layout.SplitAt(1).Context(); got != "ctx-c" {
+		t.Errorf("other-group split must be untouched: expected ctx-c, got %q", got)
 	}
 }
 
@@ -6084,7 +6156,7 @@ func TestGlobalContextSwitchUpdatesStatusBar(t *testing.T) {
 	a := appWithManager(t, "ctx-a", "ctx-b")
 	connectWithNamespaces(a, map[string]string{"ctx-b": "team-b"})
 
-	model, _ := a.handleGlobalContextSwitch("ctx-b")
+	model, _ := a.handleGroupContextSwitch("ctx-b")
 	app := model.(App)
 
 	if got := app.statusBar.ContextName(); got != "ctx-b" {
@@ -6092,17 +6164,23 @@ func TestGlobalContextSwitchUpdatesStatusBar(t *testing.T) {
 	}
 }
 
-func TestGlobalContextSwitchNoOpWhenAlreadyGlobal(t *testing.T) {
+func TestGlobalContextSwitchNoOpWhenAlreadyOnContext(t *testing.T) {
 	a := appWithManager(t, "ctx-a", "ctx-b")
 	a = addSplit(t, a, "deployments")
-	// Mark a pane pinned-but-equal so we can detect any spurious retarget work.
+	a.layout.FocusSplitAt(0)
 	beforeNs := a.layout.SplitAt(0).Namespace()
 
-	model, _ := a.handleGlobalContextSwitch("ctx-a")
+	model, cmd := a.handleGroupContextSwitch("ctx-a")
 	app := model.(App)
 
-	if app.mgr.GlobalContext() != "ctx-a" {
-		t.Fatalf("expected global to remain ctx-a, got %q", app.mgr.GlobalContext())
+	// A genuine no-op (already on this context AND connected) must not dial or
+	// schedule any follow-up work.
+	if cmd != nil {
+		t.Errorf("no-op switch returned a non-nil cmd, want nil")
+	}
+
+	if got := app.contextFor(app.layout.FocusedSplit()); got != "ctx-a" {
+		t.Fatalf("expected focused pane to remain ctx-a, got %q", got)
 	}
 	if got := app.layout.SplitAt(0).Namespace(); got != beforeNs {
 		t.Errorf("no-op switch changed namespace: %q -> %q", beforeNs, got)
@@ -6112,7 +6190,12 @@ func TestGlobalContextSwitchNoOpWhenAlreadyGlobal(t *testing.T) {
 	}
 }
 
-func TestGlobalContextSwitchFailedConnectKeepsGlobal(t *testing.T) {
+// TestGlobalContextSwitchFailedConnectLeavesGroupRetargetable proves the async
+// failure semantics mirror the per-pane switch: the group is optimistically
+// retargeted, the off-thread dial fails, and handleClusterReady surfaces an
+// error while leaving the group on the broken context (empty) so the user can
+// retry. Crucially the handler NEVER dials inline — it returns a connect cmd.
+func TestGlobalContextSwitchFailedConnectLeavesGroupRetargetable(t *testing.T) {
 	a := appWithManager(t, "ctx-a", "ctx-b")
 	// Make ctx-b fail to connect; ctx-a (already connected) stays usable.
 	a.mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
@@ -6124,21 +6207,173 @@ func TestGlobalContextSwitchFailedConnectKeepsGlobal(t *testing.T) {
 
 	a = addSplit(t, a, "deployments")
 
-	model, cmd := a.handleGlobalContextSwitch("ctx-b")
+	a.layout.FocusSplitAt(0)
+	model, cmd := a.handleGroupContextSwitch("ctx-b")
 	app := model.(App)
 
-	// Global must NOT move to the broken cluster.
-	if app.mgr.GlobalContext() != "ctx-a" {
-		t.Fatalf("expected global to remain ctx-a after failed connect, got %q", app.mgr.GlobalContext())
+	// A connect command must be produced (the dial happens off-thread).
+	if cmd == nil {
+		t.Fatalf("expected a non-nil connect command, got nil")
 	}
-	// Panes must not be retargeted.
+
+	// The group optimistically retargets to ctx-b immediately.
 	for i := range app.layout.SplitCount() {
-		if got := app.layout.SplitAt(i).Context(); got != "ctx-a" {
-			t.Errorf("split %d retargeted on failed switch: got %q", i, got)
+		if got := app.layout.SplitAt(i).Context(); got != "ctx-b" {
+			t.Errorf("split %d: expected optimistic ctx-b, got %q", i, got)
 		}
 	}
-	// An error status command should have been produced.
+
+	// Run the off-thread dial; it fails. handleClusterReady surfaces an error and
+	// leaves the panes on ctx-b (empty) so the user can retry.
+	ready := extractClusterReady(t, cmd)
+	if ready.Err == nil {
+		t.Fatalf("expected a dial error in ClusterReadyMsg")
+	}
+	model, _ = app.handleClusterReady(ready)
+	app = model.(App)
+
+	for i := range app.layout.SplitCount() {
+		sp := app.layout.SplitAt(i)
+		if got := sp.Context(); got != "ctx-b" {
+			t.Errorf("split %d: expected to stay on ctx-b after failed connect, got %q", i, got)
+		}
+		if sp.Len() != 0 {
+			t.Errorf("split %d: expected empty after failed connect, got %d objects", i, sp.Len())
+		}
+	}
+	// The broken cluster must not have been registered.
+	if _, ok := app.mgr.Get("ctx-b"); ok {
+		t.Errorf("failed connect leaked a manager entry for ctx-b")
+	}
+	if et := app.statusBar.ErrText(); et == "" {
+		t.Error("expected a status error after a failed connect")
+	}
+}
+
+// TestGlobalContextSwitchFailedConnectMarksGroupOffline mirrors
+// TestHandleClusterReady_FailedConnectMarksPaneOffline for the group/global
+// path: after handleGroupContextSwitch retargets the focused context group and
+// the dispatched connect fails, every retargeted pane carries the offline
+// marker.
+func TestGlobalContextSwitchFailedConnectMarksGroupOffline(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b")
+	a.mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
+		if ctx == "ctx-b" {
+			return nil, fmt.Errorf("boom")
+		}
+		return fakeClientFor(ctx), nil
+	})
+
+	// Two panes in the focused context group (both on ctx-a).
+	a = addSplit(t, a, "deployments")
+	a.layout.FocusSplitAt(0)
+
+	model, cmd := a.handleGroupContextSwitch("ctx-b")
+	app := model.(App)
 	if cmd == nil {
-		t.Errorf("expected an error status command, got nil")
+		t.Fatalf("expected a non-nil connect command")
+	}
+
+	ready := extractClusterReady(t, cmd)
+	if ready.Err == nil {
+		t.Fatalf("expected a dial error in ClusterReadyMsg")
+	}
+	model, _ = app.handleClusterReady(ready)
+	app = model.(App)
+
+	// Every retargeted pane (the whole group) is flagged offline.
+	for i := range app.layout.SplitCount() {
+		sp := app.layout.SplitAt(i)
+		if got := sp.Context(); got != "ctx-b" {
+			t.Errorf("split %d: expected ctx-b, got %q", i, got)
+		}
+		if !sp.Offline() {
+			t.Errorf("split %d: expected offline marker after failed group connect", i)
+		}
+	}
+}
+
+// TestGlobalContextSwitchDoesNotDialInline is the freeze regression guard. The
+// global switch must NEVER call the (potentially blocking) connect function on
+// the Update goroutine — that is exactly what froze the UI for hung exec-
+// credential plugins. We inject a connect that increments a counter and asserts
+// it stays at zero while handleGroupContextSwitch runs; the connect only fires
+// when the returned tea.Cmd is later executed off-thread by the Bubble Tea
+// runtime. The handler must also return a non-nil cmd carrying a ClusterReadyMsg.
+func TestGlobalContextSwitchDoesNotDialInline(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b")
+
+	var dials int
+	a.mgr.SetConnect(func(file, ctx string) (*k8s.Client, error) {
+		dials++
+		return fakeClientFor(ctx), nil
+	})
+
+	model, cmd := a.handleGroupContextSwitch("ctx-b")
+	app := model.(App)
+
+	// The blocking connect must NOT have run inline on the Update goroutine.
+	if dials != 0 {
+		t.Fatalf("handleGroupContextSwitch dialed inline (%d connects); it must dial off-thread", dials)
+	}
+	// It must hand back a command to dial off-thread.
+	if cmd == nil {
+		t.Fatal("expected a non-nil connect command from the async global switch")
+	}
+
+	// Running the returned cmd (what the runtime does off the Update goroutine)
+	// performs exactly one dial and yields a ClusterReadyMsg for the target.
+	ready := extractClusterReady(t, cmd)
+	if dials != 1 {
+		t.Fatalf("expected exactly 1 dial after the cmd ran, got %d", dials)
+	}
+	if ready.Context != "ctx-b" {
+		t.Fatalf("expected ClusterReadyMsg for ctx-b, got %q", ready.Context)
+	}
+
+	// The group's context retargeted optimistically without waiting on the dial.
+	if got := app.contextFor(app.layout.FocusedSplit()); got != "ctx-b" {
+		t.Fatalf("expected focused pane optimistically on ctx-b, got %q", got)
+	}
+}
+
+// TestGlobalContextSwitchSinglePaneFullSwitch proves that with a single pane,
+// gx behaves as a full switch of that pane: the pane retargets and, after the
+// async connect completes, populates on the new context's default namespace.
+func TestGlobalContextSwitchSinglePaneFullSwitch(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b")
+	connectWithNamespaces(a, map[string]string{"ctx-b": "team-b"})
+
+	if got := a.layout.SplitCount(); got != 1 {
+		t.Fatalf("precondition: expected a single pane, got %d", got)
+	}
+
+	model, cmd := a.handleGroupContextSwitch("ctx-b")
+	app := model.(App)
+
+	pane := app.layout.FocusedSplit()
+	if pane.Context() != "ctx-b" {
+		t.Fatalf("expected single pane on ctx-b, got %q", pane.Context())
+	}
+	if cmd == nil {
+		t.Fatalf("expected a non-nil connect command")
+	}
+
+	ready := extractClusterReady(t, cmd)
+	model, _ = app.handleClusterReady(ready)
+	app = model.(App)
+
+	pane = app.layout.FocusedSplit()
+	if pane.Context() != "ctx-b" {
+		t.Fatalf("expected single pane on ctx-b after ready, got %q", pane.Context())
+	}
+	if pane.Namespace() != "team-b" {
+		t.Fatalf("expected single pane on ctx-b default ns team-b, got %q", pane.Namespace())
+	}
+	// ctx-b is referenced by exactly the one pane.
+	if cl, ok := app.mgr.Get("ctx-b"); !ok {
+		t.Fatalf("expected ctx-b registered after ready")
+	} else if cl.RefCount() != 1 {
+		t.Fatalf("expected ctx-b refCount 1, got %d", cl.RefCount())
 	}
 }

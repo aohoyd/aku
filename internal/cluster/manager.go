@@ -16,19 +16,19 @@ type ContextEntry struct {
 
 // Manager owns one *Cluster per kube-context. Clusters are created lazily on
 // first use (GetOrCreate) or installed from an off-thread dial (Dial +
-// RegisterConnected). Reference counts are reconciled against the set of panes
-// currently pinned to each context via SyncRefs; a non-global cluster whose
-// pinned-pane count reaches zero is torn down.
+// RegisterConnected). Reference counts are reconciled against the set of
+// contexts panes currently reference via SyncRefs; a cluster whose pane count
+// reaches zero is torn down. The Manager holds no notion of a "global" or
+// default context — every caller passes an explicit context name.
 //
 // Thread-safety: all methods are intended to be called from the single Bubble
 // Tea Update goroutine, like the rest of the app state. No internal locking is
 // used; if the Manager is ever shared across goroutines the caller must
 // serialize access. Keeping it lock-free avoids any chance of deadlock between
-// methods that call one another (e.g. SetGlobal -> GetOrCreate). The sole
+// methods that call one another (e.g. RegisterConnected -> Get). The sole
 // exception is Dial, which is map-free and safe to run off-thread.
 type Manager struct {
 	clusters   map[string]*Cluster
-	global     string
 	entries    []ContextEntry
 	kubeconfig string
 	send       func(tea.Msg)
@@ -60,21 +60,17 @@ func NewManager(entries []ContextEntry, kubeconfig string, apiTimeout time.Durat
 	return m
 }
 
-// Register installs a pre-built Cluster under its context name and (when
-// global is true) makes it the global context. It is a seam for callers and
-// tests that construct a Cluster directly (via cluster.New) and want the
-// Manager to resolve it through Get/Global. An existing cluster for the same
+// Register installs a pre-built Cluster under its context name. It is a seam
+// for callers and tests that construct a Cluster directly (via cluster.New) and
+// want the Manager to resolve it through Get. An existing cluster for the same
 // context is replaced.
-func (m *Manager) Register(c *Cluster, global bool) {
+func (m *Manager) Register(c *Cluster) {
 	m.clusters[c.context] = c
-	if global {
-		m.global = c.context
-	}
 }
 
 // SetConnect overrides the function used to build a Client for a (file, ctx)
 // pair. It is the injection seam described in the design: tests in other
-// packages (e.g. internal/app) call it before SetGlobal/GetOrCreate to wire a
+// packages (e.g. internal/app) call it before GetOrCreate to wire a
 // fake or no-op client without touching a real cluster. A nil fn is ignored.
 func (m *Manager) SetConnect(fn func(file, ctx string) (*k8s.Client, error)) {
 	if fn != nil {
@@ -109,21 +105,19 @@ func (m *Manager) fileFor(ctx string) string {
 }
 
 // GetOrCreate returns the Cluster for ctx, creating and caching it on first
-// use. An empty ctx resolves to the global context. A cached cluster is
-// returned as-is. This is a lookup-or-create: it does NOT change the reference
-// count.
+// use. A cached cluster is returned as-is. This is a lookup-or-create: it does
+// NOT change the reference count. Callers must pass an explicit context name;
+// an empty ctx is only meaningful at startup, where it resolves to the
+// kubeconfig current-context and the resulting cluster is cached under that
+// resolved name (so the caller can read Cluster.Context() to learn the explicit
+// startup context to seed panes with).
 //
 // On connect failure a degraded Cluster (Connected()==false, Err set) is
 // returned together with the error but is NOT cached, so a subsequent call
 // re-dials. This keeps a transient connect failure from permanently blocking a
-// global-context switch to that context (the global-switch path calls
-// GetOrCreate). On success the Store and Discovery are built and the send
+// context switch. On success the Store and Discovery are built and the send
 // function (if set) is wired.
 func (m *Manager) GetOrCreate(ctx string) (*Cluster, error) {
-	if ctx == "" {
-		ctx = m.global
-	}
-
 	if c, ok := m.clusters[ctx]; ok {
 		return c, c.err
 	}
@@ -136,28 +130,33 @@ func (m *Manager) GetOrCreate(ctx string) (*Cluster, error) {
 		return &Cluster{context: ctx, file: file, err: err}, err
 	}
 
-	store := k8s.NewStore(client.Dynamic, ctx, m.send)
+	// When ctx was empty (startup current-context), stamp and cache the cluster
+	// under the resolved context name the client reports, so later lookups by the
+	// explicit name succeed.
+	resolved := ctx
+	if resolved == "" {
+		resolved = client.Context
+	}
+
+	store := k8s.NewStore(client.Dynamic, resolved, m.send)
 	if m.send != nil && client.WarningHandler != nil {
 		client.WarningHandler.SetSend(m.send)
 	}
 
 	c := &Cluster{
-		context:   ctx,
+		context:   resolved,
 		file:      file,
 		client:    client,
 		store:     store,
 		discovery: k8s.NewDiscovery(),
 	}
-	m.clusters[ctx] = c
+	m.clusters[resolved] = c
 	return c, nil
 }
 
 // Get returns the cached Cluster for ctx without creating it and without
-// touching the reference count. An empty ctx resolves to the global context.
+// touching the reference count.
 func (m *Manager) Get(ctx string) (*Cluster, bool) {
-	if ctx == "" {
-		ctx = m.global
-	}
 	c, ok := m.clusters[ctx]
 	return c, ok
 }
@@ -169,15 +168,12 @@ func (m *Manager) Get(ctx string) (*Cluster, bool) {
 // (or error). The returned *k8s.Client is an immutable handle; passing it back
 // to the Update goroutine via a message is safe because it shares no mutable
 // Manager state. The Update goroutine then calls RegisterConnected to install
-// it. An empty ctx resolves to the global context.
+// it. Callers must pass an explicit context name.
 //
 // Keeping Dial map-free preserves the Manager's no-lock, single-goroutine
 // invariant: state mutation stays on the Update goroutine; only the dial runs
 // off-thread.
 func (m *Manager) Dial(ctx string) (*k8s.Client, error) {
-	if ctx == "" {
-		ctx = m.global
-	}
 	return m.connect(m.fileFor(ctx), ctx)
 }
 
@@ -186,8 +182,8 @@ func (m *Manager) Dial(ctx string) (*k8s.Client, error) {
 // goroutine. If a cluster for ctx already exists it is returned as-is (the
 // freshly-dialed client is discarded), so a redundant connect cannot replace a
 // live cluster out from under panes already using it. This does NOT change the
-// reference count — refcounts are reconciled separately via SyncRefs. An empty
-// ctx resolves to the global context.
+// reference count — refcounts are reconciled separately via SyncRefs. Callers
+// must pass an explicit context name.
 //
 // The bool reports whether a NEW cluster was installed (true) or an existing one
 // was returned from cache (false). Callers use it to avoid starting a duplicate
@@ -195,9 +191,6 @@ func (m *Manager) Dial(ctx string) (*k8s.Client, error) {
 // context (handleClusterHealth re-arms the heartbeat per tick, so a second loop
 // would compound the probe rate).
 func (m *Manager) RegisterConnected(ctx string, client *k8s.Client) (*Cluster, bool) {
-	if ctx == "" {
-		ctx = m.global
-	}
 	if c, ok := m.clusters[ctx]; ok {
 		return c, false
 	}
@@ -218,31 +211,32 @@ func (m *Manager) RegisterConnected(ctx string, client *k8s.Client) (*Cluster, b
 }
 
 // SyncRefs reconciles every cluster's reference count against the supplied set
-// of contexts that panes are currently pinned to. After SyncRefs:
+// of contexts that panes currently reference. After SyncRefs:
 //
-//   - each cluster's refCount equals the number of panes pinned to its context
-//     (one ref per pinned pane, per the app-level invariant);
-//   - any non-global cluster whose pinned-pane count is zero is torn down (its
-//     informers stopped) and removed from the map;
-//   - the global cluster is never torn down regardless of its count.
+//   - each cluster's refCount equals the number of panes referencing its context
+//     (one ref per pane, per the app-level invariant);
+//   - any cluster whose pane count is zero is torn down (its informers stopped)
+//     and removed from the map.
 //
 // This makes ref bookkeeping idempotent and order-independent: no matter how
-// connects, focus changes and re-pins interleave, calling SyncRefs with the
-// CURRENT pinned contexts always converges to the correct counts. It replaces
+// connects, focus changes and re-targets interleave, calling SyncRefs with the
+// CURRENT pane contexts always converges to the correct counts. It replaces
 // the fragile in-flight Acquire/Release pairing for the per-pane connect flow
-// (which could imbalance under rapid re-pins). Must run on the Update goroutine.
-func (m *Manager) SyncRefs(pinnedContexts []string) {
-	want := make(map[string]int, len(pinnedContexts))
-	for _, ctx := range pinnedContexts {
+// (which could imbalance under rapid re-targets). Must run on the Update
+// goroutine. Callers must pass explicit context names; empty entries are
+// ignored.
+func (m *Manager) SyncRefs(paneContexts []string) {
+	want := make(map[string]int, len(paneContexts))
+	for _, ctx := range paneContexts {
 		if ctx == "" {
-			ctx = m.global
+			continue
 		}
 		want[ctx]++
 	}
 	for ctx, c := range m.clusters {
 		n := want[ctx]
 		c.refCount = n
-		if n <= 0 && ctx != m.global {
+		if n <= 0 {
 			if c.store != nil {
 				c.store.UnsubscribeAll()
 			}
@@ -251,37 +245,8 @@ func (m *Manager) SyncRefs(pinnedContexts []string) {
 	}
 }
 
-// SetGlobal makes ctx the global context (creating its cluster if needed) and
-// returns it. The previously global cluster, if any, is no longer pinned and
-// becomes eligible for teardown once its reference count reaches zero.
-func (m *Manager) SetGlobal(ctx string) (*Cluster, error) {
-	c, err := m.GetOrCreate(ctx)
-	m.PromoteGlobal(ctx, c)
-	return c, err
-}
-
-// PromoteGlobal points the global context at an already-resolved cluster
-// without dialing. It performs no I/O and cannot fail, so callers that already
-// hold a connected cluster (e.g. from a prior GetOrCreate) can promote it with
-// no dead error check. The cluster is also recorded in the cache under ctx so
-// the global pointer and the cache never disagree. A nil cluster still moves the
-// global context name (matching SetGlobal's behavior for a degraded connect).
-func (m *Manager) PromoteGlobal(ctx string, c *Cluster) {
-	m.global = ctx
-	if c != nil {
-		m.clusters[ctx] = c
-	}
-}
-
-// Global returns the global Cluster, or nil if it has not been created yet.
-func (m *Manager) Global() *Cluster {
-	return m.clusters[m.global]
-}
-
-// GlobalContext returns the name of the global context.
-func (m *Manager) GlobalContext() string { return m.global }
-
-// Entries returns the known context entries.
+// Entries returns the scanned kubeconfig context entries. The returned slice is
+// the Manager's own backing slice, not a copy, so callers must not mutate it.
 func (m *Manager) Entries() []ContextEntry { return m.entries }
 
 // ForEach calls fn for every currently-created cluster. Useful for teardown
