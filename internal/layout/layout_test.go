@@ -98,6 +98,104 @@ func TestLayoutFocusCycling(t *testing.T) {
 	}
 }
 
+// countFocusedSplits returns how many split borders are currently focused.
+func countFocusedSplits(l *Layout) int {
+	n := 0
+	for i := 0; i < l.SplitCount(); i++ {
+		if l.SplitAt(i).Focused() {
+			n++
+		}
+	}
+	return n
+}
+
+// TestLayoutFocusNextReleasesDetailFocus verifies that when the detail panel
+// holds focus, FocusNext releases it (focusTarget returns to resources, the
+// detail panel is blurred) and exactly one split border ends up focused — so
+// the resource-list and detail borders never highlight simultaneously.
+func TestLayoutFocusNextReleasesDetailFocus(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "")
+	l.AddSplit(svcsPlugin(), "default", "")
+	l.ShowRightPanel()
+
+	l.FocusDetails()
+	if !l.FocusedDetails() {
+		t.Fatal("precondition: details should be focused after FocusDetails")
+	}
+
+	l.FocusNext()
+
+	if !l.FocusedResources() {
+		t.Fatal("FocusNext should reset focus target to resources")
+	}
+	if l.FocusedDetails() {
+		t.Fatal("FocusNext should release detail focus")
+	}
+	if got := countFocusedSplits(&l); got != 1 {
+		t.Fatalf("expected exactly one focused split border, got %d", got)
+	}
+}
+
+// TestLayoutFocusPrevReleasesDetailFocus mirrors the FocusNext assertion for
+// FocusPrev.
+func TestLayoutFocusPrevReleasesDetailFocus(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "")
+	l.AddSplit(svcsPlugin(), "default", "")
+	l.ShowRightPanel()
+
+	l.FocusDetails()
+	if !l.FocusedDetails() {
+		t.Fatal("precondition: details should be focused after FocusDetails")
+	}
+
+	l.FocusPrev()
+
+	if !l.FocusedResources() {
+		t.Fatal("FocusPrev should reset focus target to resources")
+	}
+	if l.FocusedDetails() {
+		t.Fatal("FocusPrev should release detail focus")
+	}
+	if got := countFocusedSplits(&l); got != 1 {
+		t.Fatalf("expected exactly one focused split border, got %d", got)
+	}
+}
+
+// TestLayoutFocusCycleStillWorksFromResources is a regression guard: when
+// resources are already focused, FocusNext/FocusPrev keep cycling the split
+// focus index as before, leaving exactly one split border focused.
+func TestLayoutFocusCycleStillWorksFromResources(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "")
+	l.AddSplit(svcsPlugin(), "default", "")
+
+	// Focus starts on the newest split (idx 1) with resources focused.
+	if !l.FocusedResources() {
+		t.Fatal("precondition: resources should be focused")
+	}
+
+	l.FocusNext() // wraps to 0
+	if l.FocusIndex() != 0 {
+		t.Fatalf("FocusNext should move to 0, got %d", l.FocusIndex())
+	}
+	if !l.FocusedResources() {
+		t.Fatal("resources should remain focused after FocusNext")
+	}
+	if got := countFocusedSplits(&l); got != 1 {
+		t.Fatalf("expected exactly one focused split border, got %d", got)
+	}
+
+	l.FocusPrev() // back to 1
+	if l.FocusIndex() != 1 {
+		t.Fatalf("FocusPrev should move to 1, got %d", l.FocusIndex())
+	}
+	if got := countFocusedSplits(&l); got != 1 {
+		t.Fatalf("expected exactly one focused split border, got %d", got)
+	}
+}
+
 func TestLayoutRightPanel(t *testing.T) {
 	l := New(80, 26, 1000, "15m", 900)
 	if l.RightPanelVisible() {
@@ -254,6 +352,243 @@ func TestAddSplitSeedsContext(t *testing.T) {
 	l.AddSplit(podsPlugin(), "default", "prod")
 	if got := l.FocusedSplit().Context(); got != "prod" {
 		t.Fatalf("expected pane context 'prod' at creation, got %q", got)
+	}
+}
+
+// TestAddSplitInsertsAfterFocusedNotLast verifies a new split lands directly
+// after the focused pane (focusIdx+1) rather than at the end of the slice.
+func TestAddSplitInsertsAfterFocusedNotLast(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0: pods
+	l.AddSplit(podsPlugin(), "default", "") // idx 1: pods
+	l.AddSplit(podsPlugin(), "default", "") // idx 2: pods
+	if l.SplitCount() != 3 {
+		t.Fatalf("expected 3 splits, got %d", l.SplitCount())
+	}
+
+	// Focus the middle pane.
+	l.FocusSplitAt(1)
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected focus on 1, got %d", l.FocusIndex())
+	}
+
+	// Adding a split should insert at focusIdx+1 (== 2), not at the end.
+	l.AddSplit(svcsPlugin(), "default", "")
+	if l.SplitCount() != 4 {
+		t.Fatalf("expected 4 splits after add, got %d", l.SplitCount())
+	}
+	if l.FocusIndex() != 2 {
+		t.Fatalf("expected focus on inserted pane at index 2, got %d", l.FocusIndex())
+	}
+	if got := l.SplitAt(2).Plugin().Name(); got != "services" {
+		t.Fatalf("expected inserted pane at index 2 to be 'services', got %q", got)
+	}
+	// The pane previously at index 2 should have shifted to index 3.
+	if got := l.SplitAt(3).Plugin().Name(); got != "pods" {
+		t.Fatalf("expected pre-existing pane shifted to index 3 to be 'pods', got %q", got)
+	}
+
+	// After a middle insert, only the newly inserted pane (index 2) is focused;
+	// every other pane must be blurred.
+	if !l.SplitAt(2).Focused() {
+		t.Fatal("newly inserted pane at index 2 should be focused")
+	}
+	for _, idx := range []int{0, 1, 3} {
+		if l.SplitAt(idx).Focused() {
+			t.Fatalf("pane at index %d should be blurred after middle insert", idx)
+		}
+	}
+}
+
+// TestAddSplitWithSinglePaneAppendsAfter verifies that with one existing pane
+// the new split lands at index 1 (after it) and becomes focused.
+func TestAddSplitWithSinglePaneAppendsAfter(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "")
+	if l.FocusIndex() != 0 {
+		t.Fatalf("expected focus on 0 with a single pane, got %d", l.FocusIndex())
+	}
+
+	l.AddSplit(svcsPlugin(), "default", "")
+	if l.SplitCount() != 2 {
+		t.Fatalf("expected 2 splits, got %d", l.SplitCount())
+	}
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected focus on inserted pane at index 1, got %d", l.FocusIndex())
+	}
+	if got := l.SplitAt(1).Plugin().Name(); got != "services" {
+		t.Fatalf("expected inserted pane at index 1 to be 'services', got %q", got)
+	}
+}
+
+// TestAddSplitBlursPreviousFocusesNew verifies the previously focused pane is
+// blurred and the newly inserted pane is focused after AddSplit.
+func TestAddSplitBlursPreviousFocusesNew(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0
+	if !l.SplitAt(0).Focused() {
+		t.Fatal("precondition: the single existing pane should be focused")
+	}
+
+	l.AddSplit(svcsPlugin(), "default", "") // inserted at idx 1, focused
+
+	// slices.Insert reallocates the backing array, so any pointer captured before
+	// AddSplit is stale. Re-fetch the previously-focused pane via its live index:
+	// inserting a second pane goes to index 1, leaving the first pane at index 0.
+	prev := l.SplitAt(0)
+	if prev.Focused() {
+		t.Fatal("previously focused pane should be blurred after AddSplit")
+	}
+	if !l.FocusedSplit().Focused() {
+		t.Fatal("newly inserted pane should be focused after AddSplit")
+	}
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected focus on inserted pane at index 1, got %d", l.FocusIndex())
+	}
+}
+
+// TestMoveFocusedSplitNext verifies MoveFocusedSplit(+1) swaps the focused pane
+// with the next one and focusIdx follows the moved pane.
+func TestMoveFocusedSplitNext(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0: pods
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1: services
+	l.AddSplit(podsPlugin(), "default", "") // idx 2: pods
+
+	// Focus the services pane (idx 1).
+	l.FocusSplitAt(1)
+	if got := l.SplitAt(1).Plugin().Name(); got != "services" {
+		t.Fatalf("precondition: expected 'services' at index 1, got %q", got)
+	}
+
+	l.MoveFocusedSplit(+1)
+
+	if l.FocusIndex() != 2 {
+		t.Fatalf("expected focusIdx to follow moved pane to 2, got %d", l.FocusIndex())
+	}
+	if got := l.SplitAt(2).Plugin().Name(); got != "services" {
+		t.Fatalf("expected moved 'services' pane now at index 2, got %q", got)
+	}
+	if got := l.SplitAt(1).Plugin().Name(); got != "pods" {
+		t.Fatalf("expected swapped 'pods' pane now at index 1, got %q", got)
+	}
+}
+
+// TestMoveFocusedSplitPrev verifies MoveFocusedSplit(-1) swaps with the previous
+// pane and focusIdx follows the moved pane.
+func TestMoveFocusedSplitPrev(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0: pods
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1: services
+	l.AddSplit(podsPlugin(), "default", "") // idx 2: pods
+
+	// Focus the services pane (idx 1).
+	l.FocusSplitAt(1)
+
+	l.MoveFocusedSplit(-1)
+
+	if l.FocusIndex() != 0 {
+		t.Fatalf("expected focusIdx to follow moved pane to 0, got %d", l.FocusIndex())
+	}
+	if got := l.SplitAt(0).Plugin().Name(); got != "services" {
+		t.Fatalf("expected moved 'services' pane now at index 0, got %q", got)
+	}
+	if got := l.SplitAt(1).Plugin().Name(); got != "pods" {
+		t.Fatalf("expected swapped 'pods' pane now at index 1, got %q", got)
+	}
+}
+
+// TestMoveFocusedSplitNoopAtEdges verifies MoveFocusedSplit(-1) at index 0 and
+// MoveFocusedSplit(+1) at the last index leave the slice order and focusIdx
+// unchanged.
+func TestMoveFocusedSplitNoopAtEdges(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0: pods
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1: services
+
+	// At index 0, moving toward the start is a no-op.
+	l.FocusSplitAt(0)
+	l.MoveFocusedSplit(-1)
+	if l.FocusIndex() != 0 {
+		t.Fatalf("expected focusIdx 0 unchanged at start edge, got %d", l.FocusIndex())
+	}
+	if got := l.SplitAt(0).Plugin().Name(); got != "pods" {
+		t.Fatalf("expected 'pods' still at index 0, got %q", got)
+	}
+	if got := l.SplitAt(1).Plugin().Name(); got != "services" {
+		t.Fatalf("expected 'services' still at index 1, got %q", got)
+	}
+
+	// At the last index, moving toward the end is a no-op.
+	l.FocusSplitAt(1)
+	l.MoveFocusedSplit(+1)
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected focusIdx 1 unchanged at end edge, got %d", l.FocusIndex())
+	}
+	if got := l.SplitAt(0).Plugin().Name(); got != "pods" {
+		t.Fatalf("expected 'pods' still at index 0, got %q", got)
+	}
+	if got := l.SplitAt(1).Plugin().Name(); got != "services" {
+		t.Fatalf("expected 'services' still at index 1, got %q", got)
+	}
+}
+
+// TestMoveFocusedSplitPreservesFocusState verifies the moved pane keeps its
+// focused state and the others stay blurred after the move.
+func TestMoveFocusedSplitPreservesFocusState(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0: pods
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1: services
+	l.AddSplit(podsPlugin(), "default", "") // idx 2: pods
+
+	l.FocusSplitAt(1)
+	l.MoveFocusedSplit(+1) // services moves to index 2
+
+	if !l.SplitAt(2).Focused() {
+		t.Fatal("moved pane at index 2 should still be focused")
+	}
+	if l.SplitAt(0).Focused() {
+		t.Fatal("pane at index 0 should remain blurred")
+	}
+	if l.SplitAt(1).Focused() {
+		t.Fatal("pane at index 1 should remain blurred")
+	}
+}
+
+// TestMoveFocusedSplitReleasesDetailFocus verifies that when the detail panel
+// holds focus, MoveFocusedSplit releases it (focusTarget returns to resources,
+// the detail panel is blurred) and exactly one split border ends up focused —
+// matching the FocusNext/FocusPrev detail-release behavior.
+func TestMoveFocusedSplitReleasesDetailFocus(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0: pods
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1: services
+	l.ShowRightPanel()
+
+	// Focus index 0 then hand focus to the detail panel.
+	l.FocusSplitAt(0)
+	l.FocusDetails()
+	if !l.FocusedDetails() {
+		t.Fatal("precondition: details should be focused after FocusDetails")
+	}
+
+	l.MoveFocusedSplit(+1) // pods moves to index 1
+
+	if !l.FocusedResources() {
+		t.Fatal("MoveFocusedSplit should reset focus target to resources")
+	}
+	if l.FocusedDetails() {
+		t.Fatal("MoveFocusedSplit should release detail focus")
+	}
+	if got := countFocusedSplits(&l); got != 1 {
+		t.Fatalf("expected exactly one focused split border, got %d", got)
+	}
+	// The move itself must still have happened.
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected focusIdx to follow moved pane to 1, got %d", l.FocusIndex())
+	}
+	if got := l.SplitAt(1).Plugin().Name(); got != "pods" {
+		t.Fatalf("expected moved 'pods' pane now at index 1, got %q", got)
 	}
 }
 

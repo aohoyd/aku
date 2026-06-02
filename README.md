@@ -26,7 +26,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Describe view with events and environment variable resolution
 - Live log streaming with time range presets, container selection, and autoscroll
 - Log syntax highlighting (JSON, log levels, IPs, URLs, UUIDs, timestamps, paths, key=value)
-- Split panes with independent namespace, filter, and cursor per pane
+- Split panes with independent namespace, filter, and cursor per pane (new splits are inserted adjacent to the focused pane, not appended)
 - Vertical and horizontal layout orientation (toggle with `%` or `--layout` flag)
 - Zoom to full-screen any split or detail panel
 
@@ -214,6 +214,7 @@ syntax:
 | `Tab` | Switch panel (resources ↔ details) |
 | `Shift+Tab` | Next split pane |
 | `Shift+←/→/↑/↓` | Directional focus (orientation-aware) |
+| `Alt+Shift+←/→/↑/↓` | Move focused pane (orientation-aware: active axis only; perpendicular direction does nothing) |
 | `%` | Toggle layout orientation |
 | `Ctrl+n` | Namespace picker |
 | `:` | Resource picker |

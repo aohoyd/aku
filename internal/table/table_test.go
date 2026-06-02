@@ -469,6 +469,249 @@ func TestRowAtYDoesNotMutate(t *testing.T) {
 	}
 }
 
+// firstVisibleRow returns the data index of the first row currently visible in
+// the viewport: m.start + viewport.YOffset().
+func firstVisibleRow(m *Model) int {
+	return m.start + m.viewport.YOffset()
+}
+
+// TestMoveUpFromLastVisibleRowNoScroll verifies that pressing up while the
+// cursor sits on the last visible row only moves the cursor — it must NOT
+// scroll the viewport (which would hide that row).
+func TestMoveUpFromLastVisibleRowNoScroll(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(6), // viewport height 5 after header
+	)
+	height := m.viewport.Height() // 5
+
+	// Construct a window with a NON-TRIVIAL scroll offset (yoffset=3) whose
+	// first visible data row is 23, then place the cursor on the LAST visible
+	// row of that window. A yoffset >= 2 is what makes this a real guard: with
+	// the old offset+n heuristic, MoveUp would bump yoffset and scroll the
+	// window down (first visible row 23 -> 25), whereas the minimal-scroll code
+	// must leave the first visible row unchanged.
+	//
+	// SetCursor first so the viewport renders a wide enough window for the
+	// offset to be valid, then lower m.start and set the offset directly.
+	m.SetCursor(27)
+	m.start = 20
+	m.viewport.SetYOffset(3)              // first visible row = 23
+	top := m.start + m.viewport.YOffset() // 23
+	m.cursor = top + height - 1           // 27, last visible row
+
+	topBefore := firstVisibleRow(&m)
+	m.MoveUp(1)
+
+	if got := firstVisibleRow(&m); got != topBefore {
+		t.Fatalf("first visible row changed on MoveUp from last visible row: before=%d after=%d", topBefore, got)
+	}
+	if m.Cursor() != top+height-2 {
+		t.Fatalf("expected cursor at %d, got %d", top+height-2, m.Cursor())
+	}
+}
+
+// TestMoveDownFromFirstVisibleRowNoScroll verifies that pressing down while the
+// cursor sits on the first visible row only moves the cursor — no scroll.
+func TestMoveDownFromFirstVisibleRowNoScroll(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(6), // viewport height 5 after header
+	)
+
+	// Mirror of the MoveUp guard: a window with a NON-TRIVIAL offset (yoffset=3,
+	// first visible row 23) with the cursor on the FIRST visible row. The old
+	// offset-n heuristic would shrink the offset and scroll the window up (first
+	// visible row 23 -> 21); the minimal-scroll code must not move it.
+	m.SetCursor(23)
+	m.start = 20
+	m.viewport.SetYOffset(3)              // first visible row = 23
+	top := m.start + m.viewport.YOffset() // 23
+	m.cursor = top                        // first visible row
+
+	topBefore := firstVisibleRow(&m)
+	m.MoveDown(1)
+
+	if got := firstVisibleRow(&m); got != topBefore {
+		t.Fatalf("first visible row changed on MoveDown from first visible row: before=%d after=%d", topBefore, got)
+	}
+	if m.Cursor() != top+1 {
+		t.Fatalf("expected cursor at %d, got %d", top+1, m.Cursor())
+	}
+}
+
+// TestMoveUpFromTopOfWindowScrollsByOne verifies that pressing up while the
+// cursor is on the first visible row scrolls up by exactly one and keeps the
+// cursor pinned to the top edge.
+func TestMoveUpFromTopOfWindowScrollsByOne(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(6), // viewport height 5 after header
+	)
+
+	m.MoveDown(20)
+	top := firstVisibleRow(&m)
+	m.SetCursor(top) // cursor at top of window
+	m.viewport.SetYOffset(top - m.start)
+
+	topBefore := firstVisibleRow(&m)
+	m.MoveUp(1)
+
+	if got := firstVisibleRow(&m); got != topBefore-1 {
+		t.Fatalf("expected scroll up by 1 to %d, got %d", topBefore-1, got)
+	}
+	if m.Cursor() != firstVisibleRow(&m) {
+		t.Fatalf("cursor should stay at top edge %d, got %d", firstVisibleRow(&m), m.Cursor())
+	}
+}
+
+// TestMoveDownFromBottomOfWindowScrollsByOne verifies that pressing down while
+// the cursor is on the last visible row scrolls down by exactly one and keeps
+// the cursor pinned to the bottom edge.
+func TestMoveDownFromBottomOfWindowScrollsByOne(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(6), // viewport height 5 after header
+	)
+	height := m.viewport.Height()
+
+	m.MoveDown(20)
+	top := firstVisibleRow(&m)
+	m.SetCursor(top + height - 1) // cursor at bottom of window
+	m.viewport.SetYOffset(top - m.start)
+
+	topBefore := firstVisibleRow(&m)
+	m.MoveDown(1)
+
+	if got := firstVisibleRow(&m); got != topBefore+1 {
+		t.Fatalf("expected scroll down by 1 to %d, got %d", topBefore+1, got)
+	}
+	// cursor stays at bottom edge
+	if m.Cursor() != firstVisibleRow(&m)+height-1 {
+		t.Fatalf("cursor should stay at bottom edge %d, got %d", firstVisibleRow(&m)+height-1, m.Cursor())
+	}
+}
+
+// TestMoveDownLargeJumpLandsAtEdge verifies a jump of one full page lands the
+// cursor at the bottom viewport edge and keeps it visible.
+func TestMoveDownLargeJumpLandsAtEdge(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(6), // viewport height 5 after header
+	)
+	height := m.viewport.Height()
+
+	m.MoveDown(height) // cursor = 5
+
+	top := firstVisibleRow(&m)
+	if m.Cursor() < top || m.Cursor() > top+height-1 {
+		t.Fatalf("cursor %d not visible in window [%d,%d]", m.Cursor(), top, top+height-1)
+	}
+	if m.Cursor() != top+height-1 {
+		t.Fatalf("expected cursor at bottom edge %d, got %d", top+height-1, m.Cursor())
+	}
+}
+
+// TestMoveUpLargeJumpLandsAtEdge verifies a page-up jump lands the cursor at
+// the top viewport edge and keeps it visible.
+func TestMoveUpLargeJumpLandsAtEdge(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(6), // viewport height 5 after header
+	)
+	height := m.viewport.Height()
+
+	m.MoveDown(30) // somewhere in the middle
+	m.MoveUp(height)
+
+	top := firstVisibleRow(&m)
+	if m.Cursor() < top || m.Cursor() > top+height-1 {
+		t.Fatalf("cursor %d not visible in window [%d,%d]", m.Cursor(), top, top+height-1)
+	}
+	if m.Cursor() != top {
+		t.Fatalf("expected cursor at top edge %d, got %d", top, m.Cursor())
+	}
+}
+
+// TestGotoTopBottomPlaceCursor verifies GotoTop/GotoBottom still position the
+// cursor correctly and keep it visible.
+func TestGotoTopBottomPlaceCursor(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(50)),
+		WithHeight(6), // viewport height 5 after header
+	)
+	height := m.viewport.Height()
+
+	m.GotoBottom()
+	if m.Cursor() != 49 {
+		t.Fatalf("GotoBottom: expected cursor 49, got %d", m.Cursor())
+	}
+	top := firstVisibleRow(&m)
+	if m.Cursor() < top || m.Cursor() > top+height-1 {
+		t.Fatalf("GotoBottom: cursor %d not visible in window [%d,%d]", m.Cursor(), top, top+height-1)
+	}
+	// The viewport must actually be scrolled to the bottom edge: the last row is
+	// pinned to the bottom, so the first visible row is len(rows)-height.
+	if wantTop := len(makeRows(50)) - height; top != wantTop {
+		t.Fatalf("GotoBottom: expected first visible row %d (bottom edge), got %d", wantTop, top)
+	}
+
+	m.GotoTop()
+	if m.Cursor() != 0 {
+		t.Fatalf("GotoTop: expected cursor 0, got %d", m.Cursor())
+	}
+	if firstVisibleRow(&m) != 0 {
+		t.Fatalf("GotoTop: expected first visible row 0, got %d", firstVisibleRow(&m))
+	}
+}
+
+// TestMoveOnListShorterThanViewport verifies that when the entire list fits
+// within the viewport (rows < height) MoveUp/MoveDown never scroll: the first
+// visible row and the raw YOffset both stay 0 while the cursor tracks each move.
+func TestMoveOnListShorterThanViewport(t *testing.T) {
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(3)),
+		WithHeight(11), // viewport height 10 after header; 3 rows < 10
+	)
+
+	assertNoScroll := func(stage string) {
+		if got := firstVisibleRow(&m); got != 0 {
+			t.Fatalf("%s: expected first visible row 0, got %d", stage, got)
+		}
+		if got := m.viewport.YOffset(); got != 0 {
+			t.Fatalf("%s: expected YOffset 0, got %d", stage, got)
+		}
+	}
+
+	assertNoScroll("initial")
+
+	// Move down across every row.
+	for i := 1; i < 3; i++ {
+		m.MoveDown(1)
+		if m.Cursor() != i {
+			t.Fatalf("MoveDown: expected cursor %d, got %d", i, m.Cursor())
+		}
+		assertNoScroll(fmt.Sprintf("after MoveDown to %d", i))
+	}
+
+	// Move back up across every row.
+	for i := 1; i >= 0; i-- {
+		m.MoveUp(1)
+		if m.Cursor() != i {
+			t.Fatalf("MoveUp: expected cursor %d, got %d", i, m.Cursor())
+		}
+		assertNoScroll(fmt.Sprintf("after MoveUp to %d", i))
+	}
+}
+
 func makeRows(n int) []Row {
 	rows := make([]Row, n)
 	for i := range n {

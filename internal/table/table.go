@@ -1,5 +1,7 @@
-// Package table is a vendored copy of charm.land/bubbles/v2/table (v2.0.0)
-// with the addition of EnsureCursorVisible().
+// Package table is a vendored copy of charm.land/bubbles/v2/table (v2.0.0).
+// Local divergences from upstream: EnsureCursorVisible() and scrollToCursor(),
+// plus the revised MoveUp/MoveDown scroll logic that calls scrollToCursor() for
+// minimal scrolling instead of upstream's default behavior.
 // Original: MIT License, Copyright (c) 2020-2026 Charmbracelet, Inc.
 package table
 
@@ -291,8 +293,13 @@ func (m *Model) UpdateViewport() {
 	)
 }
 
-// EnsureCursorVisible adjusts the viewport scroll offset so the cursor row
-// is centered in the viewport. No-op if cursor is already in view.
+// EnsureCursorVisible snaps the viewport so the cursor row is visible: it is a
+// no-op when the cursor is already within the visible window, and otherwise
+// CENTERS the cursor in the viewport. Use this after external changes that may
+// have moved the cursor off-screen (focus changes, data/row updates).
+//
+// See also scrollToCursor, which performs a minimal scroll (bringing the cursor
+// to the nearest edge) and is used for interactive MoveUp/MoveDown.
 func (m *Model) EnsureCursorVisible() {
 	m.UpdateViewport()
 	cursorLine := m.cursor - m.start
@@ -448,41 +455,45 @@ func (m *Model) SetCursor(n int) {
 	m.UpdateViewport()
 }
 
+// scrollToCursor adjusts the viewport so the cursor row is visible while
+// scrolling the minimum amount needed. If the cursor is already within the
+// visible window, the window does not move; otherwise it shifts just enough
+// to bring the cursor to the nearest viewport edge. This minimal-scroll
+// strategy is used for interactive MoveUp/MoveDown.
+//
+// See also EnsureCursorVisible, which instead centers the cursor when it is
+// off-screen and is used to snap after external changes (focus/data updates).
+func (m *Model) scrollToCursor() {
+	height := m.viewport.Height()
+	if height <= 0 {
+		// A zero-height viewport has no visible window to scroll within;
+		// just recompute and leave the offset alone.
+		m.UpdateViewport()
+		return
+	}
+	// First visible data row, captured before UpdateViewport recomputes m.start.
+	top := m.start + m.viewport.YOffset()
+	if m.cursor < top {
+		top = m.cursor
+	} else if m.cursor > top+height-1 {
+		top = m.cursor - height + 1
+	}
+	m.UpdateViewport() // recomputes m.start/m.end around the new cursor
+	m.viewport.SetYOffset(max(0, top-m.start))
+}
+
 // MoveUp moves the selection up by any number of rows.
 // It can not go above the first row.
 func (m *Model) MoveUp(n int) {
 	m.cursor = clamp(m.cursor-n, 0, max(0, len(m.rows)-1))
-
-	offset := m.viewport.YOffset()
-	switch {
-	case m.start == 0:
-		offset = clamp(offset, 0, m.cursor)
-	case m.start < m.viewport.Height():
-		offset = clamp(clamp(offset+n, 0, m.cursor), 0, m.viewport.Height())
-	case offset >= 1:
-		offset = clamp(offset+n, 1, m.viewport.Height())
-	}
-	m.viewport.SetYOffset(offset)
-	m.UpdateViewport()
+	m.scrollToCursor()
 }
 
 // MoveDown moves the selection down by any number of rows.
 // It can not go below the last row.
 func (m *Model) MoveDown(n int) {
 	m.cursor = clamp(m.cursor+n, 0, max(0, len(m.rows)-1))
-	m.UpdateViewport()
-
-	offset := m.viewport.YOffset()
-	switch {
-	case m.end == len(m.rows) && offset > 0:
-		offset = clamp(offset-n, 1, m.viewport.Height())
-	case m.cursor > (m.end-m.start)/2 && offset > 0:
-		offset = clamp(offset-n, 1, m.cursor)
-	case offset > 1:
-	case m.cursor > offset+m.viewport.Height()-1:
-		offset = clamp(offset+1, 0, 1)
-	}
-	m.viewport.SetYOffset(offset)
+	m.scrollToCursor()
 }
 
 // GotoTop moves the selection to the first row.

@@ -263,6 +263,36 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	// Move-pane: reorder the focused split along the orientation axis. The
+	// perpendicular axis is a no-op (e.g. left/right do nothing in a vertical
+	// stack), mirroring how focus-* branches on Orientation().
+	//
+	// movePane reorders only when the requested axis matches the current
+	// orientation. No post-move resync (syncStatusBarContext/refreshDetailPanel/
+	// syncLogPanel/SetHints) is needed: unlike focus-next-split, the move keeps
+	// the SAME pane focused (focusIdx follows it), so context, detail and log
+	// content — and the hints derived from the focused pane — are unchanged. Only
+	// the visual pane order changes, which recalcSizes handles inside the layout.
+	case command == "move-pane-up", command == "move-pane-down",
+		command == "move-pane-left", command == "move-pane-right":
+		movePane := func(axis layout.Orientation, delta int) {
+			if a.layout.Orientation() == axis {
+				a.layout.MoveFocusedSplit(delta)
+			}
+		}
+		switch command {
+		case "move-pane-up":
+			movePane(layout.OrientationVertical, -1)
+		case "move-pane-down":
+			movePane(layout.OrientationVertical, +1)
+		case "move-pane-left":
+			movePane(layout.OrientationHorizontal, -1)
+		case "move-pane-right":
+			movePane(layout.OrientationHorizontal, +1)
+		}
+		a.keyTrie.Reset()
+		return a, nil
+
 	case command == "toggle-orientation":
 		a.layout.ToggleOrientation()
 		return a, nil

@@ -1,6 +1,8 @@
 package layout
 
 import (
+	"slices"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/aohoyd/aku/internal/plugin"
@@ -89,7 +91,8 @@ func New(width, height, logBufSize int, defaultTimeRange string, defaultSinceSec
 // AddSplit adds a new split pane for the given plugin, seeded with the given
 // namespace and kube-context. The context is set at creation so the pane is
 // never observed with an empty context (which would otherwise flicker the
-// wrong context badge before a later SetContext landed).
+// wrong context badge before a later SetContext landed). The new split is
+// inserted directly after the focused pane (at focusIdx+1), not appended.
 func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace, context string) {
 	w, h := l.splitDimensions(l.SplitCount() + 1)
 	rl := ui.NewResourceList(p, w, h)
@@ -101,8 +104,13 @@ func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace, context string) {
 		l.splits[i].Blur()
 	}
 
-	l.splits = append(l.splits, rl)
-	l.focusIdx = len(l.splits) - 1
+	// Insert the new split directly after the focused pane (not at the end).
+	insertIdx := 0
+	if len(l.splits) > 0 {
+		insertIdx = l.focusIdx + 1
+	}
+	l.splits = slices.Insert(l.splits, insertIdx, rl)
+	l.focusIdx = insertIdx
 	l.splits[l.focusIdx].Focus()
 	l.recalcSizes()
 }
@@ -148,6 +156,13 @@ func (l *Layout) FocusNext() {
 	if len(l.splits) == 0 {
 		return
 	}
+	// If the detail panel currently holds focus, release it before moving the
+	// split focus — otherwise both the detail border and the new split border
+	// would highlight at once.
+	if l.focusTarget == FocusTargetDetails {
+		l.ActiveDetailPanel().Blur()
+		l.focusTarget = FocusTargetResources
+	}
 	l.splits[l.focusIdx].Blur()
 	l.focusIdx = (l.focusIdx + 1) % len(l.splits)
 	l.splits[l.focusIdx].Focus()
@@ -160,6 +175,13 @@ func (l *Layout) FocusNext() {
 func (l *Layout) FocusPrev() {
 	if len(l.splits) == 0 {
 		return
+	}
+	// If the detail panel currently holds focus, release it before moving the
+	// split focus — otherwise both the detail border and the new split border
+	// would highlight at once.
+	if l.focusTarget == FocusTargetDetails {
+		l.ActiveDetailPanel().Blur()
+		l.focusTarget = FocusTargetResources
 	}
 	l.splits[l.focusIdx].Blur()
 	l.focusIdx = (l.focusIdx - 1 + len(l.splits)) % len(l.splits)
@@ -177,6 +199,27 @@ func (l *Layout) FocusSplitAt(idx int) {
 	l.splits[l.focusIdx].Blur()
 	l.focusIdx = idx
 	l.splits[l.focusIdx].Focus()
+}
+
+// MoveFocusedSplit moves the focused split by delta positions in the split
+// order (delta -1 = toward the start, +1 = toward the end). No-op at the edges.
+func (l *Layout) MoveFocusedSplit(delta int) {
+	target := l.focusIdx + delta
+	if target < 0 || target >= len(l.splits) {
+		return
+	}
+	// If the detail panel currently holds focus, release it before reordering —
+	// move-pane operates on resource-list splits, and leaving the detail focused
+	// would highlight both the detail border and the moved split border at once.
+	// Matches the release pattern in FocusNext/FocusPrev.
+	if l.focusTarget == FocusTargetDetails {
+		l.ActiveDetailPanel().Blur()
+		l.focusTarget = FocusTargetResources
+		l.splits[l.focusIdx].FocusBorder()
+	}
+	l.splits[l.focusIdx], l.splits[target] = l.splits[target], l.splits[l.focusIdx]
+	l.focusIdx = target
+	l.recalcSizes()
 }
 
 // FocusedSplit returns a pointer to the focused split's ResourceList.

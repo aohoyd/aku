@@ -4463,6 +4463,213 @@ func TestToggleOrientationCommand(t *testing.T) {
 	}
 }
 
+func TestMovePaneVerticalCommand(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	deploymentsPlugin := &mockPlugin{
+		name: "deployments",
+		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+
+	plugin.Register(podsPlugin)
+	plugin.Register(deploymentsPlugin)
+
+	// Add two splits: pods (idx 0) then deployments (idx 1, focused).
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
+
+	// Default orientation is vertical.
+	if app.layout.Orientation() != layout.OrientationVertical {
+		t.Fatal("expected initial orientation to be vertical")
+	}
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("expected focus at index 1, got %d", app.layout.FocusIndex())
+	}
+
+	// move-pane-left / move-pane-right are perpendicular to a vertical stack: no-ops.
+	model, _ := app.executeCommand("move-pane-left")
+	app = model.(App)
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("move-pane-left should be a no-op in vertical, focus now %d", app.layout.FocusIndex())
+	}
+	if app.layout.SplitAt(1).Plugin().Name() != "deployments" {
+		t.Fatalf("move-pane-left should not reorder in vertical, got %q at idx 1", app.layout.SplitAt(1).Plugin().Name())
+	}
+	model, _ = app.executeCommand("move-pane-right")
+	app = model.(App)
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("move-pane-right should be a no-op in vertical, focus now %d", app.layout.FocusIndex())
+	}
+
+	// move-pane-down on the focused (idx 1, last) split is a no-op at the edge:
+	// order and focus index unchanged.
+	model, _ = app.executeCommand("move-pane-down")
+	app = model.(App)
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("move-pane-down at last index should be a no-op, focus now %d", app.layout.FocusIndex())
+	}
+	if app.layout.SplitAt(0).Plugin().Name() != "pods" || app.layout.SplitAt(1).Plugin().Name() != "deployments" {
+		t.Fatalf("move-pane-down at last index should not reorder, got [%q, %q]",
+			app.layout.SplitAt(0).Plugin().Name(), app.layout.SplitAt(1).Plugin().Name())
+	}
+
+	// move-pane-up swaps the focused (idx 1) split toward idx 0.
+	model, _ = app.executeCommand("move-pane-up")
+	app = model.(App)
+	if app.layout.FocusIndex() != 0 {
+		t.Fatalf("expected focus to follow moved pane to 0 after move-pane-up, got %d", app.layout.FocusIndex())
+	}
+	if app.layout.SplitAt(0).Plugin().Name() != "deployments" {
+		t.Fatalf("expected deployments at idx 0 after move-pane-up, got %q", app.layout.SplitAt(0).Plugin().Name())
+	}
+	if app.layout.SplitAt(1).Plugin().Name() != "pods" {
+		t.Fatalf("expected pods at idx 1 after move-pane-up, got %q", app.layout.SplitAt(1).Plugin().Name())
+	}
+
+	// move-pane-down swaps it back toward idx 1.
+	model, _ = app.executeCommand("move-pane-down")
+	app = model.(App)
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("expected focus to follow moved pane to 1 after move-pane-down, got %d", app.layout.FocusIndex())
+	}
+	if app.layout.SplitAt(1).Plugin().Name() != "deployments" {
+		t.Fatalf("expected deployments back at idx 1 after move-pane-down, got %q", app.layout.SplitAt(1).Plugin().Name())
+	}
+
+	// Bring focus to the start edge (idx 0), then verify move-pane-up there is a
+	// no-op: order and focus index unchanged.
+	model, _ = app.executeCommand("move-pane-up")
+	app = model.(App)
+	if app.layout.FocusIndex() != 0 {
+		t.Fatalf("expected focus at idx 0 after move-pane-up, got %d", app.layout.FocusIndex())
+	}
+	orderBefore := [2]string{app.layout.SplitAt(0).Plugin().Name(), app.layout.SplitAt(1).Plugin().Name()}
+	model, _ = app.executeCommand("move-pane-up")
+	app = model.(App)
+	if app.layout.FocusIndex() != 0 {
+		t.Fatalf("move-pane-up at start index should be a no-op, focus now %d", app.layout.FocusIndex())
+	}
+	if got := [2]string{app.layout.SplitAt(0).Plugin().Name(), app.layout.SplitAt(1).Plugin().Name()}; got != orderBefore {
+		t.Fatalf("move-pane-up at start index should not reorder, got %v want %v", got, orderBefore)
+	}
+}
+
+func TestMovePaneHorizontalCommand(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	deploymentsPlugin := &mockPlugin{
+		name: "deployments",
+		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+
+	plugin.Register(podsPlugin)
+	plugin.Register(deploymentsPlugin)
+
+	// Add two splits: pods (idx 0) then deployments (idx 1, focused).
+	app.layout.AddSplit(podsPlugin, "default", "")
+	app.layout.AddSplit(deploymentsPlugin, "default", "")
+
+	// Switch to horizontal orientation.
+	model, _ := app.executeCommand("toggle-orientation")
+	app = model.(App)
+	if app.layout.Orientation() != layout.OrientationHorizontal {
+		t.Fatal("expected horizontal orientation")
+	}
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("expected focus at index 1, got %d", app.layout.FocusIndex())
+	}
+
+	// move-pane-up / move-pane-down are perpendicular to a horizontal row: no-ops.
+	model, _ = app.executeCommand("move-pane-up")
+	app = model.(App)
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("move-pane-up should be a no-op in horizontal, focus now %d", app.layout.FocusIndex())
+	}
+	if app.layout.SplitAt(1).Plugin().Name() != "deployments" {
+		t.Fatalf("move-pane-up should not reorder in horizontal, got %q at idx 1", app.layout.SplitAt(1).Plugin().Name())
+	}
+	model, _ = app.executeCommand("move-pane-down")
+	app = model.(App)
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("move-pane-down should be a no-op in horizontal, focus now %d", app.layout.FocusIndex())
+	}
+
+	// move-pane-right on the focused (idx 1, last) split is a no-op at the edge:
+	// order and focus index unchanged.
+	model, _ = app.executeCommand("move-pane-right")
+	app = model.(App)
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("move-pane-right at last index should be a no-op, focus now %d", app.layout.FocusIndex())
+	}
+	if app.layout.SplitAt(0).Plugin().Name() != "pods" || app.layout.SplitAt(1).Plugin().Name() != "deployments" {
+		t.Fatalf("move-pane-right at last index should not reorder, got [%q, %q]",
+			app.layout.SplitAt(0).Plugin().Name(), app.layout.SplitAt(1).Plugin().Name())
+	}
+
+	// move-pane-left swaps the focused (idx 1) split toward idx 0.
+	model, _ = app.executeCommand("move-pane-left")
+	app = model.(App)
+	if app.layout.FocusIndex() != 0 {
+		t.Fatalf("expected focus to follow moved pane to 0 after move-pane-left, got %d", app.layout.FocusIndex())
+	}
+	if app.layout.SplitAt(0).Plugin().Name() != "deployments" {
+		t.Fatalf("expected deployments at idx 0 after move-pane-left, got %q", app.layout.SplitAt(0).Plugin().Name())
+	}
+
+	// move-pane-right swaps it back toward idx 1.
+	model, _ = app.executeCommand("move-pane-right")
+	app = model.(App)
+	if app.layout.FocusIndex() != 1 {
+		t.Fatalf("expected focus to follow moved pane to 1 after move-pane-right, got %d", app.layout.FocusIndex())
+	}
+	if app.layout.SplitAt(1).Plugin().Name() != "deployments" {
+		t.Fatalf("expected deployments back at idx 1 after move-pane-right, got %q", app.layout.SplitAt(1).Plugin().Name())
+	}
+
+	// Bring focus to the start edge (idx 0), then verify move-pane-left there is a
+	// no-op: order and focus index unchanged.
+	model, _ = app.executeCommand("move-pane-left")
+	app = model.(App)
+	if app.layout.FocusIndex() != 0 {
+		t.Fatalf("expected focus at idx 0 after move-pane-left, got %d", app.layout.FocusIndex())
+	}
+	orderBefore := [2]string{app.layout.SplitAt(0).Plugin().Name(), app.layout.SplitAt(1).Plugin().Name()}
+	model, _ = app.executeCommand("move-pane-left")
+	app = model.(App)
+	if app.layout.FocusIndex() != 0 {
+		t.Fatalf("move-pane-left at start index should be a no-op, focus now %d", app.layout.FocusIndex())
+	}
+	if got := [2]string{app.layout.SplitAt(0).Plugin().Name(), app.layout.SplitAt(1).Plugin().Name()}; got != orderBefore {
+		t.Fatalf("move-pane-left at start index should not reorder, got %v want %v", got, orderBefore)
+	}
+}
+
+func TestMovePaneBindingsResolve(t *testing.T) {
+	bs := config.NewBindingSet(config.DefaultBindings())
+	trie := bs.TrieFor("resources", "pods")
+
+	cases := []struct{ key, want string }{
+		{"alt+shift+up", "move-pane-up"},
+		{"alt+shift+down", "move-pane-down"},
+		{"alt+shift+left", "move-pane-left"},
+		{"alt+shift+right", "move-pane-right"},
+	}
+	for _, c := range cases {
+		cmd, _, resolved := trie.Press(c.key)
+		if !resolved || cmd != c.want {
+			t.Fatalf("expected %q to resolve to %q, got command=%q resolved=%v", c.key, c.want, cmd, resolved)
+		}
+	}
+}
+
 func TestFocusRightVerticalFocusesDetails(t *testing.T) {
 	app := newTestApp()
 
