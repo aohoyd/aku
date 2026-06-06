@@ -85,12 +85,26 @@ func NewClient(cfg *rest.Config, resolver ChartResolver) Client {
 	return &liveClient{restConfig: cfg, chartResolver: resolver}
 }
 
-func (c *liveClient) newActionConfig(namespace string) (*action.Configuration, error) {
-	flags := &genericclioptions.ConfigFlags{
+// newConfigFlags builds the REST getter Helm uses for both the storage driver
+// and the KubeClient. The namespace must be set on the flags here, not only
+// passed to cfg.Init: cfg.Init applies its namespace argument to the storage
+// driver alone, while mutating actions (uninstall, rollback, upgrade) resolve
+// the target namespace for manifest resources via the Factory, which reads it
+// from ConfigFlags.Namespace. Without it, those actions fall back to the
+// kubeconfig's current-context namespace and act on the wrong namespace. This
+// mirrors Helm's own CLI (pkg/cli/environment.go).
+func newConfigFlags(restConfig *rest.Config, namespace string) *genericclioptions.ConfigFlags {
+	ns := namespace
+	return &genericclioptions.ConfigFlags{
+		Namespace: &ns,
 		WrapConfigFn: func(_ *rest.Config) *rest.Config {
-			return c.restConfig
+			return restConfig
 		},
 	}
+}
+
+func (c *liveClient) newActionConfig(namespace string) (*action.Configuration, error) {
+	flags := newConfigFlags(c.restConfig, namespace)
 	cfg := new(action.Configuration)
 	if err := cfg.Init(flags, namespace, ""); err != nil {
 		return nil, fmt.Errorf("helm config: %w", err)
