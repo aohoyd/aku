@@ -14,6 +14,7 @@ import (
 	"github.com/aohoyd/aku/internal/config"
 	"github.com/aohoyd/aku/internal/helm"
 	"github.com/aohoyd/aku/internal/k8s"
+	"github.com/aohoyd/aku/internal/k8s/session"
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/logs"
 	"github.com/aohoyd/aku/internal/msgs"
@@ -291,10 +292,12 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			movePane(layout.OrientationHorizontal, +1)
 		}
 		a.keyTrie.Reset()
+		a.syncTerminalSizes()
 		return a, nil
 
 	case command == "toggle-orientation":
 		a.layout.ToggleOrientation()
+		a.syncTerminalSizes()
 		return a, nil
 
 	case command == "toggle-panel-focus":
@@ -455,9 +458,10 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if a.layout.SplitCount() > 1 {
-			a = a.closeFocusedSplit()
+			var cmd tea.Cmd
+			a, cmd = a.closeFocusedSplit()
 			a.statusBar.SetHints(a.currentHints())
-			return a, nil
+			return a, cmd
 		}
 		return a, nil
 
@@ -476,11 +480,15 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if a.layout.SplitCount() > 1 {
-			a = a.closeFocusedSplit()
+			var cmd tea.Cmd
+			a, cmd = a.closeFocusedSplit()
 			a.statusBar.SetHints(a.currentHints())
-			return a, nil
+			return a, cmd
 		}
 		a = a.stopLogStream()
+		// Sweep terminal sessions / node-debug pods before quitting (best-effort,
+		// bounded) so quit does not leak remote state.
+		a.shutdownTerminals()
 		return a, tea.Quit
 
 	// Search/filter bar
@@ -611,7 +619,12 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		podName := resolvePodName(focused, selected)
 		containerName := resolveContainerName(focused, selected)
-		return a, k8s.ExecCmd(execClient, podName, containerName, ns, a.config.ExecCommand())
+		ctxName := focused.Context()
+		title := "exec: " + podName
+		if containerName != "" {
+			title += "/" + containerName
+		}
+		return a.openExecTerminal(execClient, podName, containerName, ns, ctxName, title)
 
 	case command == "debug" || command == "debug-privileged":
 		return a.handleDebug(command == "debug-privileged")
@@ -942,6 +955,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 	case command == "page-down":
 		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
 			a.layout.ActiveDetailPanel().PageDown()
+		} else if tp, ok := a.layout.FocusedPane().(*ui.TerminalPane); ok {
+			tp.ScrollDown(terminalScrollPageLines(tp))
 		} else if focused := a.layout.FocusedSplit(); focused != nil {
 			focused.PageDown()
 			a, cmd := a.refreshDetailPanelOrLog()
@@ -951,6 +966,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 	case command == "page-up":
 		if a.layout.FocusedDetails() && a.layout.RightPanelVisible() {
 			a.layout.ActiveDetailPanel().PageUp()
+		} else if tp, ok := a.layout.FocusedPane().(*ui.TerminalPane); ok {
+			tp.ScrollUp(terminalScrollPageLines(tp))
 		} else if focused := a.layout.FocusedSplit(); focused != nil {
 			focused.PageUp()
 			a, cmd := a.refreshDetailPanelOrLog()
@@ -1049,10 +1066,35 @@ func (a App) closeRightPanel() App {
 // the closing pane), then SyncRefs reconciles refcounts against the remaining
 // panes. If several panes share the closing context, SyncRefs keeps the cluster
 // alive and tears it down only when the last referencing pane is gone.
-func (a App) closeFocusedSplit() App {
+func (a App) closeFocusedSplit() (App, tea.Cmd) {
+	// A focused terminal pane closes via its own path: tear down the SPDY
+	// session and remove the pane. There is no informer subscription or cluster
+	// refcount tied to a terminal pane, so the resource-pane reconcile below
+	// does not apply. Node-debug pod deletion is fired inside closeTerminalSession;
+	// ephemeral pod-debug surfaces a one-line note (the container can't be removed).
+	if tp, ok := a.layout.FocusedPane().(*ui.TerminalPane); ok {
+		note := a.ephemeralCloseNote(tp.ID())
+		a.closeTerminalSession(tp.ID())
+		var cmd tea.Cmd
+		if note != "" {
+			cmd = a.statusBar.SetError(note)
+		}
+		a.keyTrie.Reset()
+		a.layout.CloseCurrentSplit()
+		// A terminal pane references a context just like a resource pane
+		// (distinctPaneContexts/paneContexts count it), so its removal must
+		// reconcile manager refcounts: closing the last pane on a context tears
+		// that cluster down. There is no informer/store tied to a terminal pane,
+		// so only the cluster-refcount reconcile applies (no unsubscribe). Done
+		// AFTER CloseCurrentSplit so the just-closed pane is no longer counted.
+		a.mgr.SyncRefs(a.paneContexts())
+		a.syncTerminalSizes()
+		return a, cmd
+	}
+
 	closing := a.layout.FocusedSplit()
 	if closing == nil {
-		return a
+		return a, nil
 	}
 
 	closingCtx := closing.Context()
@@ -1076,7 +1118,148 @@ func (a App) closeFocusedSplit() App {
 	// remaining pane references is torn down here (no global exemption).
 	a.mgr.SyncRefs(a.paneContexts())
 
-	return a
+	return a, nil
+}
+
+// openExecTerminal builds an exec SPDY executor, starts a background session,
+// opens a TerminalPane for it as a new split, and returns the command that
+// kicks off the byte-pump loop plus an initial resize. The pane and session
+// share a unique id (the registry key and TerminalPaneByID lookup key).
+//
+// This replaces the fullscreen tea.Exec exec path with an embedded pane.
+func (a App) openExecTerminal(client *k8s.Client, podName, containerName, ns, ctxName, title string) (tea.Model, tea.Cmd) {
+	exec, err := a.execExecutorFn(client, podName, containerName, ns, a.config.ExecCommand())
+	if err != nil {
+		cmd := a.statusBar.SetError("exec: " + err.Error())
+		return a, cmd
+	}
+
+	a.termSeq++
+	id := fmt.Sprintf("exec:%s/%s/%s:%d", ns, podName, containerName, a.termSeq)
+
+	// Seed the pane at the current screen size; recalcSizes (via AddTerminalSplit)
+	// corrects it immediately, and syncTerminalSizes pushes the final size to the
+	// session.
+	w, h := a.layout.SplitSeedSize()
+	tp := ui.NewTerminalPane(title, ctxName, w, h)
+	tp.SetID(id)
+	tp.SetScrollback(a.config.TerminalScrollback())
+
+	sess := session.Start(exec, id)
+	a.terminals[id] = sess
+	startReplyPump(tp, sess)
+
+	a.layout.AddTerminalSplit(tp)
+	a.keyTrie.Reset()
+	// Reconcile badge visibility immediately: a new pane may push the layout from
+	// single- to multi-context (or vice versa), and this pane's own badge must be
+	// shown/hidden per the same rule resource panes follow.
+	a.syncPaneFooters()
+	a.syncTerminalSizes()
+
+	iw, ih := tp.InnerSize()
+	sess.Resize(iw, ih)
+
+	return a, readTermBytes(sess)
+}
+
+// openDebugTerminal opens an embedded terminal pane for an ephemeral pod-debug
+// container. The pane is shown IMMEDIATELY with a static "starting debug
+// container…" placeholder (written into the emulator) and the SPDY-attach is
+// deferred: the ephemeral-container pre-flight (GET pod → patch → wait Running)
+// runs async in a tea.Cmd and reports back via DebugReadyMsg keyed by the pane's
+// id, at which point the handler binds a live session to this pane.
+//
+// Starting-state choice: a static placeholder line rather than an animated
+// spinner. It is robust (no extra tick wiring), and real shell bytes overwrite
+// it once they flow.
+func (a App) openDebugTerminal(client *k8s.Client, podName, containerName, ns, ctxName, image string, command []string, privileged bool) (tea.Model, tea.Cmd) {
+	a.termSeq++
+	id := fmt.Sprintf("debug:%s/%s:%d", ns, podName, a.termSeq)
+
+	title := "debug: " + podName
+	if containerName != "" {
+		title += "/" + containerName
+	}
+
+	w, h := a.layout.SplitSeedSize()
+	tp := ui.NewTerminalPane(title, ctxName, w, h)
+	tp.SetID(id)
+	tp.SetScrollback(a.config.TerminalScrollback())
+	_, _ = tp.Write([]byte("starting debug container…\r\n"))
+
+	// Record cleanup metadata up front: ephemeral containers cannot be removed,
+	// so close/exit only surfaces a note (no delete).
+	a.termCleanup[id] = terminalMeta{ephemeral: true, client: client, podName: podName, namespace: ns}
+
+	a.layout.AddTerminalSplit(tp)
+	a.keyTrie.Reset()
+	a.syncPaneFooters()
+	a.syncTerminalSizes()
+
+	return a, debugPreflightCmd(id, client, podName, containerName, ns, image, command, privileged)
+}
+
+// openNodeDebugTerminal opens an embedded terminal pane for a node-debug pod.
+// Like openDebugTerminal it shows a placeholder immediately and defers the
+// pod-create + wait-Running pre-flight to an async tea.Cmd reporting back via
+// DebugReadyMsg. The created pod is recorded for deletion on close/quit.
+func (a App) openNodeDebugTerminal(client *k8s.Client, nodeName, image string, command []string) (tea.Model, tea.Cmd) {
+	a.termSeq++
+	id := fmt.Sprintf("debug-node:%s:%d", nodeName, a.termSeq)
+
+	title := "node: " + nodeName
+
+	w, h := a.layout.SplitSeedSize()
+	tp := ui.NewTerminalPane(title, client.Context, w, h)
+	tp.SetID(id)
+	tp.SetScrollback(a.config.TerminalScrollback())
+	_, _ = tp.Write([]byte("starting debug pod on " + nodeName + "…\r\n"))
+
+	// The pod name/namespace are not known until the pre-flight creates the pod;
+	// DebugReadyMsg fills them in. Record the client now so a partially-created
+	// session can still be cleaned up, and nodeDebug so close fires a delete.
+	a.termCleanup[id] = terminalMeta{nodeDebug: true, client: client}
+
+	a.layout.AddTerminalSplit(tp)
+	a.keyTrie.Reset()
+	a.syncPaneFooters()
+	a.syncTerminalSizes()
+
+	return a, nodeDebugPreflightCmd(id, client, nodeName, image, command)
+}
+
+// debugPreflightCmd runs the ephemeral pod-debug pre-flight off the UI goroutine
+// and reports its result as a DebugReadyMsg keyed by the pane id.
+func debugPreflightCmd(id string, client *k8s.Client, podName, containerName, ns, image string, command []string, privileged bool) tea.Cmd {
+	return func() tea.Msg {
+		dbgCtr, err := k8s.PrepareEphemeralDebug(context.Background(), client, podName, ns, containerName, image, command, privileged, nil)
+		return msgs.DebugReadyMsg{
+			ID:            id,
+			PodName:       podName,
+			Namespace:     ns,
+			ContainerName: dbgCtr,
+			Err:           err,
+		}
+	}
+}
+
+// nodeDebugPreflightCmd runs the node-debug pre-flight (create pod + wait) off
+// the UI goroutine and reports a DebugReadyMsg with the created pod's identity.
+func nodeDebugPreflightCmd(id string, client *k8s.Client, nodeName, image string, command []string) tea.Cmd {
+	return func() tea.Msg {
+		// node-debug is always privileged: the pod needs HostPID/HostNetwork/HostIPC
+		// and a /host mount to be useful for node troubleshooting.
+		podName, ns, containerName, err := k8s.PrepareNodeDebug(context.Background(), client, nodeName, image, command, true, nil)
+		return msgs.DebugReadyMsg{
+			ID:            id,
+			PodName:       podName,
+			Namespace:     ns,
+			ContainerName: containerName,
+			NodeMode:      true,
+			Err:           err,
+		}
+	}
 }
 
 func (a App) handleGoto(resourceName string, targetNs string) (tea.Model, tea.Cmd) {
@@ -1498,7 +1681,10 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	a.envResolved = false
 	a.keyTrie.Reset()
 
-	// Reset each split to root and re-subscribe
+	// Reset each split to root and re-subscribe. SplitAt returns nil for terminal
+	// panes, so they are intentionally skipped here: a terminal has no informer
+	// subscription to rebuild and its live session must not be disturbed by a
+	// reload. Their geometry is reconciled by syncTerminalSizes below.
 	var populateCmds []tea.Cmd
 	for i := range a.layout.SplitCount() {
 		split := a.layout.SplitAt(i)
@@ -1527,6 +1713,11 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	a.statusBar.SetError("") // clear immediately, no cmd needed
 	a.statusBar.SetHints(a.currentHints())
 	a = a.syncIndicators()
+
+	// The reload above can change pane geometry (unzoom, log-mode toggle). Push
+	// the settled inner sizes to any live terminal sessions so the remote shells
+	// reflow to match what their emulators now render.
+	a.syncTerminalSizes()
 
 	allCmds := append(populateCmds, descCmd, tea.ClearScreen)
 	return a, tea.Batch(allCmds...)
@@ -2157,6 +2348,7 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 	}
 	podName := resolvePodName(focused, selected)
 	containerName := resolveContainerName(focused, selected)
+	ctxName := focused.Context()
 
 	// Privileged debug requires confirmation
 	if privileged {
@@ -2174,10 +2366,12 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	return a, k8s.DebugCmd(debugClient, podName, containerName, ns, image, command, false)
+	return a.openDebugTerminal(debugClient, podName, containerName, ns, ctxName, image, command, false)
 }
 
-// executePendingDebug runs a debug action that was confirmed by the user.
+// executePendingDebug runs a debug action that was confirmed by the user. Both
+// privileged pod-debug and node-debug open embedded terminal panes (the same
+// async pre-flight + DebugReadyMsg flow as the direct, non-privileged path).
 func (a App) executePendingDebug(dbg *pendingDebugAction) (tea.Model, tea.Cmd) {
 	client := a.clientForFocused()
 	if client == nil {
@@ -2185,9 +2379,9 @@ func (a App) executePendingDebug(dbg *pendingDebugAction) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if dbg.nodeMode {
-		return a, k8s.DebugNodeCmd(client, dbg.nodeName, dbg.image, dbg.command)
+		return a.openNodeDebugTerminal(client, dbg.nodeName, dbg.image, dbg.command)
 	}
-	return a, k8s.DebugCmd(client, dbg.podName, dbg.containerName, dbg.namespace, dbg.image, dbg.command, dbg.privileged)
+	return a.openDebugTerminal(client, dbg.podName, dbg.containerName, dbg.namespace, client.Context, dbg.image, dbg.command, dbg.privileged)
 }
 
 func (a App) handleSearchSubmitted(msg msgs.SearchSubmittedMsg) (tea.Model, tea.Cmd) {

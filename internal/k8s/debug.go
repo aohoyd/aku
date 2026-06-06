@@ -4,25 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"io"
 	"net/url"
-	"os"
-	"os/signal"
-	"sync"
-	"syscall"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
-	"github.com/aohoyd/aku/internal/msgs"
-	"github.com/muesli/cancelreader"
-	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
 )
 
@@ -109,118 +98,87 @@ func buildDebugNodePod(name, nodeName, image string, command []string, privilege
 	return &p
 }
 
-// debugCommand implements tea.ExecCommand for attaching to debug containers.
-type debugCommand struct {
-	stdin      io.Reader
-	stdout     io.Writer
-	stderr     io.Writer
-	client     *Client
-	podName    string
-	container  string
-	namespace  string
-	image      string
-	command    []string
-	privileged bool
-	nodeMode   bool
-	nodeName   string
-}
-
-func (d *debugCommand) SetStdin(r io.Reader)  { d.stdin = r }
-func (d *debugCommand) SetStdout(w io.Writer) { d.stdout = w }
-func (d *debugCommand) SetStderr(w io.Writer) { d.stderr = w }
-
-// Run executes the debug workflow: create ephemeral container or debug pod, then attach.
-func (d *debugCommand) Run() error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-
-	if d.nodeMode {
-		return d.runNodeDebug(ctx)
-	}
-	return d.runPodDebug(ctx)
-}
-
-func (d *debugCommand) runPodDebug(ctx context.Context) error {
-	sp := newSpinner(d.stdout, "Creating debug container...")
-	sp.Start()
-
+// PrepareEphemeralDebug performs the pod-debug pre-flight: it GETs the pod,
+// appends an ephemeral debug container, calls UpdateEphemeralContainers, then
+// waits for that container to reach Running. It returns the generated debug
+// container name so the caller can attach to it via NewAttachExecutor.
+//
+// onStatus, when non-nil, is invoked with human-readable progress strings
+// ("Waiting for container...") so callers driving a spinner can surface them; it
+// is a no-op for the embedded-terminal path (which shows its own placeholder).
+func PrepareEphemeralDebug(ctx context.Context, client *Client, podName, namespace, targetContainer, image string, command []string, privileged bool, onStatus func(string)) (debugContainerName string, err error) {
 	debugName := generateDebugName("debugger")
-	ec := buildEphemeralContainer(debugName, d.image, d.command, d.container, d.privileged)
+	ec := buildEphemeralContainer(debugName, image, command, targetContainer, privileged)
 
-	// Get current pod
-	pod, err := d.client.Typed.CoreV1().Pods(d.namespace).Get(ctx, d.podName, metav1.GetOptions{})
+	pod, err := client.Typed.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
-		sp.Stop("")
-		return fmt.Errorf("get pod: %w", err)
+		return "", fmt.Errorf("get pod: %w", err)
 	}
 
-	// Append ephemeral container
 	pod.Spec.EphemeralContainers = append(pod.Spec.EphemeralContainers, ec)
 
-	// Update ephemeral containers
-	_, err = d.client.Typed.CoreV1().Pods(d.namespace).UpdateEphemeralContainers(
-		ctx, d.podName, pod, metav1.UpdateOptions{},
+	_, err = client.Typed.CoreV1().Pods(namespace).UpdateEphemeralContainers(
+		ctx, podName, pod, metav1.UpdateOptions{},
 	)
 	if err != nil {
-		sp.Stop("")
-		return fmt.Errorf("update ephemeral containers: %w", err)
+		return "", fmt.Errorf("update ephemeral containers: %w", err)
 	}
 
-	sp.SetStatus("Waiting for container...")
-
-	// Wait for the container to be running
-	if err := waitForContainerRunning(ctx, d.client.Typed, d.podName, debugName, d.namespace); err != nil {
-		sp.Stop("")
-		return err
+	if onStatus != nil {
+		onStatus("Waiting for container...")
 	}
 
-	sp.Stop("")
+	if err := waitForContainerRunning(ctx, client.Typed, podName, debugName, namespace); err != nil {
+		return "", err
+	}
 
-	// Attach
-	return attachContainer(ctx, d.stdin, d.stdout, d.stderr, d.client.Config, d.client.Typed, d.podName, debugName, d.namespace)
+	return debugName, nil
 }
 
-func (d *debugCommand) runNodeDebug(ctx context.Context) error {
-	sp := newSpinner(d.stdout, "Creating debug pod on "+d.nodeName+"...")
-	sp.Start()
-
-	prefix := "ktui-debug-" + d.nodeName
+// PrepareNodeDebug performs the node-debug pre-flight: it creates a privileged
+// debug pod pinned to the node, then waits for its container to reach Running.
+// It returns the created pod name, the namespace it was created in, and the
+// debug container name so the caller can attach. The caller owns deleting the
+// pod (see DeleteNodeDebugPod) on pane-close / quit.
+func PrepareNodeDebug(ctx context.Context, client *Client, nodeName, image string, command []string, privileged bool, onStatus func(string)) (podName, namespace, containerName string, err error) {
+	prefix := "ktui-debug-" + nodeName
 	if len(prefix) > 57 { // leave room for "-xxxxx"
 		prefix = prefix[:57]
 	}
 	debugName := generateDebugName(prefix)
-	pod := buildDebugNodePod(debugName, d.nodeName, d.image, d.command, d.privileged)
+	pod := buildDebugNodePod(debugName, nodeName, image, command, privileged)
 
-	ns := d.client.Namespace
+	ns := client.Namespace
 
-	created, err := d.client.Typed.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
+	created, err := client.Typed.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
-		sp.Stop("")
-		return fmt.Errorf("create debug pod: %w", err)
+		return "", "", "", fmt.Errorf("create debug pod: %w", err)
 	}
 
-	// Clean up the debug pod in the background to avoid blocking TUI resume.
-	defer func() {
-		go func() {
-			_ = d.client.Typed.CoreV1().Pods(ns).Delete(
-				context.Background(), created.Name,
-				metav1.DeleteOptions{GracePeriodSeconds: new(int64)},
-			)
-		}()
-	}()
-
-	sp.SetStatus("Waiting for pod...")
-
-	containerName := created.Spec.Containers[0].Name
-
-	if err := waitForContainerRunning(ctx, d.client.Typed, created.Name, containerName, ns); err != nil {
-		sp.Stop("")
-		return err
+	if onStatus != nil {
+		onStatus("Waiting for pod...")
 	}
 
-	sp.Stop("")
+	cName := created.Spec.Containers[0].Name
 
-	return attachContainer(ctx, d.stdin, d.stdout, d.stderr, d.client.Config, d.client.Typed, created.Name, containerName, ns)
+	if err := waitForContainerRunning(ctx, client.Typed, created.Name, cName, ns); err != nil {
+		// Best-effort cleanup: the pod was created but never came up, so it would
+		// otherwise leak. Fire-and-forget so we do not block the caller.
+		go func() { _ = DeleteNodeDebugPod(context.Background(), client, created.Name, ns) }()
+		return "", "", "", err
+	}
+
+	return created.Name, ns, cName, nil
+}
+
+// DeleteNodeDebugPod deletes a node-debug pod (created by PrepareNodeDebug) with
+// a zero grace period. It is best-effort: callers typically fire it in a
+// goroutine on pane-close / app-quit and ignore the error.
+func DeleteNodeDebugPod(ctx context.Context, client *Client, podName, namespace string) error {
+	return client.Typed.CoreV1().Pods(namespace).Delete(
+		ctx, podName,
+		metav1.DeleteOptions{GracePeriodSeconds: new(int64)},
+	)
 }
 
 // waitForContainerRunning polls until the named container is in Running state.
@@ -266,9 +224,9 @@ func waitForContainerRunning(ctx context.Context, typed kubernetes.Interface, po
 	}
 }
 
-// attachContainer builds the attach subresource URL and streams via SPDY.
-func attachContainer(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, restConfig *rest.Config, typed kubernetes.Interface, podName, containerName, namespace string) error {
-	attachURL := typed.CoreV1().RESTClient().Post().
+// attachURL builds the /attach subresource request URL for a pod/container.
+func attachURL(typed kubernetes.Interface, podName, containerName, namespace string) *url.URL {
+	return typed.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
 		Namespace(namespace).
@@ -280,146 +238,14 @@ func attachContainer(ctx context.Context, stdin io.Reader, stdout, stderr io.Wri
 			Container: containerName,
 		}, scheme.ParameterCodec).
 		URL()
-
-	return spdyStream(ctx, stdin, stdout, restConfig, attachURL)
 }
 
-// spdyStream sets the terminal to raw mode and streams stdin/stdout via SPDY.
-// The caller builds the subresource URL; this function handles everything else.
-func spdyStream(ctx context.Context, stdin io.Reader, stdout io.Writer, restConfig *rest.Config, reqURL *url.URL) error {
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err != nil {
-		return fmt.Errorf("set raw terminal: %w", err)
-	}
-	defer term.Restore(int(os.Stdin.Fd()), oldState)
-
-	executor, err := remotecommand.NewSPDYExecutor(restConfig, "POST", reqURL)
-	if err != nil {
-		return fmt.Errorf("create executor: %w", err)
-	}
-
-	tsq := newTermSizeQueue()
-	defer tsq.stop()
-
-	inR, inW := io.Pipe()
-
-	cr, crErr := cancelreader.NewReader(stdin)
-	if crErr != nil {
-		return fmt.Errorf("create cancel reader: %w", crErr)
-	}
-
-	// Use a WaitGroup so cleanup can wait for the goroutine to fully exit,
-	// ensuring no competing Read on stdin when Bubble Tea resumes.
-	var stdinWg sync.WaitGroup
-	stdinWg.Go(func() {
-		defer inW.Close()
-		buf := make([]byte, 32*1024)
-		for {
-			nr, readErr := cr.Read(buf)
-			if nr > 0 {
-				if _, writeErr := inW.Write(buf[:nr]); writeErr != nil {
-					return
-				}
-			}
-			if readErr != nil {
-				return
-			}
-		}
-	})
-
-	err = executor.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdin:             inR,
-		Stdout:            stdout,
-		Tty:               true,
-		TerminalSizeQueue: tsq,
-	})
-
-	// Stop the stdin forwarding goroutine. Two possible blocked states:
-	// 1. cr.Read() — unblocked by cr.Cancel() (uses select(2) + pipe on macOS)
-	// 2. inW.Write() — unblocked by inR.Close() (io.Pipe is unbuffered,
-	//    so Write blocks when SPDY stops reading from inR)
-	cr.Cancel()
-	inR.Close()
-	stdinWg.Wait()
-	cr.Close()
-
-	if err != nil && errors.Is(err, io.EOF) {
-		return nil
-	}
-	return err
-}
-
-// termSizeQueue implements remotecommand.TerminalSizeQueue with persistent
-// SIGWINCH handling and clean cancellation.
-type termSizeQueue struct {
-	ch   chan os.Signal
-	done chan struct{}
-	once sync.Once
-}
-
-func newTermSizeQueue() *termSizeQueue {
-	q := &termSizeQueue{
-		ch:   make(chan os.Signal, 1),
-		done: make(chan struct{}),
-	}
-	signal.Notify(q.ch, syscall.SIGWINCH)
-	// Send an initial signal to return the current size immediately.
-	q.ch <- syscall.SIGWINCH
-	return q
-}
-
-func (q *termSizeQueue) Next() *remotecommand.TerminalSize {
-	select {
-	case <-q.ch:
-	case <-q.done:
-		return nil
-	}
-	w, h, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return nil
-	}
-	return &remotecommand.TerminalSize{Width: uint16(w), Height: uint16(h)}
-}
-
-func (q *termSizeQueue) stop() {
-	q.once.Do(func() {
-		signal.Stop(q.ch)
-		close(q.done)
-	})
-}
-
-// DebugCmd returns a tea.Cmd that suspends the TUI and attaches to an ephemeral debug container.
-func DebugCmd(client *Client, podName, containerName, ns, image string, command []string, privileged bool) tea.Cmd {
-	dc := &debugCommand{
-		client:     client,
-		podName:    podName,
-		container:  containerName,
-		namespace:  ns,
-		image:      image,
-		command:    command,
-		privileged: privileged,
-	}
-	return tea.Exec(dc, func(err error) tea.Msg {
-		if err != nil {
-			return msgs.ActionResultMsg{Err: err}
-		}
-		return msgs.ActionResultMsg{ActionID: "debug:" + podName}
-	})
-}
-
-// DebugNodeCmd returns a tea.Cmd that suspends the TUI and attaches to a debug pod on a node.
-func DebugNodeCmd(client *Client, nodeName, image string, command []string) tea.Cmd {
-	dc := &debugCommand{
-		client:   client,
-		nodeMode: true,
-		nodeName: nodeName,
-		image:    image,
-		command:  command,
-	}
-	return tea.Exec(dc, func(err error) tea.Msg {
-		if err != nil {
-			return msgs.ActionResultMsg{Err: err}
-		}
-		return msgs.ActionResultMsg{ActionID: "debug-node:" + nodeName}
-	})
+// NewAttachExecutor builds a SPDY executor for attaching to a (debug/ephemeral)
+// container in a pod. The returned executor satisfies the minimal interface
+// consumed by the session package and can be driven over in-memory pipes.
+// Callers are responsible for any pre-flight work (creating the ephemeral
+// container/pod and waiting for it to be Running) before attaching.
+func NewAttachExecutor(client *Client, podName, containerName, namespace string) (remotecommand.Executor, error) {
+	reqURL := attachURL(client.Typed, podName, containerName, namespace)
+	return remotecommand.NewSPDYExecutor(client.Config, "POST", reqURL)
 }

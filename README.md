@@ -32,8 +32,8 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 
 **Operations**
 - Edit resources in your `$EDITOR` with automatic retry on validation errors
-- Exec into containers
-- Ephemeral debug containers (pods and nodes, with optional privileged mode)
+- Exec into containers as live, embeddable terminal panes (multiple concurrent, zoomable, run in the background)
+- Ephemeral debug containers (pods and nodes, with optional privileged mode) as live terminal panes — node-debug pods are cleaned up on pane close and on quit
 - Port forwarding with live status tracking
 - Update container images across workloads
 - Scale deployments, statefulsets, and replicasets
@@ -41,6 +41,13 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Multi-select resources for bulk delete and rollout restart
 - Helm values editing, rollback to any revision, and chart reference updates
 - Save log buffer to file (and optionally open in `$EDITOR`)
+
+**Terminals**
+- Exec and debug sessions are first-class panes: place them adjacent to other resources, zoom to focus, keep shells alive in the background
+- tmux-style prefix key (default `Ctrl+a`) escapes raw typing: prefix then `h/j/k/l` or arrows moves focus, prefix then `z` zooms, prefix then `x` closes the pane; close a live pane with prefix then `x` (`Ctrl+w` is sent to the shell), while `Ctrl+w` directly closes an *exited* pane like any other
+- Send a literal prefix byte to the shell by pressing the prefix twice
+- Exited shells keep an `[exited — status N]` banner and scrollback until you close them
+- Mouse wheel scrolls a terminal pane's scrollback
 
 **Navigation**
 - Vim-style keybindings with multi-key sequences (`gg`, `gp`, `gd`, etc.)
@@ -51,7 +58,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Fully customizable keybindings via YAML
 
 **Mouse (optional)**
-- Wheel scrolls the pane under the cursor without changing focus
+- Wheel scrolls the pane under the cursor without changing focus (over a terminal pane it scrolls that pane's scrollback)
 - When an overlay (namespace picker, resource picker, etc.) is open, the wheel scrolls the overlay's list
 - Click on a split focuses that split and moves its cursor to the clicked row
 - Double-click (two clicks on the same data row within 500 ms (inclusive)) acts as Enter and drills into the resource
@@ -147,6 +154,11 @@ api:
 # Mouse support (off by default — preserves terminal text selection)
 mouse:
   enabled: true    # default: false
+
+# Embedded terminal panes (exec / debug sessions)
+terminal:
+  prefix: ctrl+a   # tmux-style prefix key (default)
+  scrollback: 5000 # off-screen lines kept per terminal (default)
 ```
 
 When `mouse.enabled` is `false` or unset, aku does not process mouse events and native terminal text selection works normally.
@@ -154,6 +166,8 @@ When `mouse.enabled` is `false` or unset, aku does not process mouse events and 
 When mouse support is enabled, aku captures mouse events for click focus, wheel scrolling, and double-click drill-down. Two clicks on the same row within 500 ms (inclusive) are treated as Enter. When no overlay is open, scrolling the wheel over any pane moves that pane's cursor without changing focus. When an overlay is open, the wheel scrolls the overlay's list instead.
 
 To copy text while mouse support is enabled, hold Option (iTerm2, macOS Terminal) or Shift (most Linux terminals) while dragging to bypass aku and use the terminal's native selection.
+
+Exec (`s s`) and debug (`s d` / `s p`) open live terminal panes that run concurrently in the background — split them alongside other resources, zoom to focus, and switch away while a shell stays alive. A focused live terminal owns every keystroke, so navigation goes through the tmux-style prefix (`terminal.prefix`, default `ctrl+a`): press the prefix, then a nav key (`h/j/k/l` or arrows to move focus, `z` to zoom, `x` to close the pane). To close a *live* pane use the prefix then `x` — a bare `Ctrl+w` is forwarded to the shell, not intercepted. Once a pane has exited it behaves like any other split, so `Ctrl+w` closes it directly (no prefix). Press the prefix twice to send a literal prefix byte to the shell. When a shell exits, its pane keeps an `[exited — status N]` banner and scrollback until you close it. Node-debug pods are removed on pane close and on quit; ephemeral debug containers can't be deleted (a Kubernetes limitation) and the pane notes this on exit. `terminal.scrollback` sets how many off-screen lines each terminal retains for wheel/page scrolling.
 
 `contexts.directories` lists extra directories aku scans recursively (in addition to the active `$KUBECONFIG`/`~/.kube/config`) for kubeconfig files. Every context across those files becomes switchable; files that aren't valid kubeconfigs or contain zero contexts are skipped. There is no "pinned" pane — every pane simply carries a context, and the focused pane is the source of truth (its context drives new-split defaults and the status bar). `gx` opens a fuzzy overlay picker that moves every pane sharing the focused pane's context to the chosen cluster (focused-context-group move), connecting asynchronously. `gX` opens an in-pane contexts list (a resource view) in the focused pane; Enter switches that pane's context. `oX` opens the contexts list in a new split, so you can bring up another cluster side-by-side. The contexts view has columns NAME, CLUSTER, SERVER, STATUS, and PANES, where STATUS is `●` connected, `○` offline/degraded, or `–` not yet dialed. The `gx` overlay annotates each row: contexts currently open get a `●` marker plus their pane count, and the focused pane's current context is highlighted. All context switches dial asynchronously off the Update goroutine, so the UI never freezes — even when a cluster is unreachable, the pane shows an `⚠ offline` marker instead of hanging. Pane context labels are shown only when more than one distinct context is open across panes; when every pane shares one context, labels are hidden. On switch, a pane lands on the chosen context's default namespace (the kubeconfig `namespace:` field, else `default`); if the pane's current resource type doesn't exist on the new cluster it shows an empty list and a short message in the status bar (there is no inline annotation in the list). That missing-resource check requires the cluster's API discovery to have been populated; until then the pane simply shows an empty list. Different panes can run live on different clusters at the same time, each with its own watches.
 
@@ -178,7 +192,7 @@ bindings:
         command: "goto-ingresses"
 ```
 
-Available scopes: `resources`, `details` (matches all detail views), `yaml`, `describe`, `logs`.
+Available scopes: `resources`, `details` (matches all detail views), `yaml`, `describe`, `logs`, `terminal`.
 
 For the full list of command names, see the `defaults.go` keymap source (`internal/config/defaults.go`).
 
@@ -286,9 +300,24 @@ Saved logs go to `$XDG_STATE_HOME/aku/logs/<cluster>/<ns>-<pod>-<container>-<YYY
 | `V` | Helm releases | View all (coalesced) values |
 | `x` | Pods, Secrets, Containers, Deployments, StatefulSets, DaemonSets | Resolve/show env variables (list and detail) |
 | `pf` | Pods, Containers | Port forward |
-| `ss` | Pods, Containers | Exec |
-| `sd` | Pods, Containers, Nodes | Debug container |
-| `sp` | Pods, Containers, Nodes | Privileged debug |
+| `ss` | Pods, Containers | Exec (live terminal pane) |
+| `sd` | Pods, Containers, Nodes | Debug container (live terminal pane) |
+| `sp` | Pods, Containers, Nodes | Privileged debug (live terminal pane) |
+
+### Terminal Pane
+
+A focused live terminal forwards every keystroke to the shell; use the prefix (default `Ctrl+a`) to navigate.
+
+| Key | Action |
+|-----|--------|
+| `<prefix>` then `h/j/k/l` or arrows | Move focus |
+| `<prefix>` then `z` | Zoom pane |
+| `<prefix>` then `x` | Close pane |
+| `Ctrl+w` | Close pane (exited pane only; on a live pane it is sent to the shell) |
+| `<prefix> <prefix>` | Send a literal prefix byte to the shell |
+| `<prefix>` then `PgUp` / `PgDn` | Scroll scrollback (an exited pane also accepts bare `PgUp` / `PgDn`) |
+
+The prefix key is configurable via `terminal.prefix` in `config.yaml`.
 
 ## Name
 

@@ -2946,7 +2946,7 @@ func TestCloseSplit_ReleasesLastReferencedCluster(t *testing.T) {
 
 	// Close the staging pane. SyncRefs should drive staging to refcount 0 and the
 	// Manager should tear it down + remove it from the map.
-	app = app.closeFocusedSplit()
+	app, _ = app.closeFocusedSplit()
 
 	if app.layout.SplitCount() != before-1 {
 		t.Fatalf("expected %d splits after close, got %d", before-1, app.layout.SplitCount())
@@ -2986,7 +2986,7 @@ func TestCloseSplit_SharedReferencedClusterNotTornDown(t *testing.T) {
 
 	// Close the focused (second) staging pane. refcount drops 2 -> 1; staging must
 	// remain because pane 0 still references it.
-	app = app.closeFocusedSplit()
+	app, _ = app.closeFocusedSplit()
 
 	if _, ok := mgr.Get("staging"); !ok {
 		t.Fatalf("expected staging cluster to survive: another referencing pane still uses it")
@@ -3001,7 +3001,7 @@ func TestCloseSplit_SharedReferencedClusterNotTornDown(t *testing.T) {
 			break
 		}
 	}
-	app = app.closeFocusedSplit()
+	app, _ = app.closeFocusedSplit()
 	if _, ok := mgr.Get("staging"); ok {
 		t.Fatalf("expected staging cluster torn down after closing its last referencing pane")
 	}
@@ -3023,7 +3023,7 @@ func TestCloseSplit_StillReferencedContextSurvives(t *testing.T) {
 	app.layout.FocusSplitAt(app.layout.SplitCount() - 1)
 	before := app.layout.SplitCount()
 
-	app = app.closeFocusedSplit()
+	app, _ = app.closeFocusedSplit()
 
 	if app.layout.SplitCount() != before-1 {
 		t.Fatalf("expected %d splits after close, got %d", before-1, app.layout.SplitCount())

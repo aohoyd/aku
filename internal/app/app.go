@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
@@ -14,6 +15,7 @@ import (
 	"github.com/aohoyd/aku/internal/config"
 	"github.com/aohoyd/aku/internal/helm"
 	"github.com/aohoyd/aku/internal/k8s"
+	"github.com/aohoyd/aku/internal/k8s/session"
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/plugin"
@@ -64,6 +66,22 @@ type pendingDebugAction struct {
 	namespace     string   // namespace (pod/container mode)
 	image         string   // debug image
 	command       []string // debug command
+}
+
+// terminalMeta records cleanup metadata for an embedded terminal session,
+// keyed by session id in App.termCleanup.
+//
+//   - ephemeral marks a pod-debug (ephemeral container) session. Ephemeral
+//     containers cannot be removed from a pod (a k8s limitation), so close/exit
+//     only surfaces a one-line note rather than deleting anything.
+//   - nodeDebug marks a node-debug session whose created pod (podName/namespace
+//     on client) must be deleted on close and on quit (best-effort).
+type terminalMeta struct {
+	ephemeral bool
+	nodeDebug bool
+	client    *k8s.Client
+	podName   string
+	namespace string
 }
 
 // App is the root Bubbletea model.
@@ -138,6 +156,32 @@ type App struct {
 	// Port-forward
 	pfRegistry        *portforward.Registry
 	pfHandles         map[string]msgs.PortForwardHandle
+
+	// Embedded terminals. terminals maps a session id to its live background
+	// SPDY session; the matching *ui.TerminalPane lives in layout.splits (the
+	// single source of truth for panes, looked up via layout.TerminalPaneByID).
+	// termSeq generates unique session ids.
+	terminals map[string]*session.Terminal
+	termSeq   uint64
+
+	// attachExecutorFn builds the SPDY executor a ready debug session attaches
+	// to. It is a seam: production wires it to k8s.NewAttachExecutor; tests
+	// substitute a fake so the handleDebugReady success/error paths can be
+	// exercised without a real cluster Config. Never nil after New.
+	attachExecutorFn func(client *k8s.Client, podName, containerName, namespace string) (session.Executor, error)
+
+	// execExecutorFn builds the SPDY executor an exec terminal pane streams
+	// through. Like attachExecutorFn it is a seam: production wires it to
+	// k8s.NewExecExecutor; tests substitute a fake so openExecTerminal can be
+	// driven end-to-end without a real cluster Config. Never nil after New.
+	execExecutorFn func(client *k8s.Client, podName, containerName, namespace string, command []string) (session.Executor, error)
+
+	// termCleanup carries per-terminal lifecycle metadata needed to clean up
+	// remote resources when the pane closes or the app quits. Keyed by the same
+	// session id as terminals. Exec/pod-debug entries are mostly informational
+	// (ephemeral set); node-debug entries carry the created pod so it can be
+	// deleted. Entries are removed alongside the session in closeTerminalSession.
+	termCleanup map[string]terminalMeta
 	config            *config.Config
 	pendingRun        *config.RunConfig            // external command waiting for confirm
 	pendingDelete     []*unstructured.Unstructured // delete targets (always-list) waiting for confirm
@@ -227,6 +271,8 @@ func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, pfRegi
 		chartResolver:       chartResolver,
 		pfRegistry:          pfRegistry,
 		pfHandles:           make(map[string]msgs.PortForwardHandle),
+		terminals:           make(map[string]*session.Terminal),
+		termCleanup:         make(map[string]terminalMeta),
 		portForwardOverlay:  ui.NewPortForwardOverlay(40, 20),
 		setImageOverlay:     ui.NewSetImageOverlay(40, 20),
 		helmRollbackOverlay: ui.NewHelmRollbackOverlay(40, 20),
@@ -239,6 +285,15 @@ func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, pfRegi
 		now:                 time.Now,
 		lastClickRow:        -1,
 		lastClickSplit:      -1,
+	}
+
+	// Default the attach-executor seam to the real SPDY factory. Tests override
+	// a.attachExecutorFn to drive handleDebugReady without a live cluster.
+	a.attachExecutorFn = func(client *k8s.Client, podName, containerName, namespace string) (session.Executor, error) {
+		return k8s.NewAttachExecutor(client, podName, containerName, namespace)
+	}
+	a.execExecutorFn = func(client *k8s.Client, podName, containerName, namespace string, command []string) (session.Executor, error) {
+		return k8s.NewExecExecutor(client, podName, containerName, namespace, command)
 	}
 
 	if initialOrientation == layout.OrientationHorizontal {
@@ -440,11 +495,28 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.activeOverlay == overlayConfirm {
 			a.confirmDialog.SetWidth(msg.Width)
 		}
+		a.syncTerminalSizes()
 		return a, nil
 
 	case tea.KeyPressMsg:
-		// Ctrl-c always quits immediately
+		// Terminal interception: when a live (non-exited) terminal pane is
+		// focused and no overlay is open, the pane's prefix input machine owns
+		// every key — including ctrl+c, which must reach the shell rather than
+		// quit the app (the prefix is the escape hatch). An exited terminal pane
+		// is a normal closeable split and falls through to the trie. This is
+		// placed before the global ctrl+c/ctrl+w handling on purpose.
+		if a.activeOverlay == overlayNone {
+			if tp, ok := a.layout.FocusedPane().(*ui.TerminalPane); ok && !tp.Exited() {
+				if handled, model, cmd := a.routeTerminalKey(tp, msg); handled {
+					return model, cmd
+				}
+			}
+		}
+
+		// Ctrl-c always quits immediately. Sweep terminal sessions / node-debug
+		// pods first (best-effort, bounded) so quit does not leak remote state.
 		if msg.String() == "ctrl+c" {
+			a.shutdownTerminals()
 			return a, tea.Quit
 		}
 
@@ -935,6 +1007,38 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.logCh = msg.Ch
 		return a, readLogLine(msg.Ch, msg.Gen)
 
+	case msgs.TermBytesMsg:
+		// Feed shell stdout into the emulator and reschedule the next read.
+		// A missing session/pane (closed between dispatch and arrival) is a
+		// no-op: drop the bytes and do not reschedule.
+		sess, ok := a.terminals[msg.ID]
+		if !ok {
+			return a, nil
+		}
+		if tp, found := a.layout.TerminalPaneByID(msg.ID); found {
+			_, _ = tp.Write(msg.Data)
+		}
+		return a, readTermBytes(sess)
+
+	case msgs.TermExitMsg:
+		// The session ended: freeze the pane (it becomes a normal closeable
+		// split) and stop pumping. The session stays in the registry until the
+		// pane is closed so a late lookup still resolves; closing removes both.
+		if tp, found := a.layout.TerminalPaneByID(msg.ID); found {
+			tp.MarkExited(msg.Code)
+			// For an ephemeral pod-debug session, embed the "container can't be
+			// removed" note in the pane's [exited] banner. Unlike the transient
+			// status-bar flash, it persists with the frozen pane so the user still
+			// sees it after the exit.
+			if note := a.ephemeralCloseNote(msg.ID); note != "" {
+				tp.SetExitNote(note)
+			}
+		}
+		return a, nil
+
+	case msgs.DebugReadyMsg:
+		return a.handleDebugReady(msg)
+
 	case msgs.LogDebounceFiredMsg:
 		if msg.Seq != a.logDebounceSeq {
 			return a, nil
@@ -1055,6 +1159,89 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// routeTerminalKey feeds a key to the focused terminal pane's input machine and
+// translates the result into app actions. It returns handled=false (and the
+// app unchanged) when the pane did not consume the key, so the caller falls
+// through to the normal trie. When handled, it returns the updated model and
+// any command.
+//
+// Two outputs from HandleKey are acted on:
+//   - toShell bytes are written to the pane's session (best-effort; a write to
+//     a torn-down session is ignored).
+//   - a PaneCommand is translated to the same layout actions the app already
+//     exposes: Focus{Left,Up}→FocusPrev, Focus{Right,Down}→FocusNext,
+//     Zoom→ToggleZoomSplit, Close→closeFocusedTerminal,
+//     Scroll{Up,Down}→pane scrollback by one page.
+func (a App) routeTerminalKey(tp *ui.TerminalPane, msg tea.KeyPressMsg) (handled bool, model tea.Model, cmd tea.Cmd) {
+	consumed, toShell, paneCmd := tp.HandleKey(msg, a.config.TerminalPrefix())
+	if !consumed {
+		return false, a, nil
+	}
+
+	if toShell != nil {
+		if sess, ok := a.terminals[tp.ID()]; ok {
+			_, _ = sess.Write(toShell)
+		}
+	}
+
+	var outCmd tea.Cmd
+	switch paneCmd {
+	case ui.PaneCmdFocusLeft, ui.PaneCmdFocusUp:
+		a.layout.FocusPrev()
+		a.syncTerminalSizes()
+	case ui.PaneCmdFocusRight, ui.PaneCmdFocusDown:
+		a.layout.FocusNext()
+		a.syncTerminalSizes()
+	case ui.PaneCmdZoom:
+		a.layout.ToggleZoomSplit()
+		a.syncTerminalSizes()
+	case ui.PaneCmdClose:
+		a, outCmd = a.closeFocusedTerminal()
+	case ui.PaneCmdScrollUp:
+		tp.ScrollUp(terminalScrollPageLines(tp))
+	case ui.PaneCmdScrollDown:
+		tp.ScrollDown(terminalScrollPageLines(tp))
+	case ui.PaneCmdNone:
+		// Key consumed by the shell or a no-op nav key; nothing to do.
+	}
+
+	return true, a, outCmd
+}
+
+// terminalScrollPageLines is the number of lines a prefix-pgup/pgdown scrolls a
+// terminal pane's scrollback — one near-full page (the pane's inner content
+// height minus a one-line overlap so the user keeps a row of context). Clamped
+// to at least 1.
+func terminalScrollPageLines(tp *ui.TerminalPane) int {
+	_, ih := tp.InnerSize()
+	n := ih - 1
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// closeFocusedTerminal closes the focused terminal pane via the shared
+// close-split path (which is terminal-aware: it tears down the SPDY session,
+// drops it from the registry, and removes the pane). Closing the last remaining
+// split is a no-op here — CloseCurrentSplit signals quit without removing it, so
+// the layout is never left empty; the explicit ctrl+w/q path owns the quit.
+func (a App) closeFocusedTerminal() (App, tea.Cmd) {
+	if a.layout.SplitCount() <= 1 {
+		// Still tear down the session so a dangling SPDY stream does not leak,
+		// but leave the pane in place (quit is owned by the ctrl+w/q path).
+		if tp, ok := a.layout.FocusedPane().(*ui.TerminalPane); ok {
+			note := a.ephemeralCloseNote(tp.ID())
+			a.closeTerminalSession(tp.ID())
+			if note != "" {
+				return a, a.statusBar.SetError(note)
+			}
+		}
+		return a, nil
+	}
+	return a.closeFocusedSplit()
+}
+
 func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
@@ -1094,6 +1281,10 @@ func (a App) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // doubleClickWindow is the maximum elapsed time between two clicks for them
 // to be considered a double-click. Hardcoded per the mouse-support plan.
 const doubleClickWindow = 500 * time.Millisecond
+
+// terminalWheelLines is the number of scrollback lines a single mouse-wheel
+// notch scrolls a terminal pane (a common terminal default).
+const terminalWheelLines = 3
 
 // handleMouseClick routes a left-click event to the pane under the cursor,
 // moving focus (and the split's row cursor when applicable). Non-left buttons
@@ -1236,7 +1427,18 @@ func (a App) handleMouseWheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	}
 	switch rect.Kind {
 	case layout.PaneSplit:
-		if split := a.layout.SplitAt(rect.SplitIdx); split != nil {
+		// Terminal panes and resource panes both live in the splits region and
+		// both report PaneSplit. A terminal pane scrolls its scrollback buffer;
+		// a resource pane moves its row cursor. SplitAt narrows to resource panes
+		// (nil for terminals), so dispatch on the raw pane kind here.
+		if tp, ok := a.layout.PaneAtIdx(rect.SplitIdx).(*ui.TerminalPane); ok {
+			switch msg.Button {
+			case tea.MouseWheelUp:
+				tp.ScrollUp(terminalWheelLines)
+			case tea.MouseWheelDown:
+				tp.ScrollDown(terminalWheelLines)
+			}
+		} else if split := a.layout.SplitAt(rect.SplitIdx); split != nil {
 			split.ScrollWheel(msg.Button)
 		}
 	case layout.PaneDetail:
@@ -1511,6 +1713,15 @@ func (a App) syncInlineSearch() {
 }
 
 // currentContext returns the scope names for the current focus state.
+//
+// A focused terminal pane (resource focus, not the detail panel) reports the
+// "terminal" context. This drives the statusbar/help hints and the keybinding
+// trie for that pane. Note the trie only governs an EXITED terminal pane: a
+// live (non-exited) terminal's keys are intercepted earlier by routeTerminalKey
+// (see Update's KeyPressMsg branch) and never reach the trie, so the two
+// mechanisms cannot double-handle a key. The terminal trie's nav bindings
+// (focus moves, zoom, close, scroll) intentionally mirror the prefix-machine's
+// nav commands so an exited pane stays navigable with the same intents.
 func (a App) currentContext() (componentType, resourceName string) {
 	componentType = "resources"
 	if a.layout.FocusedDetails() {
@@ -1526,6 +1737,13 @@ func (a App) currentContext() (componentType, resourceName string) {
 				componentType = "details"
 			}
 		}
+		return
+	}
+	// Resource focus: a terminal pane reports the "terminal" context (no
+	// resource name); a resource pane reports "resources" + its plugin name.
+	if _, ok := a.layout.FocusedPane().(*ui.TerminalPane); ok {
+		componentType = "terminal"
+		return
 	}
 	if focused := a.layout.FocusedSplit(); focused != nil {
 		resourceName = focused.Plugin().Name()
@@ -1678,10 +1896,14 @@ func (a App) toggleZoomDetailAndSync() App {
 	return a.syncIndicators()
 }
 
-// toggleZoomSplitAndSync toggles split zoom and updates the indicator.
+// toggleZoomSplitAndSync toggles split zoom and updates the indicator. Zooming a
+// split changes every pane's render geometry, so push the new sizes to any live
+// terminal sessions too.
 func (a App) toggleZoomSplitAndSync() App {
 	a.layout.ToggleZoomSplit()
-	return a.syncIndicators()
+	a = a.syncIndicators()
+	a.syncTerminalSizes()
+	return a
 }
 
 func (a App) View() tea.View {
@@ -1716,6 +1938,57 @@ func (a App) View() tea.View {
 		Content:   main,
 		AltScreen: true,
 		MouseMode: mouseMode(a.config.Mouse.Enabled),
+		Cursor:    a.terminalCursor(),
+	}
+}
+
+// terminalCursor returns the real terminal cursor positioned at the focused
+// terminal pane's live cursor, or nil when no cursor should be shown (an overlay
+// owns input, focus is on a non-terminal pane, the pane has exited, or it is
+// scrolled into history). The emulator reports an inner-grid (x, y); the pane's
+// cached rect gives the outer top-left, and the single border cell adds 1 on each
+// axis. paneRects share the frame's coordinate space (the body sits at the top-
+// left and the status bar is appended below), so these coords are what
+// tea.View.Cursor expects.
+func (a App) terminalCursor() *tea.Cursor {
+	if a.activeOverlay != overlayNone {
+		return nil
+	}
+	tp, ok := a.layout.FocusedPane().(*ui.TerminalPane)
+	if !ok {
+		return nil
+	}
+	cx, cy, visible := tp.CursorPos()
+	if !visible {
+		return nil
+	}
+	rect, ok := a.layout.FocusedSplitRect()
+	if !ok || rect.W <= 2 || rect.H <= 2 {
+		return nil
+	}
+	// Clamp into the inner content box so a cursor at the wrap column can't land
+	// on or past the border.
+	if cx > rect.W-2 {
+		cx = rect.W - 2
+	}
+	if cy > rect.H-2 {
+		cy = rect.H - 2
+	}
+	cur := tea.NewCursor(rect.X+1+cx, rect.Y+1+cy)
+	cur.Shape = cursorShape(tp.CursorShape())
+	return cur
+}
+
+// cursorShape maps the ui-package cursor shape (tracked from the terminal's
+// DECSCUSR state) to the bubbletea cursor shape.
+func cursorShape(s ui.CursorShape) tea.CursorShape {
+	switch s {
+	case ui.CursorShapeUnderline:
+		return tea.CursorUnderline
+	case ui.CursorShapeBar:
+		return tea.CursorBar
+	default:
+		return tea.CursorBlock
 	}
 }
 
@@ -2053,6 +2326,259 @@ func readLogLine(ch <-chan string, gen uint64) tea.Cmd {
 			return msgs.LogStreamEndedMsg{Gen: gen}
 		}
 		return msgs.LogLineMsg{Line: line, Gen: gen}
+	}
+}
+
+// readTermBytes blocks on one chunk from the session's Out channel and wraps
+// the result in a message, mirroring readLogLine. A closed channel (the
+// session's stream goroutine finished) yields a TermExitMsg carrying the final
+// status; otherwise a TermBytesMsg carries the chunk. The session id is read
+// once up front so the closure does not retain the *Terminal beyond the read.
+func readTermBytes(sess *session.Terminal) tea.Cmd {
+	id := sess.ID()
+	out := sess.Out()
+	return func() tea.Msg {
+		chunk, ok := <-out
+		if !ok {
+			return msgs.TermExitMsg{ID: id, Code: sess.ExitCode(), Err: sess.Err()}
+		}
+		return msgs.TermBytesMsg{ID: id, Data: chunk}
+	}
+}
+
+// syncTerminalSizes pushes each live terminal pane's current inner (emulator)
+// size to its session so the remote shell reflows to match what is rendered.
+// recalcSizes has already set the pane sizes via SetSize; this only forwards
+// them to the sessions. Safe to call whenever layout geometry may have changed
+// (window resize, add/close split, zoom toggle). Sessions with no matching pane
+// (or zero-sized hidden panes) are skipped to avoid sending a degenerate size.
+func (a App) syncTerminalSizes() {
+	for id, sess := range a.terminals {
+		w, h, ok := a.layout.TerminalPaneInnerSize(id)
+		if !ok || w <= 0 || h <= 0 {
+			continue
+		}
+		sess.Resize(w, h)
+	}
+}
+
+// closeTerminalSession tears down a terminal session and removes it from the
+// registry. The pane itself is removed from the layout by the caller (the
+// shared closeFocusedSplit path).
+//
+// Lifecycle cleanup, keyed off the session's terminalMeta:
+//   - node-debug: the created debug pod is deleted best-effort in a goroutine
+//     with a bounded context, so a slow API server never blocks the UI.
+//   - ephemeral pod-debug: ephemeral containers cannot be removed from a pod, so
+//     there is nothing to delete; the user-facing note is surfaced separately at
+//     the call site (close path) since this helper has no App-return.
+//
+// The value receiver is intentional: a.terminals/a.termCleanup are maps, which
+// are reference types, so delete() mutates the shared backing map even though
+// App is copied by value. No App-return / struct pointer is needed.
+func (a App) closeTerminalSession(id string) {
+	if sess, ok := a.terminals[id]; ok {
+		sess.Close()
+		delete(a.terminals, id)
+	}
+	if meta, ok := a.termCleanup[id]; ok {
+		if meta.nodeDebug && meta.client != nil {
+			client, pod, ns := meta.client, meta.podName, meta.namespace
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = k8s.DeleteNodeDebugPod(ctx, client, pod, ns)
+			}()
+		}
+		delete(a.termCleanup, id)
+	}
+}
+
+// handleDebugReady binds the result of an async debug pre-flight to the
+// placeholder pane that openDebugTerminal/openNodeDebugTerminal already put on
+// screen (matched by msg.ID).
+//
+//   - On error: surface it on the status bar and tear down the placeholder pane
+//     and its cleanup metadata. For node-debug, the pre-flight already best-effort
+//     deletes any half-created pod, so there is nothing left to delete here.
+//   - On success: build the attach executor, start the background session, update
+//     the cleanup metadata (node-debug pod name/namespace from the pre-flight),
+//     push the current size, and kick off the byte-pump.
+//
+// If the placeholder pane is gone (user closed it during the pre-flight), the
+// result is dropped; for node-debug the pod is deleted so it does not leak.
+func (a App) handleDebugReady(msg msgs.DebugReadyMsg) (tea.Model, tea.Cmd) {
+	tp, found := a.layout.TerminalPaneByID(msg.ID)
+
+	if msg.Err != nil {
+		cmd := a.statusBar.SetError("debug: " + msg.Err.Error())
+		// Remove the placeholder pane (if still present) and its metadata.
+		delete(a.termCleanup, msg.ID)
+		if found {
+			a = a.removeTerminalPane(tp)
+		}
+		return a, cmd
+	}
+
+	// The user may have closed the placeholder pane while the pre-flight ran.
+	if !found {
+		if msg.NodeMode {
+			if meta, ok := a.termCleanup[msg.ID]; ok && meta.client != nil {
+				client := meta.client
+				pod, ns := msg.PodName, msg.Namespace
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+					defer cancel()
+					_ = k8s.DeleteNodeDebugPod(ctx, client, pod, ns)
+				}()
+			}
+		}
+		delete(a.termCleanup, msg.ID)
+		return a, nil
+	}
+
+	meta := a.termCleanup[msg.ID]
+	exec, err := a.attachExecutorFn(meta.client, msg.PodName, msg.ContainerName, msg.Namespace)
+	if err != nil {
+		cmd := a.statusBar.SetError("debug: " + err.Error())
+		// The attach failed but the pre-flight already created the node-debug
+		// pod; delete it best-effort so it does not leak. Read the client off
+		// the cleanup metadata BEFORE removing it.
+		if msg.NodeMode && meta.client != nil {
+			client := meta.client
+			pod, ns := msg.PodName, msg.Namespace
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = k8s.DeleteNodeDebugPod(ctx, client, pod, ns)
+			}()
+		}
+		delete(a.termCleanup, msg.ID)
+		a = a.removeTerminalPane(tp)
+		return a, cmd
+	}
+
+	// Fill in the now-known pod identity so close/quit can delete a node pod.
+	meta.podName = msg.PodName
+	meta.namespace = msg.Namespace
+	a.termCleanup[msg.ID] = meta
+
+	sess := session.Start(exec, msg.ID)
+	a.terminals[msg.ID] = sess
+	startReplyPump(tp, sess)
+
+	a.syncTerminalSizes()
+	iw, ih := tp.InnerSize()
+	sess.Resize(iw, ih)
+
+	return a, readTermBytes(sess)
+}
+
+// startReplyPump forwards the emulator's query replies (responses to DA/DSR/
+// DECRQM, etc.) back to the shell's stdin, and tears the drain down when the
+// session ends. Without this, a full-screen program (vim, less, top) that queries
+// the terminal makes vt.Emulator.Write block on its unbuffered reply pipe — and
+// since the emulator is fed on the Bubble Tea update goroutine, that hangs the
+// whole UI. The drain touches only the emulator's reply pipe, so it is safe
+// alongside Write/Render on the UI goroutine; teardown closes the reply pipe (not
+// the emulator) so it never races x/vt's unsynchronized closed flag.
+func startReplyPump(tp *ui.TerminalPane, sess *session.Terminal) {
+	go func() {
+		r := tp.ReplyReader()
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				_, _ = sess.Write(buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		<-sess.Done()
+		tp.StopReplies()
+	}()
+}
+
+// removeTerminalPane removes a terminal pane from the layout, tolerating the
+// last-split case (CloseCurrentSplit signals quit rather than emptying the
+// layout). It does not touch sessions/metadata — callers own that.
+func (a App) removeTerminalPane(tp *ui.TerminalPane) App {
+	if a.layout.FocusedPane() != tp {
+		// Focus the pane so CloseCurrentSplit removes the right one. Scan for it by
+		// identity and jump focus directly, avoiding the O(N) Blur/Focus churn of
+		// cycling FocusNext through every split.
+		for i := 0; i < a.layout.SplitCount(); i++ {
+			if a.layout.PaneAtIdx(i) == tp {
+				a.layout.FocusSplitAt(i)
+				break
+			}
+		}
+	}
+	if a.layout.SplitCount() > 1 {
+		a.layout.CloseCurrentSplit()
+	}
+	a.keyTrie.Reset()
+	a.syncTerminalSizes()
+	return a
+}
+
+// ephemeralCloseNote returns a one-line note when the terminal with id is an
+// ephemeral pod-debug session, informing the user that the ephemeral container
+// cannot be removed (a k8s limitation). It returns "" for all other terminals.
+// Callers post it via the status bar and/or the pane's exit note. Read it BEFORE
+// closeTerminalSession, which deletes the metadata entry.
+func (a App) ephemeralCloseNote(id string) string {
+	if meta, ok := a.termCleanup[id]; ok && meta.ephemeral {
+		return "debug: ephemeral container left on " + meta.podName + " (k8s cannot remove it)"
+	}
+	return ""
+}
+
+// shutdownTerminals tears down all embedded terminal sessions and best-effort
+// deletes every node-debug pod before the program exits. Bubble Tea's quit is
+// asynchronous, so this is invoked synchronously on the quit path(s) (ctrl+c and
+// the layered quit command) before returning tea.Quit.
+//
+// Tradeoff: cleanup must not hang quit if the API server is slow. Each node-pod
+// delete runs in its own goroutine under a bounded 3s context; we wait up to 3s
+// total for them to finish, then return regardless. A pod whose delete did not
+// complete in time is left to the kubelet/GC (the debug pod has RestartPolicy
+// Never and no controller, so it is harmless and short-lived). Sessions are
+// closed synchronously (Close only cancels the stream context — it is cheap).
+//
+// The value receiver is intentional: a.terminals/a.termCleanup are maps
+// (reference types), so the delete() calls below mutate the shared backing maps
+// even though App is copied by value. No App-return / struct pointer is needed.
+func (a App) shutdownTerminals() {
+	var wg sync.WaitGroup
+	for id, meta := range a.termCleanup {
+		if meta.nodeDebug && meta.client != nil && meta.podName != "" {
+			client, pod, ns := meta.client, meta.podName, meta.namespace
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = k8s.DeleteNodeDebugPod(ctx, client, pod, ns)
+			}()
+		}
+		delete(a.termCleanup, id)
+	}
+
+	for id, sess := range a.terminals {
+		sess.Close()
+		delete(a.terminals, id)
+	}
+
+	// Bounded wait so a slow API server never hangs quit.
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
 	}
 }
 

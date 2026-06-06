@@ -1,46 +1,17 @@
 package k8s
 
 import (
-	"context"
-	"io"
-	"os"
-	"os/signal"
+	"net/url"
 
-	tea "charm.land/bubbletea/v2"
-	"github.com/aohoyd/aku/internal/msgs"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
-// execCommand implements tea.ExecCommand for exec-ing into containers via SPDY.
-type execCommand struct {
-	stdin     io.Reader
-	stdout    io.Writer
-	stderr    io.Writer
-	client    *Client
-	podName   string
-	container string
-	namespace string
-	command   []string
-}
-
-func (e *execCommand) SetStdin(r io.Reader)  { e.stdin = r }
-func (e *execCommand) SetStdout(w io.Writer) { e.stdout = w }
-func (e *execCommand) SetStderr(w io.Writer) { e.stderr = w }
-
-// Run executes the exec workflow: set raw terminal and attach via SPDY exec subresource.
-func (e *execCommand) Run() error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-
-	return execContainer(ctx, e.stdin, e.stdout, e.stderr, e.client.Config, e.client.Typed, e.podName, e.container, e.namespace, e.command)
-}
-
-// execContainer builds the exec subresource URL and streams via SPDY.
-func execContainer(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, restConfig *rest.Config, typed kubernetes.Interface, podName, containerName, namespace string, command []string) error {
-	execURL := typed.CoreV1().RESTClient().Post().
+// execURL builds the /exec subresource request URL for a pod/container.
+func execURL(typed kubernetes.Interface, podName, containerName, namespace string, command []string) *url.URL {
+	return typed.CoreV1().RESTClient().Post().
 		Resource("pods").
 		Name(podName).
 		Namespace(namespace).
@@ -53,23 +24,13 @@ func execContainer(ctx context.Context, stdin io.Reader, stdout, stderr io.Write
 			Command:   command,
 		}, scheme.ParameterCodec).
 		URL()
-
-	return spdyStream(ctx, stdin, stdout, restConfig, execURL)
 }
 
-// ExecCmd returns a tea.Cmd that suspends the TUI and execs into a container via SPDY.
-func ExecCmd(client *Client, podName, containerName, namespace string, command []string) tea.Cmd {
-	ec := &execCommand{
-		client:    client,
-		podName:   podName,
-		container: containerName,
-		namespace: namespace,
-		command:   command,
-	}
-	return tea.Exec(ec, func(err error) tea.Msg {
-		if err != nil {
-			return msgs.ActionResultMsg{Err: err}
-		}
-		return msgs.ActionResultMsg{ActionID: "exec:" + podName}
-	})
+// NewExecExecutor builds a SPDY executor for exec-ing into a pod/container.
+// The returned executor satisfies the minimal interface consumed by the
+// session package and can be driven over in-memory pipes.
+func NewExecExecutor(client *Client, podName, containerName, namespace string, command []string) (remotecommand.Executor, error) {
+	reqURL := execURL(client.Typed, podName, containerName, namespace, command)
+	return remotecommand.NewSPDYExecutor(client.Config, "POST", reqURL)
 }
+

@@ -208,6 +208,83 @@ func TestContextDirectoriesNilConfig(t *testing.T) {
 	}
 }
 
+func TestTerminalPrefixDefault(t *testing.T) {
+	c := &Config{}
+	if got := c.TerminalPrefix(); got != "ctrl+a" {
+		t.Fatalf("default terminal prefix should be ctrl+a, got %q", got)
+	}
+}
+
+func TestTerminalPrefixCustom(t *testing.T) {
+	c := &Config{}
+	c.Terminal.Prefix = "ctrl+b"
+	if got := c.TerminalPrefix(); got != "ctrl+b" {
+		t.Fatalf("custom terminal prefix should be ctrl+b, got %q", got)
+	}
+}
+
+func TestTerminalScrollbackDefault(t *testing.T) {
+	c := &Config{}
+	if got := c.TerminalScrollback(); got != 5000 {
+		t.Fatalf("default terminal scrollback should be 5000, got %d", got)
+	}
+}
+
+func TestTerminalScrollbackCustom(t *testing.T) {
+	c := &Config{}
+	c.Terminal.Scrollback = 200
+	if got := c.TerminalScrollback(); got != 200 {
+		t.Fatalf("custom terminal scrollback should be 200, got %d", got)
+	}
+}
+
+func TestTerminalScrollbackNonPositive(t *testing.T) {
+	c := &Config{}
+	c.Terminal.Scrollback = -10
+	if got := c.TerminalScrollback(); got != 5000 {
+		t.Fatalf("negative terminal scrollback should fall back to 5000, got %d", got)
+	}
+}
+
+func TestLoadConfigWithTerminal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte("terminal:\n  prefix: ctrl+b\n  scrollback: 1234\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.TerminalPrefix(); got != "ctrl+b" {
+		t.Fatalf("loaded terminal prefix = %q, want ctrl+b", got)
+	}
+	if got := cfg.TerminalScrollback(); got != 1234 {
+		t.Fatalf("loaded terminal scrollback = %d, want 1234", got)
+	}
+}
+
+func TestLoadConfigTerminalOmittedUsesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// A config without a terminal block must yield the defaults.
+	data := []byte("mouse:\n  enabled: true\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.TerminalPrefix(); got != "ctrl+a" {
+		t.Fatalf("omitted terminal prefix should default to ctrl+a, got %q", got)
+	}
+	if got := cfg.TerminalScrollback(); got != 5000 {
+		t.Fatalf("omitted terminal scrollback should default to 5000, got %d", got)
+	}
+}
+
 func TestLoadConfigWithCharts(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

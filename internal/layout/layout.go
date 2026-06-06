@@ -60,7 +60,11 @@ type PaneRect struct {
 
 // Layout manages the left panel splits and optional right panel.
 type Layout struct {
-	splits       []ui.ResourceList
+	// splits is heterogeneous: each element is a ui.Pane, concretely either a
+	// *ui.ResourceList or a *ui.TerminalPane (both live in this slice). Panes are
+	// stored as pointers so in-place mutation works and the typed accessors can
+	// hand back a live *ui.ResourceList / *ui.TerminalPane.
+	splits       []ui.Pane
 	focusIdx     int
 	rightPanel   *ui.DetailView
 	rightVisible bool
@@ -105,14 +109,70 @@ func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace, context string) {
 	}
 
 	// Insert the new split directly after the focused pane (not at the end).
+	// Stored as a pointer so it is a stable ui.Pane element that can be mutated
+	// in place via the typed accessors.
 	insertIdx := 0
 	if len(l.splits) > 0 {
 		insertIdx = l.focusIdx + 1
 	}
-	l.splits = slices.Insert(l.splits, insertIdx, rl)
+	l.splits = slices.Insert(l.splits, insertIdx, ui.Pane(&rl))
 	l.focusIdx = insertIdx
 	l.splits[l.focusIdx].Focus()
 	l.recalcSizes()
+}
+
+// AddTerminalSplit inserts an already-constructed terminal pane directly after
+// the focused pane (mirroring AddSplit's insert-adjacent + focus + recalc
+// behavior), blurs the others, focuses the new pane, and recomputes sizes. The
+// pane is stored as a ui.Pane element in the heterogeneous splits slice. Sizes
+// are corrected by recalcSizes; the App pushes the resulting inner size to the
+// session via syncTerminalSizes.
+func (l *Layout) AddTerminalSplit(p ui.Pane) {
+	for i := range l.splits {
+		l.splits[i].Blur()
+	}
+	insertIdx := 0
+	if len(l.splits) > 0 {
+		insertIdx = l.focusIdx + 1
+	}
+	l.splits = slices.Insert(l.splits, insertIdx, p)
+	l.focusIdx = insertIdx
+	l.splits[l.focusIdx].Focus()
+	l.recalcSizes()
+}
+
+// FocusedPane returns the focused pane as a ui.Pane, or nil when there are no
+// splits. Unlike FocusedSplit it does not narrow to a resource pane, so callers
+// can detect a *ui.TerminalPane via a type assertion.
+func (l *Layout) FocusedPane() ui.Pane {
+	if len(l.splits) == 0 {
+		return nil
+	}
+	return l.splits[l.focusIdx]
+}
+
+// TerminalPaneByID scans the splits for a terminal pane whose ID matches id.
+// The layout's splits slice is the single source of truth for live panes, so a
+// pane that has been closed (removed from splits) is correctly not found.
+func (l *Layout) TerminalPaneByID(id string) (*ui.TerminalPane, bool) {
+	for i := range l.splits {
+		if tp, ok := l.splits[i].(*ui.TerminalPane); ok && tp.ID() == id {
+			return tp, true
+		}
+	}
+	return nil, false
+}
+
+// TerminalPaneInnerSize returns the inner (emulator content) size of the
+// terminal pane with the given id, derived from the size the layout assigned it
+// during recalcSizes. ok is false when no such terminal pane exists.
+func (l *Layout) TerminalPaneInnerSize(id string) (w, h int, ok bool) {
+	tp, found := l.TerminalPaneByID(id)
+	if !found {
+		return 0, 0, false
+	}
+	iw, ih := tp.InnerSize()
+	return iw, ih, true
 }
 
 // CloseCurrentSplit removes the focused split. Returns true if it was the last one (app should quit).
@@ -215,27 +275,56 @@ func (l *Layout) MoveFocusedSplit(delta int) {
 	if l.focusTarget == FocusTargetDetails {
 		l.ActiveDetailPanel().Blur()
 		l.focusTarget = FocusTargetResources
-		l.splits[l.focusIdx].FocusBorder()
+		if rl, ok := l.splits[l.focusIdx].(*ui.ResourceList); ok {
+			rl.FocusBorder()
+		}
 	}
 	l.splits[l.focusIdx], l.splits[target] = l.splits[target], l.splits[l.focusIdx]
 	l.focusIdx = target
 	l.recalcSizes()
 }
 
-// FocusedSplit returns a pointer to the focused split's ResourceList.
+// FocusedSplit returns a pointer to the focused split's ResourceList, or nil if
+// there are no splits or the focused pane is not a resource pane (e.g. a
+// terminal pane). Resource-only operations are gated on a non-nil result.
 func (l *Layout) FocusedSplit() *ui.ResourceList {
 	if len(l.splits) == 0 {
 		return nil
 	}
-	return &l.splits[l.focusIdx]
+	rl, _ := l.splits[l.focusIdx].(*ui.ResourceList)
+	return rl
 }
 
-// SplitAt returns a pointer to the split at the given index.
+// FocusedResourceList returns the focused pane as a *ui.ResourceList along with
+// ok=true when the focused pane is a resource pane. Returns (nil, false) when
+// there are no splits or the focused pane is some other kind (e.g. terminal).
+func (l *Layout) FocusedResourceList() (*ui.ResourceList, bool) {
+	if len(l.splits) == 0 {
+		return nil, false
+	}
+	rl, ok := l.splits[l.focusIdx].(*ui.ResourceList)
+	return rl, ok
+}
+
+// SplitAt returns a pointer to the split at the given index, or nil when the
+// index is out of range or the pane is not a resource pane.
 func (l *Layout) SplitAt(idx int) *ui.ResourceList {
 	if idx < 0 || idx >= len(l.splits) {
 		return nil
 	}
-	return &l.splits[idx]
+	rl, _ := l.splits[idx].(*ui.ResourceList)
+	return rl
+}
+
+// PaneAtIdx returns the raw ui.Pane at the given split index (any kind:
+// resource or terminal), or nil when the index is out of range. Unlike SplitAt
+// it does not narrow to a resource pane, so callers can type-assert a
+// *ui.TerminalPane.
+func (l *Layout) PaneAtIdx(idx int) ui.Pane {
+	if idx < 0 || idx >= len(l.splits) {
+		return nil
+	}
+	return l.splits[idx]
 }
 
 // ShowRightPanel makes the right panel visible.
@@ -302,7 +391,9 @@ func (l *Layout) FocusDetails() {
 		return
 	}
 	l.focusTarget = FocusTargetDetails
-	l.splits[l.focusIdx].BlurBorder()
+	if rl, ok := l.splits[l.focusIdx].(*ui.ResourceList); ok {
+		rl.BlurBorder()
+	}
 	l.ActiveDetailPanel().Focus()
 }
 
@@ -311,7 +402,9 @@ func (l *Layout) FocusResources() {
 	l.focusTarget = FocusTargetResources
 	l.ActiveDetailPanel().Blur()
 	if len(l.splits) > 0 {
-		l.splits[l.focusIdx].FocusBorder()
+		if rl, ok := l.splits[l.focusIdx].(*ui.ResourceList); ok {
+			rl.FocusBorder()
+		}
 	}
 }
 
@@ -393,13 +486,19 @@ func (l *Layout) Resize(width, height int) {
 	l.recalcSizes()
 }
 
-// UpdateFocusedSplit sends a message to the focused split and returns its command.
+// UpdateFocusedSplit sends a message to the focused split and returns its
+// command. No-op (returns nil) when there are no splits or the focused pane is
+// not a resource pane.
 func (l *Layout) UpdateFocusedSplit(msg tea.Msg) tea.Cmd {
 	if len(l.splits) == 0 {
 		return nil
 	}
-	updated, cmd := l.splits[l.focusIdx].Update(msg)
-	l.splits[l.focusIdx] = updated
+	rl, ok := l.splits[l.focusIdx].(*ui.ResourceList)
+	if !ok {
+		return nil
+	}
+	updated, cmd := rl.Update(msg)
+	*rl = updated
 	return cmd
 }
 
@@ -431,16 +530,20 @@ func (l *Layout) UpdateLogView(msg tea.Msg) tea.Cmd {
 // should not occur in practice) matches nothing and is left untouched.
 func (l *Layout) UpdateSplitObjects(p plugin.ResourcePlugin, namespace, ctxName string, objs []*unstructured.Unstructured) {
 	for i := range l.splits {
-		if l.splits[i].InDrillDown() {
+		rl, ok := l.splits[i].(*ui.ResourceList)
+		if !ok {
 			continue
 		}
-		if l.splits[i].Plugin().GVR() != p.GVR() || l.splits[i].EffectiveNamespace() != namespace {
+		if rl.InDrillDown() {
 			continue
 		}
-		if l.splits[i].Context() != ctxName {
+		if rl.Plugin().GVR() != p.GVR() || rl.EffectiveNamespace() != namespace {
 			continue
 		}
-		l.splits[i].SetObjects(objs)
+		if rl.Context() != ctxName {
+			continue
+		}
+		rl.SetObjects(objs)
 	}
 }
 
@@ -502,6 +605,19 @@ func (l Layout) View() string {
 func (l *Layout) PaneAt(x, y int) (PaneRect, bool) {
 	for _, r := range l.paneRects {
 		if x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H {
+			return r, true
+		}
+	}
+	return PaneRect{}, false
+}
+
+// FocusedSplitRect returns the cached screen rect of the focused split pane
+// (resource or terminal — both are stored with Kind == PaneSplit), or
+// (PaneRect{}, false) when there are no splits. X,Y is the outer border-corner
+// top-left; the inner content begins one cell in on each axis.
+func (l *Layout) FocusedSplitRect() (PaneRect, bool) {
+	for _, r := range l.paneRects {
+		if r.Kind == PaneSplit && r.SplitIdx == l.focusIdx {
 			return r, true
 		}
 	}
@@ -714,6 +830,14 @@ func (l *Layout) panelSizes() (int, int) {
 	leftWidth := int(float64(l.width) * leftPanelRatio)
 	rightWidth := l.width - leftWidth
 	return leftWidth, rightWidth
+}
+
+// SplitSeedSize returns a reasonable outer size to seed a freshly-created pane
+// with before it is inserted. recalcSizes corrects the size immediately on
+// insert; this only avoids constructing the pane at a degenerate 0×0. It mirrors
+// splitDimensions for one additional split.
+func (l *Layout) SplitSeedSize() (int, int) {
+	return l.splitDimensions(l.SplitCount() + 1)
 }
 
 // splitDimensions returns the width and height for a new split given the count.

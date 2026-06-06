@@ -207,6 +207,36 @@ type LogStreamEndedMsg struct {
 	Gen uint64
 }
 
+// TermBytesMsg delivers a chunk of shell stdout from a terminal session's
+// background read loop. ID identifies the session/pane the bytes belong to.
+type TermBytesMsg struct {
+	ID   string
+	Data []byte
+}
+
+// TermExitMsg signals a terminal session ended (shell exit, stream error, or
+// cancellation). ID identifies the session/pane; Code is the shell exit code
+// and Err the terminal error (nil on clean exit).
+type TermExitMsg struct {
+	ID   string
+	Code int
+	Err  error
+}
+
+// DebugReadyMsg reports the result of the async debug pre-flight (creating the
+// ephemeral container / node-debug pod and waiting for it to be Running). ID is
+// the pane/session id allocated up front, so the handler can bind the attach
+// session to the placeholder pane already on screen. On Err, the handler
+// surfaces the error and tears the placeholder pane down.
+type DebugReadyMsg struct {
+	ID            string
+	PodName       string
+	Namespace     string
+	ContainerName string
+	NodeMode      bool
+	Err           error
+}
+
 // LogContainerSelectedMsg signals a container was chosen from the picker.
 type LogContainerSelectedMsg struct {
 	Container string

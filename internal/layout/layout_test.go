@@ -64,6 +64,35 @@ func TestLayoutAddAndRemoveSplit(t *testing.T) {
 	}
 }
 
+func TestLayoutFocusedSplitRect(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+
+	// No splits: no rect.
+	if _, ok := l.FocusedSplitRect(); ok {
+		t.Fatal("expected no rect when there are no splits")
+	}
+
+	l.AddSplit(podsPlugin(), "default", "")
+	l.AddSplit(svcsPlugin(), "default", "")
+
+	rect, ok := l.FocusedSplitRect()
+	if !ok {
+		t.Fatal("expected a focused split rect")
+	}
+	if rect.Kind != PaneSplit {
+		t.Fatalf("rect.Kind = %v, want PaneSplit", rect.Kind)
+	}
+	if rect.SplitIdx != l.FocusIndex() {
+		t.Fatalf("rect.SplitIdx = %d, want focus index %d", rect.SplitIdx, l.FocusIndex())
+	}
+	if rect.W <= 0 || rect.H <= 0 {
+		t.Fatalf("rect has non-positive size: %+v", rect)
+	}
+	if rect.X < 0 || rect.Y < 0 || rect.X+rect.W > 80 || rect.Y+rect.H > 26 {
+		t.Fatalf("rect out of bounds for 80x26: %+v", rect)
+	}
+}
+
 func TestLayoutCloseLastSplit(t *testing.T) {
 	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default", "")
@@ -215,6 +244,57 @@ func TestLayoutFocusedSplitNil(t *testing.T) {
 	l := New(80, 26, 1000, "15m", 900)
 	if l.FocusedSplit() != nil {
 		t.Fatal("FocusedSplit should be nil with no splits")
+	}
+}
+
+// TestLayoutFocusedResourceListNoSplits verifies FocusedResourceList reports
+// (nil, false) when there are no splits.
+func TestLayoutFocusedResourceListNoSplits(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	rl, ok := l.FocusedResourceList()
+	if ok || rl != nil {
+		t.Fatalf("expected (nil, false) with no splits, got (%v, %v)", rl, ok)
+	}
+}
+
+// TestLayoutFocusedResourceListReturnsPtr verifies FocusedResourceList returns
+// (ptr, true) for a resource pane, and that the pointer is the live focused
+// split (same as FocusedSplit).
+func TestLayoutFocusedResourceListReturnsPtr(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "")
+	l.AddSplit(svcsPlugin(), "default", "")
+
+	rl, ok := l.FocusedResourceList()
+	if !ok {
+		t.Fatal("expected ok=true for a resource pane")
+	}
+	if rl == nil {
+		t.Fatal("expected non-nil resource list")
+	}
+	if rl != l.FocusedSplit() {
+		t.Fatal("FocusedResourceList should return the same pointer as FocusedSplit")
+	}
+	// The focused split is the newest (services); confirm we reached it through
+	// the interface accessor.
+	if got := rl.Plugin().Name(); got != "services" {
+		t.Fatalf("expected focused resource pane 'services', got %q", got)
+	}
+}
+
+// TestLayoutAddSplitStoresPaneInterface is a regression guard that the
+// heterogeneous splits slice still holds resource panes that round-trip back to
+// *ui.ResourceList through SplitAt for every index after adds.
+func TestLayoutAddSplitStoresPaneInterface(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "")
+	l.AddSplit(svcsPlugin(), "default", "")
+	l.AddSplit(podsPlugin(), "default", "")
+
+	for i := 0; i < l.SplitCount(); i++ {
+		if l.SplitAt(i) == nil {
+			t.Fatalf("SplitAt(%d) should return a non-nil resource pane", i)
+		}
 	}
 }
 

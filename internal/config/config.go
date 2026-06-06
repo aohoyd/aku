@@ -38,6 +38,16 @@ type MouseConfig struct {
 	Enabled bool `yaml:"enabled,omitempty"`
 }
 
+// TerminalConfig holds configuration for embedded terminal panes.
+type TerminalConfig struct {
+	// Prefix is the tmux-style keystroke that flips a focused terminal pane
+	// from typing mode into nav mode (e.g. "ctrl+a"). Empty means the default.
+	Prefix string `yaml:"prefix,omitempty"`
+	// Scrollback is the number of off-screen lines the terminal emulator
+	// retains for scrollback. Zero or negative means the default.
+	Scrollback int `yaml:"scrollback,omitempty"`
+}
+
 // ContextsConfig holds configuration for multi-cluster context discovery.
 type ContextsConfig struct {
 	Directories []string `yaml:"directories,omitempty"`
@@ -51,8 +61,16 @@ type Config struct {
 	Exec     ExecConfig                   `yaml:"exec,omitempty"`
 	Logs     LogsConfig                   `yaml:"logs,omitempty"`
 	Mouse    MouseConfig                  `yaml:"mouse,omitempty"`
+	Terminal TerminalConfig               `yaml:"terminal,omitempty"`
 	Contexts ContextsConfig               `yaml:"contexts,omitempty"`
 }
+
+// Default terminal settings, returned by the accessors when the corresponding
+// config field is empty/zero.
+const (
+	defaultTerminalPrefix     = "ctrl+a"
+	defaultTerminalScrollback = 5000
+)
 
 // DefaultConfig returns a config with default settings.
 func DefaultConfig() *Config {
@@ -116,6 +134,24 @@ func (c *Config) ExecCommand() []string {
 		return c.Exec.Command
 	}
 	return []string{"sh", "-c", "clear; (bash || ash || sh)"}
+}
+
+// TerminalPrefix returns the configured tmux-style terminal prefix keystroke,
+// defaulting to "ctrl+a" when empty.
+func (c *Config) TerminalPrefix() string {
+	if c.Terminal.Prefix != "" {
+		return c.Terminal.Prefix
+	}
+	return defaultTerminalPrefix
+}
+
+// TerminalScrollback returns the configured terminal scrollback line count,
+// defaulting to 5000 when zero or negative.
+func (c *Config) TerminalScrollback() int {
+	if c.Terminal.Scrollback > 0 {
+		return c.Terminal.Scrollback
+	}
+	return defaultTerminalScrollback
 }
 
 // LogDefaultTimeRange returns the configured default time range label, defaulting to "15m".

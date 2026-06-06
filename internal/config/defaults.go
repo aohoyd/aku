@@ -119,6 +119,21 @@ func DefaultBindings() []Binding {
 		{Key: "ctrl+s", Help: "save logs", Command: "save-logs", Scope: "logs", Visible: true},
 		{Key: "ctrl+shift+s", Help: "save & open logs", Command: "save-and-open-logs", Scope: "logs", Visible: true},
 
+		// ── Terminal scope ──
+		// Applies to a focused terminal pane. A LIVE terminal never reaches the
+		// trie — its keys are owned by the pane's tmux-style prefix machine
+		// (routeTerminalKey intercepts before the trie). These bindings therefore
+		// govern an EXITED terminal pane (a frozen, closeable split) and drive the
+		// statusbar/help hints for any focused terminal. They reuse the same
+		// command strings the prefix-nav commands map to, so the two paths stay in
+		// lockstep. close-current-panel / toggle-zoom / focus moves are already
+		// bound globally; these scope entries make them discoverable in help and
+		// give the exited pane its own visible hint group.
+		{Key: "ctrl+w", Help: "close", Command: "close-current-panel", Scope: "terminal", Visible: true},
+		{Key: "Z", Help: "zoom", Command: "toggle-zoom", Scope: "terminal", Visible: true},
+		{Key: "pgup", Help: "scroll up", Command: "page-up", Scope: "terminal", Visible: true},
+		{Key: "pgdown", Help: "scroll down", Command: "page-down", Scope: "terminal", Visible: true},
+
 		// ── Resource-specific ──
 		{Key: "l", Help: "logs", Command: "view-logs-focused",
 			For: []string{"pods", "containers"}, Visible: true},

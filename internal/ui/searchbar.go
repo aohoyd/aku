@@ -52,6 +52,9 @@ func (s SearchBar) Active() bool { return s.active }
 // SetValue sets the text input value (for testing).
 func (s *SearchBar) SetValue(v string) { s.input.SetValue(v) }
 
+// Value returns the current text input value (for testing).
+func (s SearchBar) Value() string { return s.input.Value() }
+
 // SetError sets an error message and toggles the input styling to indicate
 // invalid regex. When err is non-empty, the prompt, text, and cursor turn red.
 func (s *SearchBar) SetError(err string) {
