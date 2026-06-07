@@ -229,6 +229,95 @@ syntax:
   number: "#F472B6"
 ```
 
+## Embedded terminals
+
+aku runs exec and debug sessions as **live, first-class panes** — they sit alongside your resource lists, keep running in the background while you work elsewhere, and can be zoomed to fullscreen.
+
+### Opening a terminal
+
+| Keys | From | Opens |
+|------|------|-------|
+| `s s` | Pods, Containers | Exec shell into the container |
+| `s d` | Pods, Containers, Nodes | Ephemeral debug container |
+| `s p` | Pods, Containers, Nodes | Privileged debug container |
+
+Each session opens as a new split next to the focused pane. Open as many as you like — they run concurrently, and switching focus away leaves the shell alive.
+
+### Typing vs. navigating
+
+A focused *live* terminal forwards almost every keystroke straight to the shell, so aku's normal keybindings don't fire there. Two ways to drive aku from inside a terminal:
+
+- **Captured keys** (handled by aku, never sent to the shell): `alt+z` to zoom and `shift+←/→/↑/↓` to move focus between panes. These work without leaving the shell.
+- **The prefix key** (tmux-style, default `ctrl+a`): press the prefix, then a command key:
+  - `h/j/k/l` or arrows — move focus
+  - `x` — close the pane
+  - `PgUp` / `PgDn` — scroll the scrollback
+  - press the prefix **twice** to send a literal prefix byte to the shell
+
+### Zooming
+
+`alt+z` toggles a unified fullscreen zoom: the focused pane fills the screen borderlessly with a single top bar and the status bar hidden. It behaves the same for terminals, resource lists, and the detail/log panel. While zoomed you can still `shift+arrow` to another split — zoom follows focus. A zoomed terminal's top bar shows an `alt+z: exit zoom` hint.
+
+### When a shell ends
+
+- A clean exit freezes the pane with an `[exited — status N]` banner; its scrollback stays readable until you close it. An exited pane behaves like a normal split, so `ctrl+w` (no prefix) closes it.
+- A mid-session I/O failure (network drop, API-server error) freezes it with `[exited — status 1] stream error: <detail>`, so a broken connection is never mistaken for a normal exit.
+- If a debug/exec pre-flight fails before the shell starts, the placeholder pane is removed — or, when it was the only pane, frozen as a closeable pane showing `debug failed: <reason>`.
+
+Node-debug pods are deleted on pane close and on quit. Ephemeral debug containers can't be deleted (a Kubernetes limitation); the pane notes this on exit.
+
+### Configuration
+
+```yaml
+terminal:
+  prefix: ctrl+a   # tmux-style prefix key (default)
+  scrollback: 5000 # off-screen lines kept per terminal for scrolling (default)
+
+exec:
+  command: ["sh", "-c", "clear; (bash || ash || sh)"]  # shell for `s s` (default)
+```
+
+The captured-key set is just keymap bindings flagged `capture: true` (see [keymap.yaml](#keymapyaml)), so you can add your own. Under sustained I/O saturation aku drops keystrokes rather than blocking — a deliberate tradeoff that keeps the UI responsive when the remote shell can't keep up.
+
+## Multi-cluster contexts
+
+aku can drive several clusters at once. There is **no single "current cluster"** — every pane carries its own context and runs its own watches, and the **focused pane is the source of truth** (its context drives new-split defaults and the status bar). Different panes can be live on different clusters side by side.
+
+### Making contexts available
+
+By default aku uses the contexts in your active `$KUBECONFIG` / `~/.kube/config`. To pull in more, point `contexts.directories` at folders of kubeconfig files:
+
+```yaml
+contexts:
+  directories:
+    - ~/.kube/configs   # recursively scanned for kubeconfig files
+    - ~/work/clusters   # every context found here becomes switchable
+```
+
+Directories are scanned recursively; files that aren't valid kubeconfigs (or contain no contexts) are skipped.
+
+### Switching
+
+| Keys | Action |
+|------|--------|
+| `gx` | Fuzzy **overlay picker** — moves every pane sharing the focused pane's context to the chosen cluster (a "context group" move) |
+| `gX` | Opens the **contexts list** in the focused pane; `Enter` switches that pane |
+| `oX` | Opens the contexts list in a **new split** — bring up another cluster side-by-side |
+
+The contexts list is itself a resource view, with columns **NAME, CLUSTER, SERVER, STATUS, PANES**, where STATUS is `●` connected, `○` offline/degraded, or `–` not yet dialed. The `gx` overlay marks already-open contexts with `●` and their pane count, and highlights the focused pane's current context.
+
+### Behavior
+
+- All switches dial **asynchronously** off the UI loop, so an unreachable cluster never freezes aku — the pane shows an `⚠ offline` marker instead of hanging.
+- Pane context labels appear only when more than one distinct context is open; when every pane shares one context, labels are hidden.
+- On switch, a pane lands on the new context's default namespace (the kubeconfig `namespace:` field, else `default`). If the pane's current resource type doesn't exist on the new cluster, it shows an empty list and a brief status-bar note (this needs the cluster's API discovery to have populated first).
+
+### Example: prod and staging side by side
+
+1. `oX` opens the contexts list in a new split.
+2. Move focus there (`shift+→`) and press `Enter` on `staging` — that pane is now live on staging while your original pane stays on prod.
+3. From either pane, `gx` moves its whole context group to a different cluster.
+
 ## Key Bindings
 
 ### Global
