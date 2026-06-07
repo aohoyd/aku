@@ -25,11 +25,21 @@ type Executor interface {
 
 // Terminal is a single background SPDY shell session. Write and Close are safe
 // to call from any goroutine while a consumer ranges over Out(); Resize must be
-// called from a single goroutine (see Resize).
+// called from a single goroutine (see Resize). Err(), ExitCode(), and Out() are
+// safe to call from any goroutine (Err/ExitCode are mutex-guarded; Out returns a
+// channel) — though Err/ExitCode are only meaningful after Done() is closed.
+//
+// Write is non-blocking: it hands the keystrokes off to a buffered input channel
+// drained by a dedicated goroutine, so it is safe to call from the Bubble Tea UI
+// goroutine even when the underlying SPDY stdin copy is stalled by network
+// backpressure (slow API server, a pod not reading stdin). The only bound on
+// Write is a single channel hand-off; once the buffer is full Write drops the
+// chunk rather than block the UI, and after teardown it returns immediately.
 type Terminal struct {
 	id string
 
 	stdinW *io.PipeWriter                  // keystrokes → shell
+	input  chan []byte                     // Write callers → input drain goroutine
 	out    chan []byte                     // shell stdout bytes → UI
 	resize chan remotecommand.TerminalSize // pane resize → size queue
 
@@ -53,6 +63,7 @@ func Start(exec Executor, id string) *Terminal {
 	t := &Terminal{
 		id:     id,
 		stdinW: inW,
+		input:  make(chan []byte, 256),
 		out:    make(chan []byte, 64),
 		resize: make(chan remotecommand.TerminalSize, 1),
 		cancel: cancel,
@@ -61,6 +72,27 @@ func Start(exec Executor, id string) *Terminal {
 
 	tsq := &sizeQueue{resize: t.resize, ctx: ctx}
 	stdout := &chanWriter{ctx: ctx, out: t.out}
+
+	// Input drain goroutine: decouples Write callers (the UI goroutine and the
+	// reply pump) from SPDY stdin latency. It writes each buffered chunk to the
+	// stdin pipe; on teardown inR.Close()/stdinW.Close() unblocks a stalled
+	// stdinW.Write with ErrClosedPipe, and the t.done select abandons the loop so
+	// the goroutine can never leak. t.input is never closed (Close only cancels
+	// the context and closes stdinW), so the goroutine exits via <-t.done once the
+	// stream is torn down, or when stdinW.Write returns ErrClosedPipe after Close.
+	go func() {
+		for {
+			select {
+			case buf := <-t.input:
+				if _, err := t.stdinW.Write(buf); err != nil {
+					// stdin pipe is gone (teardown); nothing more can be written.
+					return
+				}
+			case <-t.done:
+				return
+			}
+		}
+	}()
 
 	go func() {
 		defer close(t.done)
@@ -78,9 +110,9 @@ func Start(exec Executor, id string) *Terminal {
 		})
 
 		// A bare io.EOF is the normal end-of-stream for a TTY session. Use an
-		// identity comparison (mirroring spdyStream) so only the naked sentinel is
-		// treated as a clean exit — an error that merely *wraps* io.EOF carries
-		// real failure context and must be preserved.
+		// identity comparison so only the naked sentinel is treated as a clean
+		// exit — an error that merely *wraps* io.EOF carries real failure context
+		// and must be preserved.
 		if err == io.EOF {
 			err = nil
 		}
@@ -102,9 +134,30 @@ func Start(exec Executor, id string) *Terminal {
 	return t
 }
 
-// Write forwards keystrokes to the shell's stdin.
+// Write forwards keystrokes to the shell's stdin without blocking the caller on
+// SPDY/network latency. The bytes are copied (callers — e.g. the reply pump —
+// reuse their buffer) and handed to the buffered input channel drained by the
+// input goroutine. Write blocks only for a single channel hand-off; if the
+// buffer is full it drops the chunk rather than freeze the UI goroutine, and
+// after teardown it returns io.ErrClosedPipe immediately. It is safe to call
+// from the Bubble Tea update goroutine.
 func (t *Terminal) Write(p []byte) (int, error) {
-	return t.stdinW.Write(p)
+	if len(p) == 0 {
+		return 0, nil
+	}
+	buf := make([]byte, len(p))
+	copy(buf, p)
+
+	select {
+	case t.input <- buf:
+		return len(p), nil
+	case <-t.done:
+		return 0, io.ErrClosedPipe
+	default:
+		// Buffer saturated: drop rather than block the UI goroutine. Report the
+		// bytes as accepted so callers do not treat backpressure as a hard error.
+		return len(p), nil
+	}
 }
 
 // Resize delivers a new pane size to the terminal size queue. It never blocks:

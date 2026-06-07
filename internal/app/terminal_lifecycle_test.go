@@ -2,6 +2,7 @@ package app
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -385,6 +386,9 @@ func TestTerminalQueryReplyForwardedNoHang(t *testing.T) {
 	// Deliver a terminal query as if the program emitted it on stdout. Feeding it
 	// to the emulator on the update goroutine must NOT hang: the pump drains the
 	// reply concurrently. Run update() with a timeout guard to catch a regression.
+	// The worker reads `a` and a.terminals; the outer goroutine touches `a` again
+	// only after receiving on `done`. close(done)/<-done establishes happens-before,
+	// so there is no concurrent App/map access — confirmed race-clean under -race.
 	done := make(chan struct{})
 	go func() {
 		m, _ := a.update(msgs.TermBytesMsg{ID: id, Data: []byte("\x1b[6n")})
@@ -462,6 +466,53 @@ func TestShutdownTerminalsSweepsNodePods(t *testing.T) {
 		case <-s.Done():
 		case <-time.After(2 * time.Second):
 			t.Fatalf("session %s not cancelled by shutdownTerminals", s.ID())
+		}
+	}
+}
+
+// TestShutdownTerminalsExitsReplyPumps asserts the quit/shutdown path tears down
+// reply-pump goroutines too: sessions opened WITH startReplyPump (the production
+// open path) must, after shutdownTerminals(), have both Done() close and both
+// pump goroutines exit. Building sessions via raw session.Start (as the sweep
+// test above does) would not catch a reply-pump leak on the quit path.
+func TestShutdownTerminalsExitsReplyPumps(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	a = drainModel(t, model)
+
+	// Instrument the REAL pump goroutines BEFORE opening so both carry the signal.
+	var exits atomic.Int32
+	replyPumpExited = func() { exits.Add(1) }
+	t.Cleanup(func() { replyPumpExited = nil })
+
+	feA := newFakeExecutor()
+	feB := newFakeExecutor()
+	sessA, _ := openTestTerminalWithPump(t, &a, "exec:pumpA", feA)
+	sessB, _ := openTestTerminalWithPump(t, &a, "exec:pumpB", feB)
+	<-feA.streamStarted
+	<-feB.streamStarted
+
+	a.shutdownTerminals()
+
+	for _, s := range []*session.Terminal{sessA, sessB} {
+		select {
+		case <-s.Done():
+		case <-time.After(2 * time.Second):
+			t.Fatalf("session %s not cancelled by shutdownTerminals", s.ID())
+		}
+	}
+
+	// Two sessions × two pump goroutines each = four exits. A leak in any leaves
+	// the count short and fails under the timeout.
+	deadline := time.After(2 * time.Second)
+	for {
+		if exits.Load() == 4 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("reply-pump goroutines did not all exit after shutdown (got %d/4, goroutine leak)", exits.Load())
+		case <-time.After(5 * time.Millisecond):
 		}
 	}
 }
@@ -570,6 +621,52 @@ func TestDebugReadyErrorSurfacesAndCleansUp(t *testing.T) {
 	}
 	if !strings.Contains(a.statusBar.View(), "boom") {
 		t.Fatalf("error not surfaced on status bar:\n%s", a.statusBar.View())
+	}
+}
+
+// TestDebugReadyErrorLastSplitMarksPaneExited asserts the last-split error path:
+// when the debug placeholder is the ONLY split, the error path must not strand a
+// session-less, unclosable pane (CloseCurrentSplit refuses to empty the layout).
+// Instead the placeholder is frozen into the exited state — closeable via the
+// normal exited-pane path — with the failure reason in its exit note.
+func TestDebugReadyErrorLastSplitMarksPaneExited(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	a = drainModel(t, model)
+
+	// Place the debug placeholder as the SOLE split (no sibling).
+	id := "debug:err:last"
+	w, h := a.layout.SplitSeedSize()
+	tp := ui.NewTerminalPane("debug: x", "ctx-1", w, h)
+	tp.SetID(id)
+	a.termCleanup[id] = terminalMeta{ephemeral: true, podName: "x", namespace: "default"}
+	a.layout.AddTerminalSplit(tp)
+	a.syncTerminalSizes()
+
+	if a.layout.SplitCount() != 1 {
+		t.Fatalf("test setup expected a single split, got %d", a.layout.SplitCount())
+	}
+
+	model, _ = a.update(msgs.DebugReadyMsg{ID: id, Err: errTestPreflight})
+	a = drainModel(t, model)
+
+	// The pane stays on screen (cannot empty the layout) but must be marked exited
+	// so it is closeable via the normal exited-pane path rather than orphaned.
+	gone, found := a.layout.TerminalPaneByID(id)
+	if !found {
+		t.Fatal("last-split error path unexpectedly removed the sole pane (empty layout)")
+	}
+	if !gone.Exited() {
+		t.Fatal("last-split placeholder not marked exited — pane is orphaned/unclosable")
+	}
+	if !strings.Contains(gone.View(), "debug failed") {
+		t.Fatalf("exit note with failure reason not shown in pane View:\n%s", gone.View())
+	}
+	if _, ok := a.termCleanup[id]; ok {
+		t.Fatal("cleanup metadata not cleared on error")
+	}
+	if _, ok := a.terminals[id]; ok {
+		t.Fatal("no session should exist for a failed pre-flight")
 	}
 }
 

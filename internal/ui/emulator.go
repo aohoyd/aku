@@ -19,6 +19,13 @@ import (
 // github.com/charmbracelet/x/vt. Most methods forward directly; RenderViewport
 // is the exception — x/vt has no offset-aware render, so the adapter composes
 // the scrollback viewport by hand (see vtEmulator.RenderViewport).
+//
+// Concurrency contract: Write, Resize, Render, RenderViewport, and all
+// cursor/scrollback accessors (CursorPosition, CursorVisible, CursorShape,
+// SetScrollbackSize, ScrollbackLen) MUST be called only from the Bubble Tea
+// Update goroutine — they touch the unsynchronized VT grid. Read and
+// CloseReplies are the ONLY methods safe to call from a separate drain goroutine
+// (they touch only the reply pipe); see startReplyPump.
 type Emulator interface {
 	// Write feeds shell output bytes (ANSI included) into the emulator.
 	Write(p []byte) (int, error)
@@ -164,9 +171,10 @@ func (e *vtEmulator) CursorShape() CursorShape { return e.cursorShape }
 func (e *vtEmulator) Read(p []byte) (int, error) { return e.term.Read(p) }
 
 // CloseReplies closes the reply pipe's write end (obtained via InputPipe, whose
-// dynamic type is *io.PipeWriter) so a blocked Read returns io.EOF. This avoids
-// vt.Emulator.Close(), which mutates an unsynchronized closed bool and would race
-// with the draining Read.
+// dynamic type is *io.PipeWriter) so a blocked Read returns io.EOF. Closing the
+// reply pipe's write end is the ONLY safe way to unblock the drain goroutine: do
+// NOT call e.term.Close() for teardown — it mutates an unsynchronized closed
+// bool that races with the concurrent Read.
 func (e *vtEmulator) CloseReplies() error {
 	if c, ok := e.term.InputPipe().(io.Closer); ok {
 		return c.Close()
@@ -198,15 +206,17 @@ func (e *vtEmulator) ScrollbackLen() int {
 // offset is clamped to [0, scrollbackLen] so the viewport can never scroll past
 // the oldest retained line. offset==0 returns the live screen verbatim.
 func (e *vtEmulator) RenderViewport(offset int) string {
-	if offset <= 0 {
+	sbLen := e.term.ScrollbackLen()
+	// Non-positive offset, or no scrollback to walk into: render the live screen.
+	// (When sbLen == 0 the clamp below would force offset to 0 anyway, so the live
+	// screen is the only possible result.)
+	if offset <= 0 || sbLen == 0 {
 		return e.term.Render()
 	}
-	sbLen := e.term.ScrollbackLen()
+	// offset is now >= 1 and sbLen >= 1; clamp into [1, sbLen] so the viewport
+	// never scrolls past the oldest retained line.
 	if offset > sbLen {
 		offset = sbLen
-	}
-	if offset == 0 {
-		return e.term.Render()
 	}
 
 	height := e.term.Height()

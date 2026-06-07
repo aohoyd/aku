@@ -56,7 +56,9 @@ func TestTerminalPane_CursorPos(t *testing.T) {
 	}
 
 	// Scrolled into history: cursor hidden (live cursor is off the viewport).
-	p.Write(bytes.Repeat([]byte("line\r\n"), 20))
+	if _, err := p.Write(bytes.Repeat([]byte("line\r\n"), 20)); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
 	p.ScrollUp(5)
 	if _, _, visible := p.CursorPos(); visible {
 		t.Fatal("scrolled-back pane should not report a visible cursor")
@@ -68,11 +70,15 @@ func TestTerminalPane_CursorPos(t *testing.T) {
 
 	// DECTCEM: the program hides the cursor (ESC[?25l) → not visible; showing it
 	// again (ESC[?25h) → visible.
-	p.Write([]byte("\x1b[?25l"))
+	if _, err := p.Write([]byte("\x1b[?25l")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
 	if _, _, visible := p.CursorPos(); visible {
 		t.Fatal("cursor hidden via DECTCEM should report not visible")
 	}
-	p.Write([]byte("\x1b[?25h"))
+	if _, err := p.Write([]byte("\x1b[?25h")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
 	if _, _, visible := p.CursorPos(); !visible {
 		t.Fatal("cursor shown via DECTCEM should report visible")
 	}
@@ -90,11 +96,15 @@ func TestTerminalPane_CursorShape(t *testing.T) {
 		t.Fatalf("default shape = %v, want block", p.CursorShape())
 	}
 	// DECSCUSR: steady bar (ESC[6 q) → bar; steady underline (ESC[4 q) → underline.
-	p.Write([]byte("\x1b[6 q"))
+	if _, err := p.Write([]byte("\x1b[6 q")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
 	if p.CursorShape() != CursorShapeBar {
 		t.Fatalf("after ESC[6 q shape = %v, want bar", p.CursorShape())
 	}
-	p.Write([]byte("\x1b[4 q"))
+	if _, err := p.Write([]byte("\x1b[4 q")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
 	if p.CursorShape() != CursorShapeUnderline {
 		t.Fatalf("after ESC[4 q shape = %v, want underline", p.CursorShape())
 	}
@@ -113,14 +123,35 @@ func TestTerminalPane_FocusBlurBorderDiffers(t *testing.T) {
 
 func TestTerminalPane_KindContextTitle(t *testing.T) {
 	p := NewTerminalPane("debug: x", "ctx-1", 40, 10)
-	if p.Kind() != PaneTerminal {
-		t.Fatalf("Kind = %v, want PaneTerminal", p.Kind())
-	}
 	if p.Context() != "ctx-1" {
 		t.Fatalf("Context = %q, want ctx-1", p.Context())
 	}
 	if p.Title() != "debug: x" {
 		t.Fatalf("Title = %q, want debug: x", p.Title())
+	}
+}
+
+// TestTerminalPane_IsHidden asserts IsHidden reflects the RAW outer dimensions
+// (not the clamped InnerSize): a pane sized to 0×0 (a non-focused split under
+// zoom) reports hidden even though InnerSize clamps to 1×1, so the app skips
+// forwarding a degenerate resize to its session.
+func TestTerminalPane_IsHidden(t *testing.T) {
+	p := NewTerminalPane("t", "", 40, 10)
+	if p.IsHidden() {
+		t.Fatal("a normally-sized pane should not be hidden")
+	}
+	p.SetSize(0, 0)
+	if !p.IsHidden() {
+		t.Fatal("a 0x0 pane should be hidden")
+	}
+	// InnerSize still clamps to a 1x1 minimum — IsHidden must NOT be derived from
+	// it, or the clamp would mask the hidden state.
+	if iw, ih := p.InnerSize(); iw != 1 || ih != 1 {
+		t.Fatalf("InnerSize of hidden pane = (%d,%d), want clamped (1,1)", iw, ih)
+	}
+	p.SetSize(20, 6)
+	if p.IsHidden() {
+		t.Fatal("a re-shown pane should not be hidden")
 	}
 }
 
@@ -353,6 +384,57 @@ func TestTerminalPane_EncodesControlAndSpecialKeys(t *testing.T) {
 		}
 		if !bytes.Equal(toShell, tc.want) {
 			t.Fatalf("%s: toShell = %v, want %v", tc.name, toShell, tc.want)
+		}
+	}
+}
+
+// TestTerminalPane_EncodesFunctionKeys asserts F1–F12 are encoded with the
+// xterm SS3 (F1–F4) and CSI~ (F5–F12) sequences a shell/full-screen program
+// expects, rather than being silently dropped.
+func TestTerminalPane_EncodesFunctionKeys(t *testing.T) {
+	cases := []struct {
+		name string
+		code rune
+		want []byte
+	}{
+		{"f1", tea.KeyF1, []byte("\x1bOP")},
+		{"f2", tea.KeyF2, []byte("\x1bOQ")},
+		{"f3", tea.KeyF3, []byte("\x1bOR")},
+		{"f4", tea.KeyF4, []byte("\x1bOS")},
+		{"f5", tea.KeyF5, []byte("\x1b[15~")},
+		{"f6", tea.KeyF6, []byte("\x1b[17~")},
+		{"f7", tea.KeyF7, []byte("\x1b[18~")},
+		{"f8", tea.KeyF8, []byte("\x1b[19~")},
+		{"f9", tea.KeyF9, []byte("\x1b[20~")},
+		{"f10", tea.KeyF10, []byte("\x1b[21~")},
+		{"f11", tea.KeyF11, []byte("\x1b[23~")},
+		{"f12", tea.KeyF12, []byte("\x1b[24~")},
+	}
+	for _, tc := range cases {
+		if got := encodeKey(tea.KeyPressMsg{Code: tc.code}); !bytes.Equal(got, tc.want) {
+			t.Fatalf("%s: encodeKey = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestTerminalPane_EncodesCtrlPunctuation asserts Ctrl+\ ] ^ _ encode to their
+// C0 control codes (0x1c–0x1f), and that Ctrl+[ stays the ESC byte (handled via
+// KeyEscape, not the ctrl-punctuation table).
+func TestTerminalPane_EncodesCtrlPunctuation(t *testing.T) {
+	cases := []struct {
+		name string
+		key  tea.KeyPressMsg
+		want []byte
+	}{
+		{"ctrl+backslash", tea.KeyPressMsg{Code: '\\', Mod: tea.ModCtrl}, []byte{0x1c}},
+		{"ctrl+rbracket", tea.KeyPressMsg{Code: ']', Mod: tea.ModCtrl}, []byte{0x1d}},
+		{"ctrl+caret", tea.KeyPressMsg{Code: '^', Mod: tea.ModCtrl}, []byte{0x1e}},
+		{"ctrl+underscore", tea.KeyPressMsg{Code: '_', Mod: tea.ModCtrl}, []byte{0x1f}},
+		{"esc still esc", tea.KeyPressMsg{Code: tea.KeyEscape}, []byte{0x1b}},
+	}
+	for _, tc := range cases {
+		if got := encodeKey(tc.key); !bytes.Equal(got, tc.want) {
+			t.Fatalf("%s: encodeKey = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

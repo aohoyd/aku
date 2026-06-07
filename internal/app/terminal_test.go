@@ -26,6 +26,7 @@ import (
 type fakeExecutor struct {
 	initialWrite      []byte
 	readStdin         bool
+	readStdinLoop     bool // when true, drain stdin continuously (multi-reply tests)
 	readSize          bool // when true, read one size off the size queue and record it
 	exitErr           error
 	returnImmediately bool
@@ -68,7 +69,25 @@ func (f *fakeExecutor) StreamWithContext(ctx context.Context, opts remotecommand
 		}()
 	}
 
-	if f.readStdin && opts.Stdin != nil {
+	if f.readStdinLoop && opts.Stdin != nil {
+		// Drain stdin continuously in the background so multiple replies (e.g.
+		// back-to-back terminal queries) are all recorded. Read returns an error
+		// when the stdin pipe is closed at teardown, ending the loop.
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := opts.Stdin.Read(buf)
+				if n > 0 {
+					f.mu.Lock()
+					f.gotStdin = append(f.gotStdin, buf[:n]...)
+					f.mu.Unlock()
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+	} else if f.readStdin && opts.Stdin != nil {
 		buf := make([]byte, 1024)
 		n, _ := opts.Stdin.Read(buf)
 		f.mu.Lock()

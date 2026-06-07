@@ -82,6 +82,33 @@ type terminalMeta struct {
 	client    *k8s.Client
 	podName   string
 	namespace string
+
+	// preflightCancel cancels the in-flight debug pre-flight (GET/patch/create +
+	// wait-Running) tied to this placeholder pane. It is set while the pre-flight
+	// runs and nil once it lands (handleDebugReady). Closing the placeholder mid-
+	// flight calls it so the API calls do not leak up to the 60s wait — and, for
+	// node-debug, so PrepareNodeDebug's own ctx-cancel cleanup deletes any pod it
+	// already created. nil for exec sessions (no pre-flight).
+	preflightCancel context.CancelFunc
+}
+
+// nodeDebugDeleteTimeout bounds the best-effort delete of a node-debug pod so a
+// slow API server never hangs the UI/quit path.
+const nodeDebugDeleteTimeout = 3 * time.Second
+
+// deleteNodeDebugPodAsync fires a best-effort, bounded delete of a node-debug
+// pod in its own goroutine so a slow API server never blocks the UI goroutine.
+// It is a no-op when client or pod is empty (e.g. a pre-flight that never named
+// a pod). Used by closeTerminalSession/handleDebugReady/shutdownTerminals.
+func deleteNodeDebugPodAsync(client *k8s.Client, pod, ns string) {
+	if client == nil || pod == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), nodeDebugDeleteTimeout)
+		defer cancel()
+		_ = k8s.DeleteNodeDebugPod(ctx, client, pod, ns)
+	}()
 }
 
 // App is the root Bubbletea model.
@@ -154,8 +181,8 @@ type App struct {
 	helmClient    helm.Client
 
 	// Port-forward
-	pfRegistry        *portforward.Registry
-	pfHandles         map[string]msgs.PortForwardHandle
+	pfRegistry *portforward.Registry
+	pfHandles  map[string]msgs.PortForwardHandle
 
 	// Embedded terminals. terminals maps a session id to its live background
 	// SPDY session; the matching *ui.TerminalPane lives in layout.splits (the
@@ -181,7 +208,7 @@ type App struct {
 	// session id as terminals. Exec/pod-debug entries are mostly informational
 	// (ephemeral set); node-debug entries carry the created pod so it can be
 	// deleted. Entries are removed alongside the session in closeTerminalSession.
-	termCleanup map[string]terminalMeta
+	termCleanup       map[string]terminalMeta
 	config            *config.Config
 	pendingRun        *config.RunConfig            // external command waiting for confirm
 	pendingDelete     []*unstructured.Unstructured // delete targets (always-list) waiting for confirm
@@ -285,15 +312,16 @@ func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, pfRegi
 		now:                 time.Now,
 		lastClickRow:        -1,
 		lastClickSplit:      -1,
-	}
-
-	// Default the attach-executor seam to the real SPDY factory. Tests override
-	// a.attachExecutorFn to drive handleDebugReady without a live cluster.
-	a.attachExecutorFn = func(client *k8s.Client, podName, containerName, namespace string) (session.Executor, error) {
-		return k8s.NewAttachExecutor(client, podName, containerName, namespace)
-	}
-	a.execExecutorFn = func(client *k8s.Client, podName, containerName, namespace string, command []string) (session.Executor, error) {
-		return k8s.NewExecExecutor(client, podName, containerName, namespace, command)
+		// Executor seams default to the real SPDY factories. Tests override these
+		// to drive handleDebugReady / openExecTerminal without a live cluster. They
+		// reference only package functions (no post-construction App state), so they
+		// belong in the struct literal alongside the other field defaults.
+		attachExecutorFn: func(client *k8s.Client, podName, containerName, namespace string) (session.Executor, error) {
+			return k8s.NewAttachExecutor(client, podName, containerName, namespace)
+		},
+		execExecutorFn: func(client *k8s.Client, podName, containerName, namespace string, command []string) (session.Executor, error) {
+			return k8s.NewExecExecutor(client, podName, containerName, namespace, command)
+		},
 	}
 
 	if initialOrientation == layout.OrientationHorizontal {
@@ -1025,12 +1053,33 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// split) and stop pumping. The session stays in the registry until the
 		// pane is closed so a late lookup still resolves; closing removes both.
 		if tp, found := a.layout.TerminalPaneByID(msg.ID); found {
-			tp.MarkExited(msg.Code)
+			code := msg.Code
+			// A mid-session stream/network failure carries a non-nil Err but may
+			// report Code 0 (no shell exit status). Surface the error rather than
+			// letting it masquerade as a clean "[exited — status 0]": force a
+			// non-zero synthetic code when one was not provided and embed the error
+			// text in the persistent exit banner.
+			var note string
+			if msg.Err != nil {
+				if code == 0 {
+					code = 1
+				}
+				note = "stream error: " + msg.Err.Error()
+			}
+			tp.MarkExited(code)
 			// For an ephemeral pod-debug session, embed the "container can't be
 			// removed" note in the pane's [exited] banner. Unlike the transient
 			// status-bar flash, it persists with the frozen pane so the user still
-			// sees it after the exit.
-			if note := a.ephemeralCloseNote(msg.ID); note != "" {
+			// sees it after the exit. A stream-error note takes precedence (it
+			// explains why the session died); the ephemeral note is appended.
+			if eph := a.ephemeralCloseNote(msg.ID); eph != "" {
+				if note != "" {
+					note += " — " + eph
+				} else {
+					note = eph
+				}
+			}
+			if note != "" {
 				tp.SetExitNote(note)
 			}
 		}
@@ -2382,13 +2431,19 @@ func (a App) closeTerminalSession(id string) {
 		delete(a.terminals, id)
 	}
 	if meta, ok := a.termCleanup[id]; ok {
-		if meta.nodeDebug && meta.client != nil {
-			client, pod, ns := meta.client, meta.podName, meta.namespace
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				_ = k8s.DeleteNodeDebugPod(ctx, client, pod, ns)
-			}()
+		// Cancel any in-flight pre-flight (GET/patch/create + wait-Running) so
+		// closing a placeholder mid-flight does not leave API calls running up to
+		// the 60s wait. For node-debug this also triggers PrepareNodeDebug's own
+		// ctx-cancel cleanup, deleting a pod it may have already created but not
+		// yet reported via DebugReadyMsg.
+		if meta.preflightCancel != nil {
+			meta.preflightCancel()
+		}
+		// Delete the created node-debug pod when its name is already known (the
+		// pre-flight reported it via DebugReadyMsg). When the name is not yet known
+		// the cancel above hands cleanup to PrepareNodeDebug's own teardown.
+		if meta.nodeDebug {
+			deleteNodeDebugPodAsync(meta.client, meta.podName, meta.namespace)
 		}
 		delete(a.termCleanup, id)
 	}
@@ -2412,26 +2467,38 @@ func (a App) handleDebugReady(msg msgs.DebugReadyMsg) (tea.Model, tea.Cmd) {
 
 	if msg.Err != nil {
 		cmd := a.statusBar.SetError("debug: " + msg.Err.Error())
-		// Remove the placeholder pane (if still present) and its metadata.
+		// Remove the placeholder pane (if still present) and its metadata. Cancel
+		// the pre-flight context so its goroutine bookkeeping (parent is
+		// Background) is released rather than leaked for the process lifetime.
+		if meta, ok := a.termCleanup[msg.ID]; ok && meta.preflightCancel != nil {
+			meta.preflightCancel()
+		}
 		delete(a.termCleanup, msg.ID)
 		if found {
-			a = a.removeTerminalPane(tp)
+			a = a.failTerminalPane(tp, "debug failed: "+msg.Err.Error())
 		}
 		return a, cmd
 	}
 
 	// The user may have closed the placeholder pane while the pre-flight ran.
 	if !found {
+		if meta, ok := a.termCleanup[msg.ID]; ok && meta.preflightCancel != nil {
+			meta.preflightCancel()
+		}
 		if msg.NodeMode {
-			if meta, ok := a.termCleanup[msg.ID]; ok && meta.client != nil {
-				client := meta.client
-				pod, ns := msg.PodName, msg.Namespace
-				go func() {
-					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-					defer cancel()
-					_ = k8s.DeleteNodeDebugPod(ctx, client, pod, ns)
-				}()
+			// Delete the created pod using the client carried IN the message, NOT
+			// from termCleanup: closeTerminalSession may have already run (when the
+			// pane was closed after the pod was created but before this msg landed)
+			// and removed the termCleanup entry, so depending on that map would
+			// leak the pod in the cluster. The message-carried client closes that
+			// window. Fall back to the metadata client if the assertion fails.
+			client, _ := msg.Client.(*k8s.Client)
+			if client == nil {
+				if meta, ok := a.termCleanup[msg.ID]; ok {
+					client = meta.client
+				}
 			}
+			deleteNodeDebugPodAsync(client, msg.PodName, msg.Namespace)
 		}
 		delete(a.termCleanup, msg.ID)
 		return a, nil
@@ -2444,32 +2511,41 @@ func (a App) handleDebugReady(msg msgs.DebugReadyMsg) (tea.Model, tea.Cmd) {
 		// The attach failed but the pre-flight already created the node-debug
 		// pod; delete it best-effort so it does not leak. Read the client off
 		// the cleanup metadata BEFORE removing it.
-		if msg.NodeMode && meta.client != nil {
-			client := meta.client
-			pod, ns := msg.PodName, msg.Namespace
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				_ = k8s.DeleteNodeDebugPod(ctx, client, pod, ns)
-			}()
+		if msg.NodeMode {
+			deleteNodeDebugPodAsync(meta.client, msg.PodName, msg.Namespace)
+		}
+		// The pre-flight has landed; release its context bookkeeping.
+		if meta.preflightCancel != nil {
+			meta.preflightCancel()
 		}
 		delete(a.termCleanup, msg.ID)
-		a = a.removeTerminalPane(tp)
+		a = a.failTerminalPane(tp, "debug failed: "+err.Error())
 		return a, cmd
 	}
 
 	// Fill in the now-known pod identity so close/quit can delete a node pod.
+	// The pre-flight has landed, so drop its cancel func (a later close deletes
+	// the pod by name instead of cancelling a finished pre-flight).
 	meta.podName = msg.PodName
 	meta.namespace = msg.Namespace
+	// The pre-flight has landed; cancel its context to release the goroutine
+	// bookkeeping (parent is Background, otherwise never cancelled), then drop the
+	// func so a later close deletes the pod by name instead of cancelling a
+	// finished pre-flight. CancelFunc is idempotent, so this is safe.
+	if meta.preflightCancel != nil {
+		meta.preflightCancel()
+		meta.preflightCancel = nil
+	}
 	a.termCleanup[msg.ID] = meta
 
 	sess := session.Start(exec, msg.ID)
 	a.terminals[msg.ID] = sess
 	startReplyPump(tp, sess)
 
+	// syncTerminalSizes pushes the session's inner size: the session is now in
+	// a.terminals and the placeholder pane is already in the layout, so this covers
+	// the just-bound session — no extra direct Resize is needed.
 	a.syncTerminalSizes()
-	iw, ih := tp.InnerSize()
-	sess.Resize(iw, ih)
 
 	return a, readTermBytes(sess)
 }
@@ -2482,8 +2558,19 @@ func (a App) handleDebugReady(msg msgs.DebugReadyMsg) (tea.Model, tea.Cmd) {
 // whole UI. The drain touches only the emulator's reply pipe, so it is safe
 // alongside Write/Render on the UI goroutine; teardown closes the reply pipe (not
 // the emulator) so it never races x/vt's unsynchronized closed flag.
+//
+// replyPumpExited, when non-nil, is invoked (once per goroutine) as each of the
+// two pump goroutines returns. It exists solely so leak tests can observe the
+// REAL goroutines exit; production leaves it nil. It is snapshotted here on the
+// calling goroutine and captured by the pump goroutines so they never read the
+// shared global concurrently (which lingering pumps from earlier tests otherwise
+// would, racing a later test's assignment).
 func startReplyPump(tp *ui.TerminalPane, sess *session.Terminal) {
+	onExit := replyPumpExited
 	go func() {
+		if onExit != nil {
+			defer onExit()
+		}
 		r := tp.ReplyReader()
 		buf := make([]byte, 4096)
 		for {
@@ -2497,9 +2584,39 @@ func startReplyPump(tp *ui.TerminalPane, sess *session.Terminal) {
 		}
 	}()
 	go func() {
+		if onExit != nil {
+			defer onExit()
+		}
 		<-sess.Done()
 		tp.StopReplies()
 	}()
+}
+
+// replyPumpExited is a test-only hook fired as each startReplyPump goroutine
+// returns. nil in production. Set/cleared by a test before/after it drives the
+// open path; startReplyPump snapshots it synchronously on the caller goroutine.
+var replyPumpExited func()
+
+// failTerminalPane handles a placeholder pane whose debug pre-flight/attach
+// failed before any session started. It removes the pane via the normal
+// close-split path, but tolerates the last-split case: CloseCurrentSplit refuses
+// to empty the layout, which would otherwise strand the placeholder ("starting
+// debug container…") on screen with no session — it never exits, so the usual
+// teardown keys (<prefix> x / ctrl+w) find no shell and the pane is unclosable.
+// To keep it closeable, mark the placeholder as exited with a note explaining
+// why, so the user can dismiss it through the normal exited-pane path.
+func (a App) failTerminalPane(tp *ui.TerminalPane, note string) App {
+	if a.layout.SplitCount() <= 1 {
+		// Last split: removeTerminalPane would skip CloseCurrentSplit and leave an
+		// orphaned, session-less placeholder. Freeze it into the exited state so it
+		// behaves like any other dead pane (closeable, shows the failure note).
+		tp.MarkExited(1)
+		tp.SetExitNote(note)
+		a.keyTrie.Reset()
+		a.syncTerminalSizes()
+		return a
+	}
+	return a.removeTerminalPane(tp)
 }
 
 // removeTerminalPane removes a terminal pane from the layout, tolerating the
@@ -2555,12 +2672,18 @@ func (a App) ephemeralCloseNote(id string) string {
 func (a App) shutdownTerminals() {
 	var wg sync.WaitGroup
 	for id, meta := range a.termCleanup {
+		// Cancel any in-flight pre-flight so a slow create/wait does not run on
+		// after quit (and, for node-debug, so PrepareNodeDebug's ctx-cancel
+		// cleanup deletes a not-yet-reported pod).
+		if meta.preflightCancel != nil {
+			meta.preflightCancel()
+		}
 		if meta.nodeDebug && meta.client != nil && meta.podName != "" {
 			client, pod, ns := meta.client, meta.podName, meta.namespace
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), nodeDebugDeleteTimeout)
 				defer cancel()
 				_ = k8s.DeleteNodeDebugPod(ctx, client, pod, ns)
 			}()

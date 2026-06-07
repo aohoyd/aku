@@ -15,6 +15,18 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
+const (
+	// debugReadyTimeout bounds how long the pre-flight waits for a debug
+	// container/pod to reach Running before giving up.
+	debugReadyTimeout = 60 * time.Second
+	// debugPollInterval is how often waitForContainerRunning polls the pod status.
+	debugPollInterval = 500 * time.Millisecond
+	// nodeDebugCleanupTimeout bounds the best-effort delete of a node-debug pod
+	// that was created but never came up. Without a deadline an unreachable API
+	// server would block the cleanup goroutine for the process lifetime.
+	nodeDebugCleanupTimeout = 5 * time.Second
+)
+
 // generateDebugName produces a name like "prefix-a1b2c" with 5 random hex chars.
 func generateDebugName(prefix string) string {
 	b := make([]byte, 3)
@@ -163,8 +175,14 @@ func PrepareNodeDebug(ctx context.Context, client *Client, nodeName, image strin
 
 	if err := waitForContainerRunning(ctx, client.Typed, created.Name, cName, ns); err != nil {
 		// Best-effort cleanup: the pod was created but never came up, so it would
-		// otherwise leak. Fire-and-forget so we do not block the caller.
-		go func() { _ = DeleteNodeDebugPod(context.Background(), client, created.Name, ns) }()
+		// otherwise leak. Fire-and-forget so we do not block the caller, but bound
+		// the context so an unreachable API server cannot block the goroutine for
+		// the process lifetime.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), nodeDebugCleanupTimeout)
+			defer cancel()
+			_ = DeleteNodeDebugPod(ctx, client, created.Name, ns)
+		}()
 		return "", "", "", err
 	}
 
@@ -182,16 +200,25 @@ func DeleteNodeDebugPod(ctx context.Context, client *Client, podName, namespace 
 }
 
 // waitForContainerRunning polls until the named container is in Running state.
+// The wait is bounded by debugReadyTimeout, derived as a child of ctx so an
+// upstream cancel (the placeholder pane closed mid-flight) aborts immediately.
+// Deriving the timeout from ctx — rather than a free-standing time.After — also
+// means the timer is released by the deferred cancel when ctx is cancelled
+// first, instead of leaking until it fires.
 func waitForContainerRunning(ctx context.Context, typed kubernetes.Interface, podName, containerName, namespace string) error {
-	timeout := time.After(60 * time.Second)
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ctx, cancel := context.WithTimeout(ctx, debugReadyTimeout)
+	defer cancel()
+
+	ticker := time.NewTicker(debugPollInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-timeout:
-			return fmt.Errorf("timeout waiting for container %s to start", containerName)
 		case <-ctx.Done():
+			// DeadlineExceeded distinguishes the timeout from an upstream cancel.
+			if ctx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("timeout waiting for container %s to start", containerName)
+			}
 			return ctx.Err()
 		case <-ticker.C:
 			pod, err := typed.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})

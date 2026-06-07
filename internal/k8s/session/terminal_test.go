@@ -380,6 +380,102 @@ func TestChanWriterPreCancelledContextReturns(t *testing.T) {
 	}
 }
 
+// TestTerminalWriteNeverBlocksOnStalledStdin asserts Write does not block the
+// caller (the Bubble Tea UI goroutine) when the SPDY stdin reader is stalled.
+// The fake never reads opts.Stdin and blocks until ctx is cancelled, so the
+// underlying stdin pipe accepts nothing; Write must still return promptly for
+// far more chunks than the input buffer can hold (it drops once saturated rather
+// than freeze the UI).
+func TestTerminalWriteNeverBlocksOnStalledStdin(t *testing.T) {
+	fe := newFakeExecutor()
+	// Default behavior: never reads Stdin, blocks on ctx.Done(). The stdin pipe
+	// is therefore never drained, so a direct stdinW.Write would block.
+	term := Start(fe, "t")
+	<-fe.streamStarted
+	defer term.Close()
+
+	done := make(chan struct{})
+	var badErr error
+	var badN int
+	go func() {
+		defer close(done)
+		// Far exceed the 256-slot input buffer so a blocking Write would hang here.
+		// EVERY Write — including those that hit the drop (default) path once the
+		// buffer saturates — must report the full byte count and a nil error: a
+		// dropped chunk is still "accepted" so callers do not treat backpressure as
+		// a hard error or a partial write.
+		p := []byte("keystroke")
+		for i := 0; i < 10000; i++ {
+			n, err := term.Write(p)
+			if err != nil {
+				badErr = err
+				return
+			}
+			if n != len(p) {
+				badN = n
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Write blocked when the SPDY stdin reader was stalled (UI goroutine would freeze)")
+	}
+
+	if badErr != nil {
+		t.Fatalf("Write returned an error under saturation (drops must report success): %v", badErr)
+	}
+	if badN != 0 {
+		t.Fatalf("Write returned partial count under saturation: n = %d, want %d", badN, len("keystroke"))
+	}
+}
+
+// TestTerminalInputDrainExitsOnClose asserts the input drain goroutine does not
+// leak: with a stalled stdin reader (stdinW.Write blocked) and a full input
+// buffer, Close must tear the session down so the drain goroutine returns and
+// Done() closes.
+func TestTerminalInputDrainExitsOnClose(t *testing.T) {
+	fe := newFakeExecutor()
+	// Stalled reader: stdin is never drained, so the in-flight stdinW.Write in the
+	// drain goroutine blocks until teardown unblocks it with ErrClosedPipe.
+	term := Start(fe, "t")
+	<-fe.streamStarted
+
+	// Deterministically wedge the drain goroutine: write exactly one chunk. The
+	// drain dequeues it and calls stdinW.Write, which blocks forever because the
+	// fake never reads opts.Stdin (the pipe has no reader buffer). io.Pipe writes
+	// are fully synchronous — Write only returns once a reader consumes the bytes —
+	// so once this single chunk is in flight the drain is parked in stdinW.Write,
+	// not in the channel-receive select. (Avoiding the buffer-saturation/drop path
+	// keeps this from being probabilistic.)
+	term.Write([]byte("x"))
+
+	// Give the drain a moment to dequeue the chunk and reach the blocking Write.
+	// Even if it has not yet, Close still unblocks it and the assertion below holds;
+	// this just makes the "wedged in Write" precondition the common case.
+	time.Sleep(20 * time.Millisecond)
+
+	// Close must unblock the wedged stdinW.Write (ErrClosedPipe) AND cancel the
+	// stream, so both the drain goroutine and the stream goroutine return.
+	term.Close()
+
+	select {
+	case <-term.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done() did not close after Close() with a wedged input drain (goroutine leak)")
+	}
+
+	// A Write after teardown must not block or panic; the t.done select arm reports
+	// the closed pipe (the buffer is empty so this returns immediately either way).
+	if _, err := term.Write([]byte("late")); err == nil {
+		// done may not be observed by the select arm if the buffer still has room,
+		// in which case the chunk is accepted; either outcome is non-blocking and
+		// safe. The test would have hung if Write blocked.
+	}
+}
+
 func TestTerminalResizeNeverBlocks(t *testing.T) {
 	fe := newFakeExecutor()
 	// Fake never reads the size queue, so the resize channel can saturate.

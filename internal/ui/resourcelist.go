@@ -51,9 +51,6 @@ type ResourceList struct {
 // Compile-time assertion that *ResourceList satisfies the Pane interface.
 var _ Pane = (*ResourceList)(nil)
 
-// Kind reports the pane content type. A ResourceList is always a resource pane.
-func (r *ResourceList) Kind() PaneKind { return PaneResources }
-
 // Title returns a short label identifying this pane's content, derived from the
 // plugin name. This is the pane-interface accessor; View() builds the richer
 // bordered title (with counts, namespace prefix, search/filter state).

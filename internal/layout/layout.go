@@ -165,10 +165,14 @@ func (l *Layout) TerminalPaneByID(id string) (*ui.TerminalPane, bool) {
 
 // TerminalPaneInnerSize returns the inner (emulator content) size of the
 // terminal pane with the given id, derived from the size the layout assigned it
-// during recalcSizes. ok is false when no such terminal pane exists.
+// during recalcSizes. ok is false when no such terminal pane exists, or when the
+// pane is hidden (a non-focused split under zoom gets a degenerate 0×0 outer
+// size). Hidden panes are reported as not-ok so callers do not forward the
+// clamped 1×1 inner size to the remote shell and reflow a background full-screen
+// program (vim/less).
 func (l *Layout) TerminalPaneInnerSize(id string) (w, h int, ok bool) {
 	tp, found := l.TerminalPaneByID(id)
-	if !found {
+	if !found || tp.IsHidden() {
 		return 0, 0, false
 	}
 	iw, ih := tp.InnerSize()
@@ -293,17 +297,6 @@ func (l *Layout) FocusedSplit() *ui.ResourceList {
 	}
 	rl, _ := l.splits[l.focusIdx].(*ui.ResourceList)
 	return rl
-}
-
-// FocusedResourceList returns the focused pane as a *ui.ResourceList along with
-// ok=true when the focused pane is a resource pane. Returns (nil, false) when
-// there are no splits or the focused pane is some other kind (e.g. terminal).
-func (l *Layout) FocusedResourceList() (*ui.ResourceList, bool) {
-	if len(l.splits) == 0 {
-		return nil, false
-	}
-	rl, ok := l.splits[l.focusIdx].(*ui.ResourceList)
-	return rl, ok
 }
 
 // SplitAt returns a pointer to the split at the given index, or nil when the

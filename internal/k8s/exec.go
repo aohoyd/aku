@@ -33,4 +33,3 @@ func NewExecExecutor(client *Client, podName, containerName, namespace string, c
 	reqURL := execURL(client.Typed, podName, containerName, namespace, command)
 	return remotecommand.NewSPDYExecutor(client.Config, "POST", reqURL)
 }
-

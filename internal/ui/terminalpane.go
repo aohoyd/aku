@@ -186,6 +186,17 @@ func (t *TerminalPane) InnerSize() (w, h int) {
 	return innerSize(t.width, t.height)
 }
 
+// IsHidden reports whether the pane is currently hidden, i.e. it was assigned a
+// degenerate (non-positive) outer size by the layout — which happens to every
+// non-focused split under ZoomSplit/ZoomDetail. It is derived from the RAW
+// stored outer dimensions, NOT from InnerSize (which clamps to a 1×1 minimum so
+// the emulator can never be sized to zero). Callers that forward resizes to the
+// remote shell must skip hidden panes: pushing the clamped 1×1 inner size would
+// reflow a full-screen program (vim/less) running in a background pane.
+func (t *TerminalPane) IsHidden() bool {
+	return t.width <= 0 || t.height <= 0
+}
+
 // --- ui.Pane interface ---
 
 // SetSize stores the outer dimensions and resizes the emulator to the inner
@@ -229,9 +240,6 @@ func (t *TerminalPane) SetContextBadgeVisible(visible bool) {
 func (t *TerminalPane) ContextBadgeVisible() bool {
 	return t.ctx != "" && !t.ctxBadgeHidden
 }
-
-// Kind reports that this is a terminal pane.
-func (t *TerminalPane) Kind() PaneKind { return PaneTerminal }
 
 // CursorPos reports the live cursor position (inner-grid coords) and whether a
 // real terminal cursor should be shown for this pane: only when focused, not
@@ -456,6 +464,16 @@ func encodeKey(msg tea.KeyPressMsg) []byte {
 			return []byte{byte(k.Code - 'A' + 1)}
 		case k.Code == ' ' || k.Code == '@':
 			return []byte{0x00}
+		// Ctrl+<punctuation> → the remaining C0 control codes. Ctrl+[ is already
+		// covered by KeyEscape (0x1b) below, so it is intentionally absent here.
+		case k.Code == '\\':
+			return []byte{0x1c}
+		case k.Code == ']':
+			return []byte{0x1d}
+		case k.Code == '^':
+			return []byte{0x1e}
+		case k.Code == '_':
+			return []byte{0x1f}
 		}
 	}
 
@@ -490,6 +508,33 @@ func encodeKey(msg tea.KeyPressMsg) []byte {
 		return []byte{0x1b}
 	case tea.KeySpace:
 		return []byte{' '}
+	// Function keys. F1–F4 use the SS3 (\x1bO) form; F5–F12 use CSI ~ sequences
+	// (xterm convention). The gaps in the CSI numbers (no 16, 22) are part of the
+	// xterm encoding, not omissions.
+	case tea.KeyF1:
+		return []byte("\x1bOP")
+	case tea.KeyF2:
+		return []byte("\x1bOQ")
+	case tea.KeyF3:
+		return []byte("\x1bOR")
+	case tea.KeyF4:
+		return []byte("\x1bOS")
+	case tea.KeyF5:
+		return []byte("\x1b[15~")
+	case tea.KeyF6:
+		return []byte("\x1b[17~")
+	case tea.KeyF7:
+		return []byte("\x1b[18~")
+	case tea.KeyF8:
+		return []byte("\x1b[19~")
+	case tea.KeyF9:
+		return []byte("\x1b[20~")
+	case tea.KeyF10:
+		return []byte("\x1b[21~")
+	case tea.KeyF11:
+		return []byte("\x1b[23~")
+	case tea.KeyF12:
+		return []byte("\x1b[24~")
 	}
 
 	// Printable characters: forward the produced text verbatim.

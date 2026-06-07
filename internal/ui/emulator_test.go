@@ -3,6 +3,7 @@ package ui
 import (
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -283,23 +284,27 @@ func TestEmulatorRenderViewportClampsToOldest(t *testing.T) {
 // trailing "\r" so the composed scrollback window is not corrupted. (x/vt's
 // current Render() uses bare "\n", but this guards a future/alternate backend.)
 func TestSplitScreenLinesHandlesCRLF(t *testing.T) {
-	cases := map[string][]string{
-		"a\nb\nc":    {"a", "b", "c"},
-		"a\r\nb\r\nc": {"a", "b", "c"},
-		"a\r\nb\nc":  {"a", "b", "c"}, // mixed separators
-		"":           {""},
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"a\nb\nc", []string{"a", "b", "c"}},
+		{"a\r\nb\r\nc", []string{"a", "b", "c"}},
+		{"a\r\nb\nc", []string{"a", "b", "c"}}, // mixed separators
+		{"", []string{""}},
 	}
-	for in, want := range cases {
-		got := splitScreenLines(in)
-		if len(got) != len(want) {
-			t.Fatalf("splitScreenLines(%q) = %#v, want %#v", in, got, want)
+	for _, tc := range cases {
+		got := splitScreenLines(tc.in)
+		if len(got) != len(tc.want) {
+			t.Errorf("splitScreenLines(%q) = %#v, want %#v", tc.in, got, tc.want)
+			continue
 		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Fatalf("splitScreenLines(%q)[%d] = %q, want %q", in, i, got[i], want[i])
+		for i := range tc.want {
+			if got[i] != tc.want[i] {
+				t.Errorf("splitScreenLines(%q)[%d] = %q, want %q", tc.in, i, got[i], tc.want[i])
 			}
 			if strings.HasSuffix(got[i], "\r") {
-				t.Fatalf("splitScreenLines(%q)[%d] still has trailing CR: %q", in, i, got[i])
+				t.Errorf("splitScreenLines(%q)[%d] still has trailing CR: %q", tc.in, i, got[i])
 			}
 		}
 	}
@@ -317,6 +322,52 @@ func TestEmulatorRenderViewportNoCarriageReturns(t *testing.T) {
 	}
 	if vp := e.RenderViewport(3); strings.Contains(vp, "\r") {
 		t.Fatalf("scrolled viewport contains a carriage return: %q", vp)
+	}
+}
+
+// TestEmulatorConcurrentWriteRenderRead exercises the documented concurrency
+// contract: Write/Render/RenderViewport run on the UI goroutine while Read
+// drains the reply pipe on a background goroutine. The DSR cursor-position query
+// ("\x1b[6n") makes the emulator emit a reply on its pipe, so the Read goroutine
+// has data to drain concurrently. This must be clean under -race.
+func TestEmulatorConcurrentWriteRenderRead(t *testing.T) {
+	e := NewEmulator(40, 10)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Reader goroutine: drain the reply pipe until it is closed.
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 256)
+		for {
+			if _, err := e.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Writer/renderer goroutine: interleave Write (with a query that produces a
+	// reply), Render and RenderViewport.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			// "\x1b[6n" is a DSR cursor-position request → the emulator writes a
+			// reply onto its pipe, which the reader drains concurrently.
+			_, _ = e.Write([]byte("hello\x1b[6n\r\n"))
+			_ = e.Render()
+			_ = e.RenderViewport(1)
+		}
+		// Closing the replies unblocks the reader so the test can finish.
+		_ = e.CloseReplies()
+	}()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("concurrent Write/Render/Read did not finish (possible deadlock)")
 	}
 }
 

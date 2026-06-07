@@ -2,23 +2,15 @@ package ui
 
 import "testing"
 
-// TestResourceListSatisfiesPane asserts (at runtime) that a *ResourceList is
-// usable as a ui.Pane. The compile-time guarantee lives in resourcelist.go
-// (`var _ Pane = (*ResourceList)(nil)`); this guards the assignment too.
+// TestResourceListSatisfiesPane asserts a *ResourceList is usable as a ui.Pane
+// and that interface dispatch reaches the concrete method. The compile-time
+// guarantee lives in resourcelist.go (`var _ Pane = (*ResourceList)(nil)`); this
+// exercises a real method through the interface so it is not tautological.
 func TestResourceListSatisfiesPane(t *testing.T) {
 	rl := NewResourceList(&testPlugin{}, 80, 24)
 	var p Pane = &rl
-	if p == nil {
-		t.Fatal("*ResourceList should satisfy Pane")
-	}
-}
-
-// TestResourceListKindIsResources verifies a resource pane reports PaneResources.
-func TestResourceListKindIsResources(t *testing.T) {
-	rl := NewResourceList(&testPlugin{}, 80, 24)
-	var p Pane = &rl
-	if got := p.Kind(); got != PaneResources {
-		t.Fatalf("expected PaneResources, got %d", got)
+	if got := p.Title(); got != "pods" {
+		t.Fatalf("Pane.Title() through interface = %q, want %q", got, "pods")
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
+	"github.com/aohoyd/aku/internal/ui"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -247,41 +248,6 @@ func TestLayoutFocusedSplitNil(t *testing.T) {
 	}
 }
 
-// TestLayoutFocusedResourceListNoSplits verifies FocusedResourceList reports
-// (nil, false) when there are no splits.
-func TestLayoutFocusedResourceListNoSplits(t *testing.T) {
-	l := New(80, 26, 1000, "15m", 900)
-	rl, ok := l.FocusedResourceList()
-	if ok || rl != nil {
-		t.Fatalf("expected (nil, false) with no splits, got (%v, %v)", rl, ok)
-	}
-}
-
-// TestLayoutFocusedResourceListReturnsPtr verifies FocusedResourceList returns
-// (ptr, true) for a resource pane, and that the pointer is the live focused
-// split (same as FocusedSplit).
-func TestLayoutFocusedResourceListReturnsPtr(t *testing.T) {
-	l := New(80, 26, 1000, "15m", 900)
-	l.AddSplit(podsPlugin(), "default", "")
-	l.AddSplit(svcsPlugin(), "default", "")
-
-	rl, ok := l.FocusedResourceList()
-	if !ok {
-		t.Fatal("expected ok=true for a resource pane")
-	}
-	if rl == nil {
-		t.Fatal("expected non-nil resource list")
-	}
-	if rl != l.FocusedSplit() {
-		t.Fatal("FocusedResourceList should return the same pointer as FocusedSplit")
-	}
-	// The focused split is the newest (services); confirm we reached it through
-	// the interface accessor.
-	if got := rl.Plugin().Name(); got != "services" {
-		t.Fatalf("expected focused resource pane 'services', got %q", got)
-	}
-}
-
 // TestLayoutAddSplitStoresPaneInterface is a regression guard that the
 // heterogeneous splits slice still holds resource panes that round-trip back to
 // *ui.ResourceList through SplitAt for every index after adds.
@@ -295,6 +261,126 @@ func TestLayoutAddSplitStoresPaneInterface(t *testing.T) {
 		if l.SplitAt(i) == nil {
 			t.Fatalf("SplitAt(%d) should return a non-nil resource pane", i)
 		}
+	}
+}
+
+// TestAddTerminalSplitInsertsAdjacentAndFocuses asserts AddTerminalSplit inserts
+// the new pane immediately after the focused split and transfers focus to it.
+func TestAddTerminalSplitInsertsAdjacentAndFocuses(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1 (focused)
+	// Focus the first split so the terminal must be inserted at idx 1 (adjacent).
+	l.FocusSplitAt(0)
+
+	tp := ui.NewTerminalPane("term", "ctx-1", 40, 10)
+	tp.SetID("t:1")
+	l.AddTerminalSplit(tp)
+
+	if l.SplitCount() != 3 {
+		t.Fatalf("expected 3 splits after AddTerminalSplit, got %d", l.SplitCount())
+	}
+	// Inserted adjacent to the focused split (idx 0) → at idx 1.
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected new terminal focused at idx 1, got %d", l.FocusIndex())
+	}
+	got, ok := l.FocusedPane().(*ui.TerminalPane)
+	if !ok || got != tp {
+		t.Fatalf("focused pane is not the new terminal pane (ok=%v)", ok)
+	}
+	if l.PaneAtIdx(1) != tp {
+		t.Fatalf("terminal pane not at insertion idx 1")
+	}
+}
+
+// TestAddTerminalSplitFirstPane asserts AddTerminalSplit on an empty layout
+// inserts at idx 0 and focuses it.
+func TestAddTerminalSplitFirstPane(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	tp := ui.NewTerminalPane("term", "ctx-1", 40, 10)
+	tp.SetID("t:first")
+	l.AddTerminalSplit(tp)
+
+	if l.SplitCount() != 1 {
+		t.Fatalf("expected 1 split, got %d", l.SplitCount())
+	}
+	if l.FocusIndex() != 0 {
+		t.Fatalf("expected focus idx 0, got %d", l.FocusIndex())
+	}
+	if l.FocusedPane() != tp {
+		t.Fatal("first terminal pane should be focused")
+	}
+}
+
+// TestTerminalPaneByID covers both the found and missing cases.
+func TestTerminalPaneByID(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // a resource pane (not a terminal)
+
+	tp := ui.NewTerminalPane("term", "ctx-1", 40, 10)
+	tp.SetID("t:found")
+	l.AddTerminalSplit(tp)
+
+	got, ok := l.TerminalPaneByID("t:found")
+	if !ok || got != tp {
+		t.Fatalf("TerminalPaneByID(found): ok=%v got=%v want=%v", ok, got, tp)
+	}
+	if _, ok := l.TerminalPaneByID("t:missing"); ok {
+		t.Fatal("TerminalPaneByID(missing) should report not found")
+	}
+	// A resource pane's id-space must not be matched as a terminal.
+	if _, ok := l.TerminalPaneByID("pods"); ok {
+		t.Fatal("a resource pane must not be returned by TerminalPaneByID")
+	}
+}
+
+// TestTerminalPaneInnerSize asserts the inner size is reported for a present
+// terminal pane and ok=false for a missing one. The inner size is the outer pane
+// size minus the border chrome the pane reserves.
+func TestTerminalPaneInnerSize(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	tp := ui.NewTerminalPane("term", "ctx-1", 40, 10)
+	tp.SetID("t:size")
+	l.AddTerminalSplit(tp) // recalcSizes assigns the pane its real size
+
+	iw, ih, ok := l.TerminalPaneInnerSize("t:size")
+	if !ok {
+		t.Fatal("TerminalPaneInnerSize should report ok for a present pane")
+	}
+	// recalcSizes set the pane to fill the layout; inner size must be positive and
+	// match the pane's own InnerSize accounting.
+	wantW, wantH := tp.InnerSize()
+	if iw != wantW || ih != wantH {
+		t.Fatalf("inner size = %dx%d, want %dx%d", iw, ih, wantW, wantH)
+	}
+	if iw <= 0 || ih <= 0 {
+		t.Fatalf("inner size should be positive, got %dx%d", iw, ih)
+	}
+
+	if _, _, ok := l.TerminalPaneInnerSize("t:missing"); ok {
+		t.Fatal("TerminalPaneInnerSize(missing) should report ok=false")
+	}
+}
+
+// TestTerminalPaneInnerSizeHiddenPaneNotOK asserts that a hidden (non-focused,
+// zoomed-out) terminal pane is reported as ok=false so the app skips forwarding
+// the clamped 1x1 inner size to the remote shell (which would reflow a
+// background full-screen program). Under ZoomSplit recalcSizes assigns 0x0 to
+// every non-focused split.
+func TestTerminalPaneInnerSizeHiddenPaneNotOK(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // a second, focusable resource split
+	tp := ui.NewTerminalPane("term", "ctx-1", 40, 10)
+	tp.SetID("t:hidden")
+	l.AddTerminalSplit(tp) // inserted and focused
+
+	// The terminal pane is focused; move focus away so it becomes the hidden one
+	// under zoom, then zoom the now-focused split.
+	l.FocusNext()
+	l.ToggleZoomSplit()
+
+	if _, _, ok := l.TerminalPaneInnerSize("t:hidden"); ok {
+		t.Fatal("a hidden (0x0) terminal pane should report ok=false")
 	}
 }
 

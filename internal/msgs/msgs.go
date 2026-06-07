@@ -228,12 +228,19 @@ type TermExitMsg struct {
 // the pane/session id allocated up front, so the handler can bind the attach
 // session to the placeholder pane already on screen. On Err, the handler
 // surfaces the error and tears the placeholder pane down.
+// Client carries the *k8s.Client used for the pre-flight as an opaque handle
+// (typed `any` to keep the msgs package free of a k8s import, which would form
+// an import cycle — same pattern as ClusterReadyMsg). The handler type-asserts
+// it back to *k8s.Client. It lets the node-debug leak-cleanup path delete a
+// created pod even when the placeholder pane was closed mid-flight and its
+// termCleanup entry is already gone (so the cleanup cannot depend on that map).
 type DebugReadyMsg struct {
 	ID            string
 	PodName       string
 	Namespace     string
 	ContainerName string
 	NodeMode      bool
+	Client        any
 	Err           error
 }
 

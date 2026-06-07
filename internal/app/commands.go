@@ -1155,10 +1155,11 @@ func (a App) openExecTerminal(client *k8s.Client, podName, containerName, ns, ct
 	// single- to multi-context (or vice versa), and this pane's own badge must be
 	// shown/hidden per the same rule resource panes follow.
 	a.syncPaneFooters()
+	// syncTerminalSizes pushes the session's inner size: the session is already in
+	// a.terminals and the pane is already in the layout (AddTerminalSplit ran
+	// recalcSizes), so this covers the just-opened session — no extra direct Resize
+	// is needed.
 	a.syncTerminalSizes()
-
-	iw, ih := tp.InnerSize()
-	sess.Resize(iw, ih)
 
 	return a, readTermBytes(sess)
 }
@@ -1189,15 +1190,17 @@ func (a App) openDebugTerminal(client *k8s.Client, podName, containerName, ns, c
 	_, _ = tp.Write([]byte("starting debug container…\r\n"))
 
 	// Record cleanup metadata up front: ephemeral containers cannot be removed,
-	// so close/exit only surfaces a note (no delete).
-	a.termCleanup[id] = terminalMeta{ephemeral: true, client: client, podName: podName, namespace: ns}
+	// so close/exit only surfaces a note (no delete). The cancel func ties the
+	// pre-flight to the placeholder so closing it mid-flight aborts the API calls.
+	preflightCtx, preflightCancel := context.WithCancel(context.Background())
+	a.termCleanup[id] = terminalMeta{ephemeral: true, client: client, podName: podName, namespace: ns, preflightCancel: preflightCancel}
 
 	a.layout.AddTerminalSplit(tp)
 	a.keyTrie.Reset()
 	a.syncPaneFooters()
 	a.syncTerminalSizes()
 
-	return a, debugPreflightCmd(id, client, podName, containerName, ns, image, command, privileged)
+	return a, debugPreflightCmd(preflightCtx, id, client, podName, containerName, ns, image, command, privileged)
 }
 
 // openNodeDebugTerminal opens an embedded terminal pane for a node-debug pod.
@@ -1218,27 +1221,32 @@ func (a App) openNodeDebugTerminal(client *k8s.Client, nodeName, image string, c
 
 	// The pod name/namespace are not known until the pre-flight creates the pod;
 	// DebugReadyMsg fills them in. Record the client now so a partially-created
-	// session can still be cleaned up, and nodeDebug so close fires a delete.
-	a.termCleanup[id] = terminalMeta{nodeDebug: true, client: client}
+	// session can still be cleaned up, and nodeDebug so close fires a delete. The
+	// cancel func ties the pre-flight (create pod + wait-Running) to the
+	// placeholder: closing it mid-flight cancels the API calls, and
+	// PrepareNodeDebug's own ctx-cancel cleanup deletes a pod it already created.
+	preflightCtx, preflightCancel := context.WithCancel(context.Background())
+	a.termCleanup[id] = terminalMeta{nodeDebug: true, client: client, preflightCancel: preflightCancel}
 
 	a.layout.AddTerminalSplit(tp)
 	a.keyTrie.Reset()
 	a.syncPaneFooters()
 	a.syncTerminalSizes()
 
-	return a, nodeDebugPreflightCmd(id, client, nodeName, image, command)
+	return a, nodeDebugPreflightCmd(preflightCtx, id, client, nodeName, image, command)
 }
 
 // debugPreflightCmd runs the ephemeral pod-debug pre-flight off the UI goroutine
 // and reports its result as a DebugReadyMsg keyed by the pane id.
-func debugPreflightCmd(id string, client *k8s.Client, podName, containerName, ns, image string, command []string, privileged bool) tea.Cmd {
+func debugPreflightCmd(ctx context.Context, id string, client *k8s.Client, podName, containerName, ns, image string, command []string, privileged bool) tea.Cmd {
 	return func() tea.Msg {
-		dbgCtr, err := k8s.PrepareEphemeralDebug(context.Background(), client, podName, ns, containerName, image, command, privileged, nil)
+		dbgCtr, err := k8s.PrepareEphemeralDebug(ctx, client, podName, ns, containerName, image, command, privileged, nil)
 		return msgs.DebugReadyMsg{
 			ID:            id,
 			PodName:       podName,
 			Namespace:     ns,
 			ContainerName: dbgCtr,
+			Client:        client,
 			Err:           err,
 		}
 	}
@@ -1246,17 +1254,18 @@ func debugPreflightCmd(id string, client *k8s.Client, podName, containerName, ns
 
 // nodeDebugPreflightCmd runs the node-debug pre-flight (create pod + wait) off
 // the UI goroutine and reports a DebugReadyMsg with the created pod's identity.
-func nodeDebugPreflightCmd(id string, client *k8s.Client, nodeName, image string, command []string) tea.Cmd {
+func nodeDebugPreflightCmd(ctx context.Context, id string, client *k8s.Client, nodeName, image string, command []string) tea.Cmd {
 	return func() tea.Msg {
 		// node-debug is always privileged: the pod needs HostPID/HostNetwork/HostIPC
 		// and a /host mount to be useful for node troubleshooting.
-		podName, ns, containerName, err := k8s.PrepareNodeDebug(context.Background(), client, nodeName, image, command, true, nil)
+		podName, ns, containerName, err := k8s.PrepareNodeDebug(ctx, client, nodeName, image, command, true, nil)
 		return msgs.DebugReadyMsg{
 			ID:            id,
 			PodName:       podName,
 			Namespace:     ns,
 			ContainerName: containerName,
 			NodeMode:      true,
+			Client:        client,
 			Err:           err,
 		}
 	}
