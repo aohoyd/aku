@@ -33,6 +33,7 @@ type ResourceList struct {
 	namespace          string
 	context            string // kube-context this pane is scoped to ("" until app/layer sets it)
 	focused            bool
+	borderless         bool
 	width              int
 	height             int
 	contentWidth       int
@@ -214,7 +215,7 @@ const listScrollStep = 8
 
 // ScrollRight scrolls the resource list right by listScrollStep characters.
 func (r *ResourceList) ScrollRight() {
-	maxOffset := max(0, r.contentWidth-(r.width-2))
+	maxOffset := max(0, r.contentWidth-r.tableWidth())
 	r.xOffset = min(r.xOffset+listScrollStep, maxOffset)
 	r.table.SetXOffset(r.xOffset)
 }
@@ -233,7 +234,7 @@ func (r *ResourceList) ScrollHome() {
 
 // ScrollEnd scrolls horizontally to show the end of the content.
 func (r *ResourceList) ScrollEnd() {
-	r.xOffset = max(0, r.contentWidth-(r.width-2))
+	r.xOffset = max(0, r.contentWidth-r.tableWidth())
 	r.table.SetXOffset(r.xOffset)
 }
 
@@ -248,8 +249,11 @@ func (r *ResourceList) Cursor() int { return r.table.Cursor() }
 // shares the same row); the table's own header row is subtracted inside
 // table.RowAtY.
 func (r *ResourceList) RowAtY(y int) int {
-	const borderChrome = 1
-	adjusted := y - borderChrome
+	// 1 line: top border (bordered) or header (borderless). In both modes a
+	// single chrome line sits above the first data row, so the value is the
+	// same — the table's own header row is subtracted inside table.RowAtY.
+	const topChromeLines = 1
+	adjusted := y - topChromeLines
 	if adjusted < 0 {
 		return -1
 	}
@@ -335,7 +339,7 @@ func (r *ResourceList) SetPlugin(p plugin.ResourcePlugin) {
 	r.cachedColumnWidths = nil
 	r.cachedRowCount = 0
 	r.cachedContentWidth = 0
-	cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.width-2, r.sortState, nil)
+	cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.tableWidth(), r.sortState, nil)
 	r.contentWidth = cw
 	r.table.SetColumnsAndRows(cols, nil)
 	r.table.SetContentWidth(r.contentWidth)
@@ -367,7 +371,7 @@ func (r *ResourceList) ResetForReload() {
 			r.context = root.Context
 		}
 		r.sortState = root.SortState
-		cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.width-2, r.sortState, nil)
+		cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.tableWidth(), r.sortState, nil)
 		r.contentWidth = cw
 		r.table.SetColumnsAndRows(cols, nil)
 		r.table.SetContentWidth(r.contentWidth)
@@ -389,6 +393,20 @@ func (r ResourceList) Width() int { return r.width }
 // Height returns the current height.
 func (r ResourceList) Height() int { return r.height }
 
+// tableWidth returns the width available to the table given the current mode:
+// the full pane width when borderless (fullscreen zoom), or width-2 when
+// bordered to reserve the left/right border columns. This is the source of
+// truth for all POST-CONSTRUCTION sizing (SetSize/SetBorderless and the
+// horizontal-scroll clamp). The constructor hardcodes the equivalent width-2
+// literal because the receiver does not yet exist; a new pane is always
+// bordered, so the two agree.
+func (r *ResourceList) tableWidth() int {
+	if r.borderless {
+		return r.width
+	}
+	return r.width - 2
+}
+
 // SetSize updates the dimensions.
 func (r *ResourceList) SetSize(w, h int) {
 	r.width = w
@@ -398,10 +416,24 @@ func (r *ResourceList) SetSize(w, h int) {
 	r.cachedColumnWidths = nil
 	r.cachedRowCount = 0
 	r.cachedContentWidth = 0
-	cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), w-2, r.sortState, r.table.Rows())
+	// Borderless (fullscreen zoom) lays the table out at the full width with a
+	// single header line above it; bordered mode reserves the border chrome
+	// (w-2 wide, h-3 tall to leave room for the box + bottom border).
+	tableW, tableH := r.tableWidth(), h-3
+	if r.borderless {
+		tableH = h - 1
+	}
+	cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), tableW, r.sortState, r.table.Rows())
 	r.contentWidth = cw
-	r.table.SetLayout(cols, w-2, h-3)
+	r.table.SetLayout(cols, tableW, tableH)
 	r.table.SetContentWidth(r.contentWidth)
+}
+
+// SetBorderless toggles fullscreen borderless rendering and re-runs the layout
+// sizing so the table reflows for the new mode.
+func (r *ResourceList) SetBorderless(b bool) {
+	r.borderless = b
+	r.SetSize(r.width, r.height)
 }
 
 // Focus marks this list as focused.
@@ -478,7 +510,7 @@ func (r *ResourceList) PopNav() bool {
 	r.filterState = snap.FilterState
 	r.searchState = snap.SearchState
 	// Rebuild columns for restored plugin
-	cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.width-2, r.sortState, nil)
+	cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.tableWidth(), r.sortState, nil)
 	r.contentWidth = cw
 	r.table.SetColumnsAndRows(cols, nil)
 	r.table.SetContentWidth(r.contentWidth)
@@ -590,6 +622,18 @@ func (r ResourceList) View() string {
 		baseTitle = fmt.Sprintf("%s (%d/%d)", pluginLabel, len(r.displayObjects), len(r.allObjects))
 	} else {
 		baseTitle = fmt.Sprintf("%s (%d)", pluginLabel, len(r.displayObjects))
+	}
+
+	if r.borderless {
+		// Append the context badge into the base title so it stays visible without
+		// a border line to host it.
+		headerBase := baseTitle
+		if r.contextLabel != "" {
+			headerBase += " [" + truncateContext(r.contextLabel, maxBadgeContext) + "]"
+		}
+		titleRendered := BuildPanelTitleWithPrefix(nsPrefix, headerBase, r.filterState.DisplayPattern(), r.searchState.DisplayPattern(), r.width, r.inlineSearch)
+		headerLine := DetailHeaderStyle.Width(r.width).Render(titleRendered)
+		return lipgloss.JoinVertical(lipgloss.Left, headerLine, r.table.View())
 	}
 
 	borderStyle := UnfocusedBorderStyle
@@ -881,7 +925,7 @@ func (r *ResourceList) renderRows(re *regexp.Regexp) {
 		r.table.SetColumnsAndRows(r.cachedColumnWidths, rows)
 		r.table.SetContentWidth(r.contentWidth)
 	} else {
-		cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.width-2, r.sortState, rows)
+		cols, cw := pluginColumnsToTableColumns(r.effectiveColumns(), r.tableWidth(), r.sortState, rows)
 		r.cachedColumnWidths = cols
 		r.cachedContentWidth = cw
 		r.cachedRowCount = len(rows)

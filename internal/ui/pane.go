@@ -9,6 +9,7 @@ package ui
 // (e.g. pane.(*TerminalPane)), not a Kind() tag, so the interface stays minimal.
 type Pane interface {
 	SetSize(w, h int)
+	SetBorderless(b bool)
 	View() string
 	Focus()
 	Blur()

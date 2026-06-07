@@ -129,10 +129,12 @@ func TestLayoutFocusCycling(t *testing.T) {
 }
 
 // countFocusedSplits returns how many split borders are currently focused.
+// SplitAt returns nil for non-resource panes (e.g. terminal panes), so skip
+// nil entries to stay panic-safe in mixed resource/terminal layouts.
 func countFocusedSplits(l *Layout) int {
 	n := 0
 	for i := 0; i < l.SplitCount(); i++ {
-		if l.SplitAt(i).Focused() {
+		if s := l.SplitAt(i); s != nil && s.Focused() {
 			n++
 		}
 	}
@@ -798,28 +800,50 @@ func TestLayoutUnzoomAll(t *testing.T) {
 	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default", "")
 	l.AddSplit(svcsPlugin(), "default", "")
+	// Show the right panel so the un-zoomed split width is genuinely smaller than
+	// the full screen (leftWidth = 80*0.5 = 40). Without it, two vertically
+	// stacked splits each legitimately span the full width 80 even when not
+	// zoomed, which would make the revert assertion meaningless.
+	l.ShowRightPanel()
 
 	l.ToggleZoomSplit()
 	if l.EffectiveZoom() != ZoomSplit {
 		t.Fatal("precondition: split should be zoomed")
 	}
+	// Capture the fullscreen geometry the focused split has while zoomed so the
+	// post-unzoom assertion can prove it actually reverted.
+	if l.FocusedSplit().Width() != 80 || l.FocusedSplit().Height() != 26 {
+		t.Fatalf("precondition: zoomed split should be fullscreen 80x26, got %dx%d",
+			l.FocusedSplit().Width(), l.FocusedSplit().Height())
+	}
 	l.UnzoomAll()
 	if l.EffectiveZoom() != ZoomNone {
 		t.Fatalf("expected ZoomNone after UnzoomAll, got %d", l.EffectiveZoom())
 	}
+	// Geometry must revert to normal non-fullscreen sizing: with the right panel
+	// up the focused split is half-width (40), not the fullscreen 80, and the
+	// previously-hidden split is sized again (not 0x0).
+	if l.FocusedSplit().Width() != 40 {
+		t.Fatalf("focused split should revert to half width 40 after UnzoomAll, got width %d", l.FocusedSplit().Width())
+	}
+	other := l.SplitAt(0)
+	if other == nil || other.Width() == 0 || other.Height() == 0 {
+		t.Fatalf("previously-hidden split should be sized again after UnzoomAll, got %dx%d", other.Width(), other.Height())
+	}
 }
 
 func TestLayoutZoomSplitSizing(t *testing.T) {
-	l := New(80, 26, 1000, "15m", 900) // height = 26-1=25
+	l := New(80, 26, 1000, "15m", 900) // content height = 26-1=25
 	l.AddSplit(podsPlugin(), "default", "")
 	l.AddSplit(svcsPlugin(), "default", "")
 
 	l.ToggleZoomSplit() // focus is on split 1 (services)
 
-	// Focused split (1) should get full height
+	// Focused split (1) fills the entire screen (width x height+statusBarHeight),
+	// mirroring ZoomDetail's fullscreen geometry.
 	focused := l.FocusedSplit()
-	if focused.Height() != 25 {
-		t.Fatalf("focused split height: expected 25, got %d", focused.Height())
+	if focused.Width() != 80 || focused.Height() != 26 {
+		t.Fatalf("focused split: expected 80x26 (fullscreen), got %dx%d", focused.Width(), focused.Height())
 	}
 
 	// Non-focused split (0) should be zero-sized
@@ -827,6 +851,85 @@ func TestLayoutZoomSplitSizing(t *testing.T) {
 	if other.Height() != 0 || other.Width() != 0 {
 		t.Fatalf("non-focused split should be 0x0, got %dx%d", other.Width(), other.Height())
 	}
+}
+
+// assertExactlyOneZoomedSplit verifies the ZoomSplit invariant via observable
+// geometry: the split at focusIdx fills the entire screen (width x height +
+// statusBarHeight, the fullscreen size recalcSizes assigns under ZoomSplit) and
+// every other split is 0x0. Because recalcSizes keys the fullscreen size on
+// focusIdx and the borderless flag travels with the focused pane object, this
+// also proves exactly the focused split is the zoomed/borderless one.
+func assertExactlyOneZoomedSplit(t *testing.T, l *Layout, wantW, wantH int) {
+	t.Helper()
+	if l.EffectiveZoom() != ZoomSplit {
+		t.Fatalf("expected ZoomSplit, got %d", l.EffectiveZoom())
+	}
+	for i := 0; i < l.SplitCount(); i++ {
+		s := l.SplitAt(i)
+		if s == nil {
+			t.Fatalf("split at %d is not a resource pane", i)
+		}
+		if i == l.FocusIndex() {
+			if s.Width() != wantW || s.Height() != wantH {
+				t.Fatalf("focused split %d should be fullscreen %dx%d, got %dx%d",
+					i, wantW, wantH, s.Width(), s.Height())
+			}
+		} else if s.Width() != 0 || s.Height() != 0 {
+			t.Fatalf("non-focused split %d should be 0x0, got %dx%d",
+				i, s.Width(), s.Height())
+		}
+	}
+}
+
+// TestMoveFocusedSplitWhileZoomedKeepsInvariant verifies that moving the focused
+// split while ZoomSplit is active keeps the "exactly the focused split is zoomed"
+// invariant intact. MoveFocusedSplit swaps the pane objects and sets focusIdx to
+// the target, so the borderless flag travels with the focused pane object and
+// recalcSizes (which keys the fullscreen size on focusIdx) re-establishes the
+// geometry. This guards against a future regression where the borderless flag or
+// fullscreen geometry desyncs from focusIdx after a move-while-zoomed.
+func TestMoveFocusedSplitWhileZoomedKeepsInvariant(t *testing.T) {
+	t.Run("forward", func(t *testing.T) {
+		l := New(80, 26, 1000, "15m", 900)      // content height 25; fullscreen 80x26
+		l.AddSplit(podsPlugin(), "default", "") // idx 0
+		l.AddSplit(svcsPlugin(), "default", "") // idx 1
+		l.AddSplit(podsPlugin(), "default", "") // idx 2
+
+		l.FocusSplitAt(1)
+		l.ToggleZoomSplit()
+		assertExactlyOneZoomedSplit(t, &l, 80, 26)
+
+		l.MoveFocusedSplit(+1)
+
+		if l.FocusIndex() != 2 {
+			t.Fatalf("expected focusIdx to follow moved pane to 2, got %d", l.FocusIndex())
+		}
+		if got := l.SplitAt(2).Plugin().Name(); got != "services" {
+			t.Fatalf("expected moved 'services' pane now at index 2, got %q", got)
+		}
+		assertExactlyOneZoomedSplit(t, &l, 80, 26)
+	})
+
+	t.Run("backward", func(t *testing.T) {
+		l := New(80, 26, 1000, "15m", 900)
+		l.AddSplit(podsPlugin(), "default", "") // idx 0
+		l.AddSplit(svcsPlugin(), "default", "") // idx 1
+		l.AddSplit(podsPlugin(), "default", "") // idx 2
+
+		l.FocusSplitAt(1)
+		l.ToggleZoomSplit()
+		assertExactlyOneZoomedSplit(t, &l, 80, 26)
+
+		l.MoveFocusedSplit(-1)
+
+		if l.FocusIndex() != 0 {
+			t.Fatalf("expected focusIdx to follow moved pane to 0, got %d", l.FocusIndex())
+		}
+		if got := l.SplitAt(0).Plugin().Name(); got != "services" {
+			t.Fatalf("expected moved 'services' pane now at index 0, got %q", got)
+		}
+		assertExactlyOneZoomedSplit(t, &l, 80, 26)
+	})
 }
 
 func TestLayoutZoomDetailSizing(t *testing.T) {
@@ -849,15 +952,61 @@ func TestLayoutZoomDetailSizing(t *testing.T) {
 	}
 }
 
-func TestLayoutZoomSplitView(t *testing.T) {
+// TestLayoutZoomSplitViewRendersFocusedOnly verifies View() under ZoomSplit
+// renders only the focused split's content — proven by the rendered height
+// (it fills all 26 rows, the fullscreen geometry) and by the fact that switching
+// focus changes which split's view is produced. Other splits are 0x0.
+func TestLayoutZoomSplitViewRendersFocusedOnly(t *testing.T) {
 	l := New(80, 26, 1000, "15m", 900)
-	l.AddSplit(podsPlugin(), "default", "")
-	l.AddSplit(svcsPlugin(), "default", "")
+	l.AddSplit(podsPlugin(), "default", "") // idx 0
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1 (focused)
+	l.ShowRightPanel()                      // even with the right panel up...
+	l.ToggleZoomSplit()
+
+	// FocusedSplitRect is the single full-area rect; no detail rect exists.
+	rect, ok := l.FocusedSplitRect()
+	if !ok {
+		t.Fatal("expected a focused split rect under ZoomSplit")
+	}
+	if rect.X != 0 || rect.Y != 0 || rect.W != 80 || rect.H != 25 {
+		t.Fatalf("expected full-area rect {0,0,80,25}, got %+v", rect)
+	}
+	if rect.SplitIdx != l.FocusIndex() {
+		t.Fatalf("rect.SplitIdx = %d, want focus index %d", rect.SplitIdx, l.FocusIndex())
+	}
+
+	// View is non-empty and the only sized split is the focused one.
+	if l.View() == "" {
+		t.Fatal("zoomed view should not be empty")
+	}
+	if l.SplitAt(0).Width() != 0 || l.SplitAt(0).Height() != 0 {
+		t.Fatalf("non-focused split should be 0x0, got %dx%d", l.SplitAt(0).Width(), l.SplitAt(0).Height())
+	}
+}
+
+// TestLayoutZoomFollowsFocusSplitAt verifies FocusSplitAt under ZoomSplit moves
+// the fullscreen geometry (and thus the borderless flag) to the targeted split.
+func TestLayoutZoomFollowsFocusSplitAt(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1 (focused)
+	l.AddSplit(podsPlugin(), "default", "") // idx 2 (focused)
 
 	l.ToggleZoomSplit()
-	view := l.View()
-	if view == "" {
-		t.Fatal("zoomed view should not be empty")
+	l.FocusSplitAt(0)
+
+	if !l.SplitZoomed() {
+		t.Fatal("zoom should remain on after FocusSplitAt")
+	}
+	if l.FocusIndex() != 0 {
+		t.Fatalf("expected focus on 0, got %d", l.FocusIndex())
+	}
+	// The targeted split is fullscreen; the previously-focused ones are 0x0.
+	if l.SplitAt(0).Width() != 80 || l.SplitAt(0).Height() != 26 {
+		t.Fatalf("targeted split should be fullscreen 80x26, got %dx%d", l.SplitAt(0).Width(), l.SplitAt(0).Height())
+	}
+	if l.SplitAt(2).Width() != 0 || l.SplitAt(2).Height() != 0 {
+		t.Fatalf("previously focused split should be 0x0, got %dx%d", l.SplitAt(2).Width(), l.SplitAt(2).Height())
 	}
 }
 
@@ -874,42 +1023,165 @@ func TestLayoutZoomDetailView(t *testing.T) {
 }
 
 func TestLayoutZoomFollowsFocus(t *testing.T) {
-	l := New(80, 26, 1000, "15m", 900)      // height = 25
+	l := New(80, 26, 1000, "15m", 900)      // content height = 25
 	l.AddSplit(podsPlugin(), "default", "") // idx 0
 	l.AddSplit(svcsPlugin(), "default", "") // idx 1 (focused)
 
 	l.ToggleZoomSplit()
 
-	// Focus split 1 is zoomed — full height
-	if l.FocusedSplit().Height() != 25 {
-		t.Fatalf("focused split should be full height, got %d", l.FocusedSplit().Height())
+	// Focus split 1 is zoomed — fullscreen (80x26).
+	if l.FocusedSplit().Width() != 80 || l.FocusedSplit().Height() != 26 {
+		t.Fatalf("focused split should be fullscreen 80x26, got %dx%d",
+			l.FocusedSplit().Width(), l.FocusedSplit().Height())
 	}
 
-	// Tab to split 0 — zoom should follow
+	// Tab to split 0 — zoom should follow, staying zoomed.
 	l.FocusNext() // wraps to 0
 	if l.FocusIndex() != 0 {
 		t.Fatalf("expected focus on 0, got %d", l.FocusIndex())
 	}
-	if l.FocusedSplit().Height() != 25 {
-		t.Fatalf("after FocusNext, new focused split should be full height, got %d", l.FocusedSplit().Height())
+	if !l.SplitZoomed() {
+		t.Fatal("zoom should remain on after FocusNext")
 	}
-	// The other split (1) should be zero
-	if l.SplitAt(1).Height() != 0 {
-		t.Fatalf("non-focused split should be 0 height, got %d", l.SplitAt(1).Height())
+	// Borderless follows focus: the newly-focused split (0) is the one sized
+	// fullscreen; the old one (1) is 0x0. This asserts the borderless flag moved
+	// via the layout-observable geometry rather than a getter.
+	if l.FocusedSplit().Width() != 80 || l.FocusedSplit().Height() != 26 {
+		t.Fatalf("after FocusNext, new focused split should be fullscreen 80x26, got %dx%d",
+			l.FocusedSplit().Width(), l.FocusedSplit().Height())
+	}
+	if l.SplitAt(1).Width() != 0 || l.SplitAt(1).Height() != 0 {
+		t.Fatalf("old focused split should be 0x0, got %dx%d", l.SplitAt(1).Width(), l.SplitAt(1).Height())
 	}
 }
 
-func TestLayoutCloseCurrentSplitAutoUnzoom(t *testing.T) {
-	l := New(80, 26, 1000, "15m", 900)
+// TestLayoutZoomFollowsFocusPrev mirrors TestLayoutZoomFollowsFocus but moves
+// focus via FocusPrev. Under ZoomSplit the borderless/fullscreen geometry must
+// follow the newly-focused split and the previously-focused one must collapse to
+// 0x0 — proving the borderless flag never desyncs from splitZoomed.
+func TestLayoutZoomFollowsFocusPrev(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)      // content height = 25
+	l.AddSplit(podsPlugin(), "default", "") // idx 0
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1 (focused)
+
+	l.ToggleZoomSplit()
+
+	// Focus split 1 is zoomed — fullscreen (80x26).
+	if l.FocusedSplit().Width() != 80 || l.FocusedSplit().Height() != 26 {
+		t.Fatalf("focused split should be fullscreen 80x26, got %dx%d",
+			l.FocusedSplit().Width(), l.FocusedSplit().Height())
+	}
+
+	// Shift-tab to split 0 — zoom should follow, staying zoomed.
+	l.FocusPrev() // wraps to 0
+	if l.FocusIndex() != 0 {
+		t.Fatalf("expected focus on 0, got %d", l.FocusIndex())
+	}
+	if !l.SplitZoomed() {
+		t.Fatal("zoom should remain on after FocusPrev")
+	}
+	if l.FocusedSplit().Width() != 80 || l.FocusedSplit().Height() != 26 {
+		t.Fatalf("after FocusPrev, new focused split should be fullscreen 80x26, got %dx%d",
+			l.FocusedSplit().Width(), l.FocusedSplit().Height())
+	}
+	if l.SplitAt(1).Width() != 0 || l.SplitAt(1).Height() != 0 {
+		t.Fatalf("old focused split should be 0x0, got %dx%d", l.SplitAt(1).Width(), l.SplitAt(1).Height())
+	}
+}
+
+// TestLayoutCloseCurrentSplitStaysZoomed verifies that under the
+// fullscreen-borderless model a lone remaining pane STAYS zoomed after closing
+// the focused split, and the remaining split is correctly sized fullscreen (the
+// borderless flag moved off the discarded pane onto the survivor — no desync).
+func TestLayoutCloseCurrentSplitStaysZoomed(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900) // content height = 25
 	l.AddSplit(podsPlugin(), "default", "")
 	l.AddSplit(svcsPlugin(), "default", "")
 
 	l.ToggleZoomSplit()
 	l.CloseCurrentSplit()
 
-	// Only 1 split remains — zoom should auto-reset
+	// One split remains and stays zoomed.
+	if l.SplitCount() != 1 {
+		t.Fatalf("expected 1 split after close, got %d", l.SplitCount())
+	}
+	if l.EffectiveZoom() != ZoomSplit {
+		t.Fatalf("expected ZoomSplit to persist after close to 1 split, got %d", l.EffectiveZoom())
+	}
+	if !l.SplitZoomed() {
+		t.Fatal("SplitZoomed should remain true for the lone pane")
+	}
+	// The survivor is sized fullscreen, proving the borderless flag is on it.
+	focused := l.FocusedSplit()
+	if focused.Width() != 80 || focused.Height() != 26 {
+		t.Fatalf("surviving split should be fullscreen 80x26, got %dx%d", focused.Width(), focused.Height())
+	}
+
+	// Unzooming the lone pane returns to ZoomNone (no desync left behind).
+	l.ToggleZoomSplit()
 	if l.EffectiveZoom() != ZoomNone {
-		t.Fatalf("expected ZoomNone after close to 1 split, got %d", l.EffectiveZoom())
+		t.Fatalf("expected ZoomNone after unzooming the lone pane, got %d", l.EffectiveZoom())
+	}
+}
+
+// TestLayoutAddSplitWhileZoomed verifies that adding a resource split while a
+// split is zoomed moves the fullscreen-borderless geometry onto the new pane:
+// the new pane is sized fullscreen (80x26) and the previously-focused pane
+// collapses to 0x0 — proving the borderless flag follows focus and never
+// desyncs from splitZoomed.
+func TestLayoutAddSplitWhileZoomed(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900) // content height = 25
+	l.AddSplit(podsPlugin(), "default", "")
+	l.ToggleZoomSplit()
+	if l.EffectiveZoom() != ZoomSplit {
+		t.Fatal("precondition: split should be zoomed")
+	}
+
+	l.AddSplit(svcsPlugin(), "default", "") // inserted after focus, becomes focused
+
+	if !l.SplitZoomed() {
+		t.Fatal("zoom should remain on after AddSplit")
+	}
+	focused := l.FocusedSplit()
+	if focused.Width() != 80 || focused.Height() != 26 {
+		t.Fatalf("new split should be fullscreen 80x26, got %dx%d", focused.Width(), focused.Height())
+	}
+	old := l.SplitAt(0)
+	if old.Width() != 0 || old.Height() != 0 {
+		t.Fatalf("previously-focused split should be 0x0, got %dx%d", old.Width(), old.Height())
+	}
+}
+
+// TestLayoutAddTerminalSplitWhileZoomed mirrors TestLayoutAddSplitWhileZoomed
+// for AddTerminalSplit: the new terminal pane gets fullscreen geometry and the
+// previously-focused resource pane collapses to 0x0 while staying zoomed.
+func TestLayoutAddTerminalSplitWhileZoomed(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900) // content height = 25
+	l.AddSplit(podsPlugin(), "default", "")
+	l.ToggleZoomSplit()
+	if l.EffectiveZoom() != ZoomSplit {
+		t.Fatal("precondition: split should be zoomed")
+	}
+
+	tp := ui.NewTerminalPane("term", "ctx-1", 40, 10)
+	l.AddTerminalSplit(tp) // inserted after focus, becomes focused
+
+	if !l.SplitZoomed() {
+		t.Fatal("zoom should remain on after AddTerminalSplit")
+	}
+	// The new focused pane is the terminal; it is sized fullscreen and visible.
+	// Borderless fullscreen means the inner emulator size is full width (80) and
+	// full height minus the single header line (26-1 = 25).
+	if tp.IsHidden() {
+		t.Fatal("new terminal pane should be visible (sized) under zoom")
+	}
+	iw, ih := tp.InnerSize()
+	if iw != 80 || ih != 25 {
+		t.Fatalf("new terminal pane inner size should be fullscreen-borderless 80x25, got %dx%d", iw, ih)
+	}
+	old := l.SplitAt(0)
+	if old.Width() != 0 || old.Height() != 0 {
+		t.Fatalf("previously-focused split should be 0x0, got %dx%d", old.Width(), old.Height())
 	}
 }
 
@@ -958,13 +1230,28 @@ func TestLayoutFocusResourcesSafeWithNoSplits(t *testing.T) {
 	}
 }
 
-func TestLayoutZoomSplitNoopWithOneSplit(t *testing.T) {
-	l := New(80, 26, 1000, "15m", 900)
+// TestLayoutZoomSplitSingleSplit verifies a single split CAN now be zoomed:
+// fullscreen-borderless zoom is independent of how many splits exist.
+func TestLayoutZoomSplitSingleSplit(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900) // content height = 25
 	l.AddSplit(podsPlugin(), "default", "")
 
 	l.ToggleZoomSplit()
+	if l.EffectiveZoom() != ZoomSplit {
+		t.Fatalf("single split should be zoomable, got %d", l.EffectiveZoom())
+	}
+	if !l.SplitZoomed() {
+		t.Fatal("SplitZoomed should be true after zooming a single split")
+	}
+	// Fullscreen: the lone split fills width x (height + status-bar row).
+	focused := l.FocusedSplit()
+	if focused.Width() != 80 || focused.Height() != 26 {
+		t.Fatalf("zoomed single split: expected 80x26, got %dx%d", focused.Width(), focused.Height())
+	}
+
+	l.ToggleZoomSplit()
 	if l.EffectiveZoom() != ZoomNone {
-		t.Fatal("zoom should be no-op with single split")
+		t.Fatalf("expected ZoomNone after second toggle, got %d", l.EffectiveZoom())
 	}
 }
 
@@ -1048,6 +1335,52 @@ func TestLayoutUnzoomAllNew(t *testing.T) {
 	}
 	if l.EffectiveZoom() != ZoomNone {
 		t.Fatal("expected ZoomNone after UnzoomAll")
+	}
+	// Geometry must revert: with the right panel up each split is half-width (40),
+	// both splits are sized again (not 0x0), and the detail panel is back to its
+	// non-fullscreen half-width (40).
+	if w := l.FocusedSplit().Width(); w != 40 {
+		t.Fatalf("focused split should revert to half width 40 after UnzoomAll, got %d", w)
+	}
+	if s := l.SplitAt(0); s == nil || s.Width() == 0 || s.Height() == 0 {
+		t.Fatalf("split 0 should be sized again after UnzoomAll, got %dx%d", s.Width(), s.Height())
+	}
+	if rp := l.RightPanel(); rp.Width() != 40 {
+		t.Fatalf("right panel should revert to half width 40 after UnzoomAll, got %d", rp.Width())
+	}
+}
+
+// TestLayoutUnzoomAllClearsBorderless proves UnzoomAll clears the focused pane's
+// borderless FLAG, not merely its geometry. A terminal pane is the cleanest
+// observable: borderless ContentOffset is (0,1) (no left border, one header
+// line), bordered is (1,1). After UnzoomAll the focused terminal must report
+// (1,1), i.e. borderless was cleared and the border box is back.
+func TestLayoutUnzoomAllClearsBorderless(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "")
+	tp := ui.NewTerminalPane("term", "ctx-1", 40, 10)
+	l.AddTerminalSplit(tp) // inserted adjacent and focused
+
+	if l.FocusedPane() != ui.Pane(tp) {
+		t.Fatal("precondition: terminal pane should be focused")
+	}
+
+	l.ToggleZoomSplit()
+	if !l.SplitZoomed() {
+		t.Fatal("precondition: split should be zoomed")
+	}
+	if dx, dy := tp.ContentOffset(); dx != 0 || dy != 1 {
+		t.Fatalf("precondition: zoomed terminal should be borderless, ContentOffset = (%d,%d), want (0,1)", dx, dy)
+	}
+
+	l.UnzoomAll()
+
+	if l.SplitZoomed() {
+		t.Fatal("UnzoomAll should clear the split-zoom flag")
+	}
+	// The load-bearing assertion: borderless was actually cleared.
+	if dx, dy := tp.ContentOffset(); dx != 1 || dy != 1 {
+		t.Fatalf("after UnzoomAll the terminal should be bordered, ContentOffset = (%d,%d), want (1,1)", dx, dy)
 	}
 }
 
@@ -1166,8 +1499,12 @@ func TestLayoutHorizontalZoomNoneNoRightPanel(t *testing.T) {
 	}
 }
 
+// TestLayoutHorizontalZoomSplitSizing verifies ZoomSplit is fullscreen and
+// orientation-independent: even in horizontal orientation with the right panel
+// visible, the focused split fills the entire screen and the right panel is
+// hidden (not sized as part of the zoom).
 func TestLayoutHorizontalZoomSplitSizing(t *testing.T) {
-	l := New(80, 26, 1000, "15m", 900) // height = 25
+	l := New(80, 26, 1000, "15m", 900) // content height = 25
 	l.AddSplit(podsPlugin(), "default", "")
 	l.AddSplit(svcsPlugin(), "default", "")
 	l.ShowRightPanel()
@@ -1175,22 +1512,16 @@ func TestLayoutHorizontalZoomSplitSizing(t *testing.T) {
 
 	l.ToggleZoomSplit() // focus is on split 1
 
-	// Focused split gets full width, topHeight
+	// Focused split fills the entire screen regardless of orientation.
 	focused := l.FocusedSplit()
-	if focused.Width() != 80 || focused.Height() != 12 {
-		t.Fatalf("focused split: expected 80x12, got %dx%d", focused.Width(), focused.Height())
+	if focused.Width() != 80 || focused.Height() != 26 {
+		t.Fatalf("focused split: expected fullscreen 80x26, got %dx%d", focused.Width(), focused.Height())
 	}
 
 	// Non-focused split should be zero-sized
 	other := l.SplitAt(0)
 	if other.Width() != 0 || other.Height() != 0 {
 		t.Fatalf("non-focused split: expected 0x0, got %dx%d", other.Width(), other.Height())
-	}
-
-	// Right panel gets full width, bottomHeight
-	rp := l.RightPanel()
-	if rp.Width() != 80 || rp.Height() != 13 {
-		t.Fatalf("right panel: expected 80x13, got %dx%d", rp.Width(), rp.Height())
 	}
 }
 
@@ -1353,21 +1684,31 @@ func TestPaneAtHorizontalTwoSplitsWithDetail(t *testing.T) {
 	}
 }
 
-func TestPaneAtSplitZoomedDetailStillHittable(t *testing.T) {
+// TestPaneAtSplitZoomedRightPanelHidden verifies that under the new
+// fullscreen-borderless ZoomSplit the right panel is NOT shown even when it was
+// made visible: every click in the pane area routes to the focused split, and
+// there is no detail rect.
+func TestPaneAtSplitZoomedRightPanelHidden(t *testing.T) {
 	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default", "")
 	l.AddSplit(svcsPlugin(), "default", "")
 	l.ShowRightPanel()
 	l.ToggleZoomSplit()
 
-	// In ZoomSplit with right panel visible, the detail pane is still
-	// rendered on the right side and must be hittable.
+	// The right side that previously hosted the detail pane now belongs to the
+	// fullscreen focused split.
 	r, ok := l.PaneAt(60, 5)
 	if !ok {
-		t.Fatal("expected a hit on right side during split-zoom with detail visible")
+		t.Fatal("expected a hit on the right side (focused split fills the screen)")
 	}
-	if r.Kind != PaneDetail {
-		t.Fatalf("expected PaneDetail on right side during split-zoom, got kind=%d", r.Kind)
+	if r.Kind != PaneSplit || r.SplitIdx != l.FocusIndex() {
+		t.Fatalf("expected fullscreen focused split, got kind=%d idx=%d", r.Kind, r.SplitIdx)
+	}
+	// No detail rect exists anywhere under ZoomSplit.
+	for _, x := range []int{0, 10, 40, 79} {
+		if rr, ok := l.PaneAt(x, 5); ok && rr.Kind == PaneDetail {
+			t.Fatalf("no detail rect expected under ZoomSplit, found one at x=%d", x)
+		}
 	}
 }
 
@@ -1413,10 +1754,9 @@ func TestPaneAtSplitZoomed(t *testing.T) {
 
 	l.ToggleZoomSplit() // focused is split 1
 
-	// In ZoomSplit with right panel visible: the focused split fills the
-	// left column and the detail panel remains visible on the right. Both
-	// rects are emitted so clicks on the visible detail pane are still
-	// routed correctly; only non-focused splits are hidden.
+	// In the fullscreen-borderless ZoomSplit the focused split fills the entire
+	// pane area; the right panel and other splits are hidden. A single full-area
+	// rect for the focused split is emitted.
 	// Click inside the zoomed split area — expect focused split's rect.
 	r, ok := l.PaneAt(10, 10)
 	if !ok {
@@ -1427,7 +1767,7 @@ func TestPaneAtSplitZoomed(t *testing.T) {
 	}
 
 	// No rect for non-focused split 0: clicking anywhere should hit either the
-	// zoomed split or nothing (since it fills the whole left area).
+	// zoomed split or nothing (since it fills the whole area).
 	// Anywhere outside pane area (status bar row) → false.
 	if _, ok := l.PaneAt(10, 25); ok {
 		t.Fatal("status-bar row should not match any pane rect")
@@ -1496,8 +1836,9 @@ func TestPaneAtDetailZoomedWithoutRightPanel(t *testing.T) {
 }
 
 // TestPaneAtHorizontalSplitZoomed covers the ZoomSplit case when the
-// orientation is horizontal — the zoomed split rect spans the full width and
-// the detail pane occupies the bottom band.
+// orientation is horizontal — ZoomSplit is fullscreen and
+// orientation-independent, so the zoomed split rect spans the whole pane area
+// and the right panel is hidden (no detail band).
 func TestPaneAtHorizontalSplitZoomed(t *testing.T) {
 	l := New(80, 26, 1000, "15m", 900)
 	l.AddSplit(podsPlugin(), "default", "")

@@ -121,7 +121,7 @@ func TestTerminalPane_FocusBlurBorderDiffers(t *testing.T) {
 	}
 }
 
-func TestTerminalPane_KindContextTitle(t *testing.T) {
+func TestTerminalPane_ContextAndTitle(t *testing.T) {
 	p := NewTerminalPane("debug: x", "ctx-1", 40, 10)
 	if p.Context() != "ctx-1" {
 		t.Fatalf("Context = %q, want ctx-1", p.Context())
@@ -174,7 +174,7 @@ func TestTerminalPane_ExitedBannerAndKeysFallThrough(t *testing.T) {
 		t.Fatalf("View missing exit note; got:\n%s", out)
 	}
 
-	handled, toShell, cmd := p.HandleKey(printable('a'), "ctrl+a")
+	handled, toShell, cmd := p.HandleKey(printable('a'), "ctrl+a", nil)
 	if handled {
 		t.Fatal("exited pane should return handled=false")
 	}
@@ -186,7 +186,7 @@ func TestTerminalPane_ExitedBannerAndKeysFallThrough(t *testing.T) {
 func TestTerminalPane_TypingEncodesPrintable(t *testing.T) {
 	p := NewTerminalPane("t", "", 40, 10)
 	p.Focus()
-	handled, toShell, cmd := p.HandleKey(printable('l'), "ctrl+a")
+	handled, toShell, cmd := p.HandleKey(printable('l'), "ctrl+a", nil)
 	if !handled {
 		t.Fatal("printable key should be handled")
 	}
@@ -206,7 +206,7 @@ func TestTerminalPane_PrefixEntersNavThenFocusRight(t *testing.T) {
 	p.Focus()
 
 	// Prefix flips to nav, no bytes.
-	handled, toShell, cmd := p.HandleKey(ctrl('a'), "ctrl+a")
+	handled, toShell, cmd := p.HandleKey(ctrl('a'), "ctrl+a", nil)
 	if !handled || toShell != nil || cmd != PaneCmdNone {
 		t.Fatalf("prefix: handled=%v toShell=%q cmd=%v", handled, toShell, cmd)
 	}
@@ -215,7 +215,7 @@ func TestTerminalPane_PrefixEntersNavThenFocusRight(t *testing.T) {
 	}
 
 	// 'l' → focus right, back to typing.
-	handled, toShell, cmd = p.HandleKey(printable('l'), "ctrl+a")
+	handled, toShell, cmd = p.HandleKey(printable('l'), "ctrl+a", nil)
 	if !handled || toShell != nil {
 		t.Fatalf("nav l: handled=%v toShell=%q", handled, toShell)
 	}
@@ -238,7 +238,7 @@ func TestTerminalPane_NavIndicatorShownInTitle(t *testing.T) {
 		t.Fatalf("NAV indicator shown before entering nav mode:\n%s", ansi.Strip(p.View()))
 	}
 	// Prefix flips to nav mode.
-	p.HandleKey(ctrl('a'), "ctrl+a")
+	p.HandleKey(ctrl('a'), "ctrl+a", nil)
 	if p.mode != modeNav {
 		t.Fatal("precondition: should be in nav mode after prefix")
 	}
@@ -272,7 +272,7 @@ func TestTerminalPane_EncodeUnmappedKeyReturnsNil(t *testing.T) {
 	p := NewTerminalPane("t", "", 40, 10)
 	p.Focus()
 	key := tea.KeyPressMsg{Code: rune(999)}
-	handled, toShell, cmd := p.HandleKey(key, "ctrl+a")
+	handled, toShell, cmd := p.HandleKey(key, "ctrl+a", nil)
 	if !handled {
 		t.Fatal("unmapped key in typing mode should be handled")
 	}
@@ -288,8 +288,8 @@ func TestTerminalPane_PrefixPrefixSendsLiteral(t *testing.T) {
 	p := NewTerminalPane("t", "", 40, 10)
 	p.Focus()
 
-	p.HandleKey(ctrl('a'), "ctrl+a") // enter nav
-	handled, toShell, cmd := p.HandleKey(ctrl('a'), "ctrl+a")
+	p.HandleKey(ctrl('a'), "ctrl+a", nil) // enter nav
+	handled, toShell, cmd := p.HandleKey(ctrl('a'), "ctrl+a", nil)
 	if !handled || cmd != PaneCmdNone {
 		t.Fatalf("prefix-prefix: handled=%v cmd=%v", handled, cmd)
 	}
@@ -316,14 +316,13 @@ func TestTerminalPane_NavCommands(t *testing.T) {
 		{tea.KeyPressMsg{Code: tea.KeyDown}, PaneCmdFocusDown},
 		{tea.KeyPressMsg{Code: tea.KeyPgUp}, PaneCmdScrollUp},
 		{tea.KeyPressMsg{Code: tea.KeyPgDown}, PaneCmdScrollDown},
-		{printable('z'), PaneCmdZoom},
 		{printable('x'), PaneCmdClose},
 	}
 	for _, tc := range cases {
 		p := NewTerminalPane("t", "", 40, 10)
 		p.Focus()
-		p.HandleKey(ctrl('a'), "ctrl+a") // enter nav
-		handled, toShell, cmd := p.HandleKey(tc.key, "ctrl+a")
+		p.HandleKey(ctrl('a'), "ctrl+a", nil) // enter nav
+		handled, toShell, cmd := p.HandleKey(tc.key, "ctrl+a", nil)
 		if !handled || toShell != nil {
 			t.Fatalf("%v: handled=%v toShell=%q", tc.key, handled, toShell)
 		}
@@ -336,11 +335,104 @@ func TestTerminalPane_NavCommands(t *testing.T) {
 	}
 }
 
+// TestTerminalPane_NavZNoLongerZooms asserts that in nav mode the 'z' key no
+// longer produces a zoom command — zoom moved to a captured alt+z handled by the
+// App's trie. 'z' is now an unmapped nav key: consumed as a no-op.
+func TestTerminalPane_NavZNoLongerZooms(t *testing.T) {
+	p := NewTerminalPane("t", "", 40, 10)
+	p.Focus()
+	p.HandleKey(ctrl('a'), "ctrl+a", nil) // enter nav
+	handled, toShell, cmd := p.HandleKey(printable('z'), "ctrl+a", nil)
+	if !handled {
+		t.Fatal("nav z should be consumed (handled)")
+	}
+	if toShell != nil || cmd != PaneCmdNone {
+		t.Fatalf("nav z should be a no-op now; got toShell=%q cmd=%v", toShell, cmd)
+	}
+	if p.mode != modeTyping {
+		t.Fatal("mode should return to typing after nav z")
+	}
+}
+
+// TestTerminalPane_TypingCapturedKeyFallsThrough asserts that, in typing mode
+// over a live shell, a captured key (alt+z, shift+up) is NOT forwarded to the
+// shell: the pane returns handled=false so the App's trie can act on it, while a
+// non-captured key with the same captured set is still encoded and forwarded.
+func TestTerminalPane_TypingCapturedKeyFallsThrough(t *testing.T) {
+	capturedSet := map[string]bool{"alt+z": true, "shift+up": true}
+	captured := func(k string) bool { return capturedSet[k] }
+
+	altZ := tea.KeyPressMsg{Code: 'z', Mod: tea.ModAlt}
+	shiftUp := tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift}
+
+	for _, tc := range []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{"alt+z", altZ},
+		{"shift+up", shiftUp},
+	} {
+		p := NewTerminalPane("t", "", 40, 10)
+		p.Focus()
+		handled, toShell, cmd := p.HandleKey(tc.key, "ctrl+a", captured)
+		if handled {
+			t.Fatalf("%s: captured key should fall through (handled=false)", tc.name)
+		}
+		if toShell != nil || cmd != PaneCmdNone {
+			t.Fatalf("%s: captured key should produce no bytes/cmd; got %q %v", tc.name, toShell, cmd)
+		}
+	}
+
+	// A non-captured printable key with the same captured set is still forwarded.
+	p := NewTerminalPane("t", "", 40, 10)
+	p.Focus()
+	handled, toShell, cmd := p.HandleKey(printable('a'), "ctrl+a", captured)
+	if !handled {
+		t.Fatal("non-captured key should be handled")
+	}
+	if !bytes.Equal(toShell, []byte("a")) {
+		t.Fatalf("non-captured key toShell = %q, want %q", toShell, "a")
+	}
+	if cmd != PaneCmdNone {
+		t.Fatalf("non-captured key cmd = %v, want PaneCmdNone", cmd)
+	}
+
+	// The prefix key still flips to nav even with a captured set present.
+	p2 := NewTerminalPane("t", "", 40, 10)
+	p2.Focus()
+	handled, toShell, cmd = p2.HandleKey(ctrl('a'), "ctrl+a", captured)
+	if !handled || toShell != nil || cmd != PaneCmdNone {
+		t.Fatalf("prefix with captured set: handled=%v toShell=%q cmd=%v", handled, toShell, cmd)
+	}
+	if p2.mode != modeNav {
+		t.Fatal("prefix should still flip to nav mode with a captured set")
+	}
+}
+
+// TestTerminalPane_CapturedKeyDoesNotSnapScroll asserts that a captured-key
+// fall-through does NOT snap the viewport back to the live bottom (the App's
+// trie may act on the key while the user stays scrolled into history).
+func TestTerminalPane_CapturedKeyDoesNotSnapScroll(t *testing.T) {
+	p := NewTerminalPane("t", "", 20, 5)
+	p.SetScrollback(1000)
+	p.Focus()
+	fillScrollback(t, p, 20)
+	p.ScrollUp(5)
+	if p.ScrollOffset() == 0 {
+		t.Fatal("precondition: should be scrolled up")
+	}
+	captured := func(k string) bool { return k == "alt+z" }
+	p.HandleKey(tea.KeyPressMsg{Code: 'z', Mod: tea.ModAlt}, "ctrl+a", captured)
+	if p.ScrollOffset() != 5 {
+		t.Fatalf("captured fall-through should not snap scroll; offset = %d, want 5", p.ScrollOffset())
+	}
+}
+
 func TestTerminalPane_NavUnmappedIsNoOp(t *testing.T) {
 	p := NewTerminalPane("t", "", 40, 10)
 	p.Focus()
-	p.HandleKey(ctrl('a'), "ctrl+a") // enter nav
-	handled, toShell, cmd := p.HandleKey(printable('q'), "ctrl+a")
+	p.HandleKey(ctrl('a'), "ctrl+a", nil) // enter nav
+	handled, toShell, cmd := p.HandleKey(printable('q'), "ctrl+a", nil)
 	if !handled {
 		t.Fatal("unmapped nav key should be consumed (handled)")
 	}
@@ -349,6 +441,30 @@ func TestTerminalPane_NavUnmappedIsNoOp(t *testing.T) {
 	}
 	if p.mode != modeTyping {
 		t.Fatal("mode should return to typing after unmapped nav key")
+	}
+}
+
+// TestTerminalPane_NavCapturedKeyConsumed documents that the capture mechanism
+// only applies in modeTyping: in modeNav a captured key (alt+z) is interpreted
+// by the nav state machine — here as an unmapped no-op — and is fully consumed
+// (handled=true) rather than falling through to the App's global trie.
+func TestTerminalPane_NavCapturedKeyConsumed(t *testing.T) {
+	p := NewTerminalPane("t", "", 40, 10)
+	p.Focus()
+	p.HandleKey(ctrl('a'), "ctrl+a", nil) // enter nav (send the prefix first)
+	if p.mode != modeNav {
+		t.Fatal("precondition: pane should be in nav mode after prefix")
+	}
+	captured := func(k string) bool { return k == "alt+z" }
+	handled, toShell, cmd := p.HandleKey(tea.KeyPressMsg{Code: 'z', Mod: tea.ModAlt}, "ctrl+a", captured)
+	if !handled {
+		t.Fatal("captured key in nav mode should be consumed (handled=true), not fall through")
+	}
+	if toShell != nil || cmd != PaneCmdNone {
+		t.Fatalf("captured key in nav mode should be a no-op; got %q %v", toShell, cmd)
+	}
+	if p.mode != modeTyping {
+		t.Fatal("mode should return to typing after a nav key")
 	}
 }
 
@@ -378,7 +494,7 @@ func TestTerminalPane_EncodesControlAndSpecialKeys(t *testing.T) {
 	for _, tc := range cases {
 		p := NewTerminalPane("t", "", 40, 10)
 		p.Focus()
-		handled, toShell, cmd := p.HandleKey(tc.key, "ctrl+b")
+		handled, toShell, cmd := p.HandleKey(tc.key, "ctrl+b", nil)
 		if !handled || cmd != PaneCmdNone {
 			t.Fatalf("%s: handled=%v cmd=%v", tc.name, handled, cmd)
 		}
@@ -466,19 +582,130 @@ func TestTerminalPane_EncodesAltKeys(t *testing.T) {
 func TestTerminalPane_BlurResetsModeToTyping(t *testing.T) {
 	p := NewTerminalPane("t", "", 40, 10)
 	p.Focus()
-	p.HandleKey(ctrl('a'), "ctrl+a") // enter nav
+	p.HandleKey(ctrl('a'), "ctrl+a", nil) // enter nav
 	if p.mode != modeNav {
 		t.Fatal("precondition: should be in nav")
 	}
 	p.Blur()
 	p.Focus()
 	// Next key must encode to the shell (typing), not be treated as a nav cmd.
-	handled, toShell, cmd := p.HandleKey(printable('l'), "ctrl+a")
+	handled, toShell, cmd := p.HandleKey(printable('l'), "ctrl+a", nil)
 	if !handled || cmd != PaneCmdNone {
 		t.Fatalf("after blur/refocus: handled=%v cmd=%v", handled, cmd)
 	}
 	if !bytes.Equal(toShell, []byte("l")) {
 		t.Fatalf("after blur/refocus: toShell = %q, want %q", toShell, "l")
+	}
+}
+
+// containsBorderRune reports whether s contains any of the rounded-border box
+// drawing runes used by the bordered render path.
+func containsBorderRune(s string) bool {
+	for _, r := range []string{"│", "╭", "╮", "╰", "╯", "─"} {
+		if strings.Contains(s, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTerminalPane_BorderlessViewNoBorder asserts the borderless View renders no
+// box-border runes and includes a header line with the title plus the exit-zoom
+// hint, while the bordered View does include the border.
+func TestTerminalPane_BorderlessViewNoBorder(t *testing.T) {
+	p := NewTerminalPane("exec: pod/ctr", "minikube", 40, 10)
+
+	bordered := p.View()
+	if !containsBorderRune(bordered) {
+		t.Fatalf("bordered View should contain border runes; got:\n%s", ansi.Strip(bordered))
+	}
+
+	p.SetBorderless(true)
+	out := p.View()
+	if containsBorderRune(out) {
+		t.Fatalf("borderless View should contain no border runes; got:\n%s", ansi.Strip(out))
+	}
+	stripped := ansi.Strip(out)
+	if !strings.Contains(stripped, "exec: pod/ctr") {
+		t.Fatalf("borderless View missing title header; got:\n%s", stripped)
+	}
+	if !strings.Contains(stripped, "alt+z") {
+		t.Fatalf("borderless View missing exit-zoom hint; got:\n%s", stripped)
+	}
+}
+
+// TestTerminalPane_BorderedViewNoZoomHint guards the design decision that the
+// "(alt+z: exit zoom)" hint is TERMINAL-ONLY and lives only in the borderless
+// header: a bordered, focused terminal View must NOT leak the hint into the
+// bordered title.
+func TestTerminalPane_BorderedViewNoZoomHint(t *testing.T) {
+	p := NewTerminalPane("exec: pod/ctr", "minikube", 40, 10)
+	p.Focus()
+
+	out := p.View()
+	if !containsBorderRune(out) {
+		t.Fatalf("precondition: focused bordered View should contain border runes; got:\n%s", ansi.Strip(out))
+	}
+	if stripped := ansi.Strip(out); strings.Contains(stripped, "alt+z") {
+		t.Fatalf("bordered View must not contain the exit-zoom hint; got:\n%s", stripped)
+	}
+}
+
+// TestTerminalPane_BorderlessExitedBanner asserts the exit banner is overlaid in
+// the borderless render path: with SetBorderless(true) and after MarkExited, the
+// View takes the borderless branch (no border runes) yet still shows the exit
+// banner text and status.
+func TestTerminalPane_BorderlessExitedBanner(t *testing.T) {
+	p := NewTerminalPane("exec: pod/ctr", "minikube", 40, 10)
+	p.SetBorderless(true)
+	p.MarkExited(143)
+
+	out := p.View()
+	if containsBorderRune(out) {
+		t.Fatalf("borderless exited View should contain no border runes; got:\n%s", ansi.Strip(out))
+	}
+	stripped := ansi.Strip(out)
+	if !strings.Contains(stripped, "[exited") {
+		t.Fatalf("borderless exited View missing exit banner; got:\n%s", stripped)
+	}
+	if !strings.Contains(stripped, "143") {
+		t.Fatalf("borderless exited View missing exit status; got:\n%s", stripped)
+	}
+}
+
+// TestTerminalPane_BorderlessInnerSizeAndOffset asserts InnerSize and
+// ContentOffset differ between bordered and borderless modes for the same outer
+// size: bordered is (w-2, h-2) at offset (1,1); borderless is (w, h-1) at offset
+// (0,1).
+func TestTerminalPane_BorderlessInnerSizeAndOffset(t *testing.T) {
+	p := NewTerminalPane("t", "", 40, 10)
+
+	if iw, ih := p.InnerSize(); iw != 38 || ih != 8 {
+		t.Fatalf("bordered InnerSize = (%d,%d), want (38,8)", iw, ih)
+	}
+	if dx, dy := p.ContentOffset(); dx != 1 || dy != 1 {
+		t.Fatalf("bordered ContentOffset = (%d,%d), want (1,1)", dx, dy)
+	}
+
+	p.SetBorderless(true)
+	if iw, ih := p.InnerSize(); iw != 40 || ih != 9 {
+		t.Fatalf("borderless InnerSize = (%d,%d), want (40,9)", iw, ih)
+	}
+	if dx, dy := p.ContentOffset(); dx != 0 || dy != 1 {
+		t.Fatalf("borderless ContentOffset = (%d,%d), want (0,1)", dx, dy)
+	}
+}
+
+// TestTerminalPane_SetBorderlessChangesInnerSize asserts SetBorderless(true)
+// actually changes the reported inner size from the bordered to the borderless
+// dimensions.
+func TestTerminalPane_SetBorderlessChangesInnerSize(t *testing.T) {
+	p := NewTerminalPane("t", "", 40, 10)
+	before, beforeH := p.InnerSize()
+	p.SetBorderless(true)
+	after, afterH := p.InnerSize()
+	if before == after && beforeH == afterH {
+		t.Fatalf("SetBorderless did not change InnerSize: (%d,%d)", after, afterH)
 	}
 }
 
@@ -568,7 +795,7 @@ func TestTerminalPane_TypingSnapsToBottom(t *testing.T) {
 		t.Fatal("precondition: should be scrolled up")
 	}
 	// A printable key sent to the shell snaps back to the bottom.
-	p.HandleKey(printable('a'), "ctrl+a")
+	p.HandleKey(printable('a'), "ctrl+a", nil)
 	if p.ScrollOffset() != 0 {
 		t.Fatalf("typing should snap offset to 0, got %d", p.ScrollOffset())
 	}

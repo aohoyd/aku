@@ -20,7 +20,7 @@ type ZoomMode int
 
 const (
 	ZoomNone   ZoomMode = iota // all splits visible
-	ZoomSplit                  // focused split fills left column
+	ZoomSplit                  // focused split fills the entire screen, borderless
 	ZoomDetail                 // detail panel fills entire screen
 )
 
@@ -108,6 +108,13 @@ func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace, context string) {
 		l.splits[i].Blur()
 	}
 
+	// Under zoom the previously-focused pane carries borderless=true; clear it
+	// before inserting so the borderless flag follows the new focus (mirrors
+	// FocusNext/FocusPrev/FocusSplitAt) and never desyncs from splitZoomed.
+	if l.splitZoomed && len(l.splits) > 0 {
+		l.splits[l.focusIdx].SetBorderless(false)
+	}
+
 	// Insert the new split directly after the focused pane (not at the end).
 	// Stored as a pointer so it is a stable ui.Pane element that can be mutated
 	// in place via the typed accessors.
@@ -118,6 +125,9 @@ func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace, context string) {
 	l.splits = slices.Insert(l.splits, insertIdx, ui.Pane(&rl))
 	l.focusIdx = insertIdx
 	l.splits[l.focusIdx].Focus()
+	if l.splitZoomed {
+		l.splits[l.focusIdx].SetBorderless(true)
+	}
 	l.recalcSizes()
 }
 
@@ -131,6 +141,12 @@ func (l *Layout) AddTerminalSplit(p ui.Pane) {
 	for i := range l.splits {
 		l.splits[i].Blur()
 	}
+	// Under zoom the previously-focused pane carries borderless=true; clear it
+	// before inserting so the borderless flag follows the new focus (mirrors
+	// FocusNext/FocusPrev/FocusSplitAt) and never desyncs from splitZoomed.
+	if l.splitZoomed && len(l.splits) > 0 {
+		l.splits[l.focusIdx].SetBorderless(false)
+	}
 	insertIdx := 0
 	if len(l.splits) > 0 {
 		insertIdx = l.focusIdx + 1
@@ -138,6 +154,9 @@ func (l *Layout) AddTerminalSplit(p ui.Pane) {
 	l.splits = slices.Insert(l.splits, insertIdx, p)
 	l.focusIdx = insertIdx
 	l.splits[l.focusIdx].Focus()
+	if l.splitZoomed {
+		l.splits[l.focusIdx].SetBorderless(true)
+	}
 	l.recalcSizes()
 }
 
@@ -198,8 +217,12 @@ func (l *Layout) CloseCurrentSplit() bool {
 			l.splits[i].Blur()
 		}
 	}
-	if len(l.splits) == 1 && l.splitZoomed {
-		l.splitZoomed = false
+	// The removed pane carried the borderless flag while zoomed, but it is now
+	// discarded. If we remain zoomed (a lone pane stays zoomed under the
+	// fullscreen-borderless model), move the borderless flag onto the new
+	// focused split so splitZoomed and borderless never desync.
+	if l.splitZoomed {
+		l.splits[l.focusIdx].SetBorderless(true)
 	}
 	l.recalcSizes()
 	return false
@@ -215,6 +238,21 @@ func (l *Layout) FocusIndex() int {
 	return l.focusIdx
 }
 
+// moveBorderlessFlag keeps the fullscreen-borderless flag in lockstep with split
+// focus while zoomed: it clears borderless on the split at `from`, sets it on the
+// split at `to`, and recomputes geometry so the newly-focused split renders
+// fullscreen. It is a no-op unless splitZoomed is set, so the "zoom follows
+// focus" invariant lives in one place instead of being duplicated across every
+// focus-move path (FocusNext/FocusPrev/FocusSplitAt). Indices must be valid.
+func (l *Layout) moveBorderlessFlag(from, to int) {
+	if !l.splitZoomed {
+		return
+	}
+	l.splits[from].SetBorderless(false)
+	l.splits[to].SetBorderless(true)
+	l.recalcSizes()
+}
+
 // FocusNext cycles focus to the next split (wraps around).
 func (l *Layout) FocusNext() {
 	if len(l.splits) == 0 {
@@ -227,12 +265,13 @@ func (l *Layout) FocusNext() {
 		l.ActiveDetailPanel().Blur()
 		l.focusTarget = FocusTargetResources
 	}
+	oldIdx := l.focusIdx
 	l.splits[l.focusIdx].Blur()
 	l.focusIdx = (l.focusIdx + 1) % len(l.splits)
 	l.splits[l.focusIdx].Focus()
-	if l.splitZoomed {
-		l.recalcSizes()
-	}
+	// Zoom follows focus: move the borderless flag to the newly-focused split so
+	// it never desyncs from splitZoomed (no-op when not zoomed).
+	l.moveBorderlessFlag(oldIdx, l.focusIdx)
 }
 
 // FocusPrev cycles focus to the previous split (wraps around).
@@ -247,12 +286,13 @@ func (l *Layout) FocusPrev() {
 		l.ActiveDetailPanel().Blur()
 		l.focusTarget = FocusTargetResources
 	}
+	oldIdx := l.focusIdx
 	l.splits[l.focusIdx].Blur()
 	l.focusIdx = (l.focusIdx - 1 + len(l.splits)) % len(l.splits)
 	l.splits[l.focusIdx].Focus()
-	if l.splitZoomed {
-		l.recalcSizes()
-	}
+	// Zoom follows focus: move the borderless flag to the newly-focused split so
+	// it never desyncs from splitZoomed (no-op when not zoomed).
+	l.moveBorderlessFlag(oldIdx, l.focusIdx)
 }
 
 // FocusSplitAt moves focus to the split at the given index.
@@ -260,9 +300,14 @@ func (l *Layout) FocusSplitAt(idx int) {
 	if idx < 0 || idx >= len(l.splits) {
 		return
 	}
+	oldIdx := l.focusIdx
 	l.splits[l.focusIdx].Blur()
 	l.focusIdx = idx
 	l.splits[l.focusIdx].Focus()
+	// Zoom follows focus: move the borderless flag to the newly-focused split and
+	// recompute geometry so the new split renders fullscreen (no-op when not
+	// zoomed).
+	l.moveBorderlessFlag(oldIdx, l.focusIdx)
 }
 
 // MoveFocusedSplit moves the focused split by delta positions in the split
@@ -401,13 +446,20 @@ func (l *Layout) FocusResources() {
 	}
 }
 
-// ToggleZoomSplit toggles zoom on the focused resource split.
-// No-op when there is only one split (nothing to zoom past).
+// ToggleZoomSplit toggles fullscreen-borderless zoom on the focused split.
+// The focused split fills the entire screen; all other splits and the right
+// panel are hidden. A single split can be zoomed. No-op when there are no
+// splits. The borderless flag on the focused pane is kept in lockstep with
+// splitZoomed (mirrors ToggleZoomDetail).
 func (l *Layout) ToggleZoomSplit() {
 	if l.splitZoomed {
 		l.splitZoomed = false
-	} else if len(l.splits) > 1 {
+		if p := l.FocusedPane(); p != nil {
+			p.SetBorderless(false)
+		}
+	} else if len(l.splits) >= 1 {
 		l.splitZoomed = true
+		l.FocusedPane().SetBorderless(true)
 	} else {
 		return
 	}
@@ -434,7 +486,7 @@ func (l *Layout) EffectiveZoom() ZoomMode {
 	if l.detailZoomed && l.rightVisible {
 		return ZoomDetail
 	}
-	if l.splitZoomed && len(l.splits) > 1 {
+	if l.splitZoomed {
 		return ZoomSplit
 	}
 	return ZoomNone
@@ -466,6 +518,11 @@ func (l *Layout) ToggleOrientation() {
 func (l *Layout) UnzoomAll() {
 	if l.detailZoomed {
 		l.ActiveDetailPanel().SetBorderless(false)
+	}
+	if l.splitZoomed {
+		if p := l.FocusedPane(); p != nil {
+			p.SetBorderless(false)
+		}
 	}
 	l.splitZoomed = false
 	l.detailZoomed = false
@@ -559,15 +616,9 @@ func (l Layout) View() string {
 		return l.splits[l.focusIdx].View()
 
 	case ZoomSplit:
-		left := l.splits[l.focusIdx].View()
-		if !l.rightVisible {
-			return left
-		}
-		right := l.rightPanelView()
-		if l.orientation == OrientationHorizontal {
-			return lipgloss.JoinVertical(lipgloss.Left, left, right)
-		}
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+		// Fullscreen-borderless: only the focused split is rendered; the right
+		// panel and all other splits are hidden. Orientation-independent.
+		return l.splits[l.focusIdx].View()
 
 	default: // ZoomNone
 		var splitViews []string
@@ -650,31 +701,16 @@ func (l *Layout) rebuildPaneRects() {
 		return
 
 	case ZoomSplit:
-		if l.orientation == OrientationHorizontal {
-			topHeight, bottomHeight := l.panelSizes()
-			l.paneRects = append(l.paneRects, PaneRect{
-				X: 0, Y: 0, W: l.width, H: topHeight,
-				Kind: PaneSplit, SplitIdx: l.focusIdx,
-			})
-			if l.rightVisible {
-				l.paneRects = append(l.paneRects, PaneRect{
-					X: 0, Y: topHeight, W: l.width, H: bottomHeight,
-					Kind: l.detailPaneKind(),
-				})
-			}
-		} else {
-			leftWidth, rightWidth := l.panelSizes()
-			l.paneRects = append(l.paneRects, PaneRect{
-				X: 0, Y: 0, W: leftWidth, H: l.height,
-				Kind: PaneSplit, SplitIdx: l.focusIdx,
-			})
-			if l.rightVisible {
-				l.paneRects = append(l.paneRects, PaneRect{
-					X: leftWidth, Y: 0, W: rightWidth, H: l.height,
-					Kind: l.detailPaneKind(),
-				})
-			}
-		}
+		// Fullscreen-borderless: a single full-area rect for the focused split.
+		// The right panel and other splits are hidden, so no other rects.
+		// Orientation-independent. Like ZoomDetail, the rect stops at l.height
+		// (the status-bar row is not a pane) even though the pane is sized to
+		// cover that row on screen.
+		l.paneRects = append(l.paneRects, PaneRect{
+			X: 0, Y: 0, W: l.width, H: l.height,
+			Kind: PaneSplit, SplitIdx: l.focusIdx,
+		})
+		return
 
 	default: // ZoomNone
 		if l.orientation == OrientationHorizontal {
@@ -743,29 +779,15 @@ func (l *Layout) recalcSizes() {
 		}
 
 	case ZoomSplit:
-		if l.orientation == OrientationHorizontal {
-			topHeight, bottomHeight := l.panelSizes()
-			for i := range l.splits {
-				if i == l.focusIdx {
-					l.splits[i].SetSize(l.width, topHeight)
-				} else {
-					l.splits[i].SetSize(0, 0)
-				}
-			}
-			if l.rightVisible {
-				dp.SetSize(l.width, bottomHeight)
-			}
-		} else {
-			leftWidth, rightWidth := l.panelSizes()
-			for i := range l.splits {
-				if i == l.focusIdx {
-					l.splits[i].SetSize(leftWidth, l.height)
-				} else {
-					l.splits[i].SetSize(0, 0)
-				}
-			}
-			if l.rightVisible {
-				dp.SetSize(rightWidth, l.height)
+		// Fullscreen-borderless: the focused split fills the entire screen
+		// (including the status-bar row, like ZoomDetail) and every other
+		// split is zero-sized. The right panel is hidden, so it is not sized.
+		// Orientation-independent — one pane fills everything.
+		for i := range l.splits {
+			if i == l.focusIdx {
+				l.splits[i].SetSize(l.width, l.height+statusBarHeight)
+			} else {
+				l.splits[i].SetSize(0, 0)
 			}
 		}
 

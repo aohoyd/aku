@@ -13,6 +13,7 @@ import (
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/ui"
+	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/remotecommand"
 	utilexec "k8s.io/client-go/util/exec"
@@ -510,6 +511,105 @@ func TestTerminalKeyRoutingPrefixFocusesSibling(t *testing.T) {
 	}
 }
 
+// TestLiveTerminalCapturedAltZFallsThroughToZoom asserts that a captured key
+// (alt+z, bound to toggle-zoom) is NOT consumed by a focused LIVE terminal pane:
+// routeTerminalKey returns handled=false so the App's trie acts on it, and a
+// full update() flips the split-zoom state. This is the capture mechanism that
+// lets selected keys reach aku even over a live shell.
+func TestLiveTerminalCapturedAltZFallsThroughToZoom(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	a = drainModel(t, model)
+
+	fe := newFakeExecutor()
+	fe.readStdin = true
+	sess := openTestTerminal(t, &a, "exec:altz", fe)
+	defer sess.Close()
+	<-fe.streamStarted
+
+	tp, ok := a.layout.FocusedPane().(*ui.TerminalPane)
+	if !ok {
+		t.Fatal("precondition: live terminal pane should be focused")
+	}
+	if a.layout.SplitZoomed() {
+		t.Fatal("precondition: split should not start zoomed")
+	}
+
+	altZ := tea.KeyPressMsg{Code: 'z', Mod: tea.ModAlt}
+
+	// routeTerminalKey must NOT consume alt+z (it is captured for the trie).
+	handled, _, _ := a.routeTerminalKey(tp, altZ)
+	if handled {
+		t.Fatal("captured alt+z should not be consumed by the live terminal pane")
+	}
+
+	// Driven through update(): alt+z falls through to the trie's toggle-zoom.
+	model, _ = a.update(altZ)
+	a = drainModel(t, model)
+	if !a.layout.SplitZoomed() {
+		t.Fatal("captured alt+z should toggle split zoom via the trie")
+	}
+	// alt+z must not have leaked to the shell.
+	if got := fe.recordedStdin(); len(got) != 0 {
+		t.Fatalf("captured alt+z leaked bytes to shell: %q", got)
+	}
+}
+
+// TestLiveTerminalCapturedShiftArrowMovesFocus asserts that a captured
+// shift-arrow (shift+left → focus-left) over a focused LIVE terminal pane is NOT
+// consumed by the pane: routeTerminalKey returns handled=false so the App's trie
+// acts on it and actually moves split focus to the adjacent pane — without
+// leaking bytes to the shell. This mirrors the captured-alt+z fall-through but
+// for the focus-move path.
+func TestLiveTerminalCapturedShiftArrowMovesFocus(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	a = drainModel(t, model)
+
+	fe := newFakeExecutor()
+	fe.readStdin = true
+	sess := openTestTerminal(t, &a, "exec:shift", fe)
+	defer sess.Close()
+	<-fe.streamStarted
+
+	// Precondition: at least two splits with the live terminal focused.
+	if a.layout.SplitCount() < 2 {
+		t.Fatalf("precondition: want >=2 splits, got %d", a.layout.SplitCount())
+	}
+	tp, ok := a.layout.FocusedPane().(*ui.TerminalPane)
+	if !ok {
+		t.Fatal("precondition: live terminal pane should be focused")
+	}
+	focusedBefore := a.layout.FocusIndex()
+
+	// The default layout orientation is vertical, where sibling-split focus moves
+	// are up/down (left/right address the detail panel). shift+up → focus-up →
+	// FocusPrev, moving focus to the adjacent split.
+	shiftUp := tea.KeyPressMsg{Code: tea.KeyUp, Mod: tea.ModShift}
+
+	// routeTerminalKey must NOT consume shift+up (it is captured for the trie).
+	handled, _, _ := a.routeTerminalKey(tp, shiftUp)
+	if handled {
+		t.Fatal("captured shift+up should not be consumed by the live terminal pane")
+	}
+
+	// Driven through update(): shift+up falls through to the trie's focus-up,
+	// moving focus to the adjacent split.
+	model, _ = a.update(shiftUp)
+	a = drainModel(t, model)
+
+	if a.layout.FocusIndex() == focusedBefore {
+		t.Fatalf("captured shift+up should move split focus off %d", focusedBefore)
+	}
+	if _, ok := a.layout.FocusedPane().(*ui.TerminalPane); ok {
+		t.Fatal("focus should have moved off the terminal pane after shift+up")
+	}
+	// shift+up must not have leaked to the shell.
+	if got := fe.recordedStdin(); len(got) != 0 {
+		t.Fatalf("captured shift+up leaked bytes to shell: %q", got)
+	}
+}
+
 // TestExitedTerminalKeyFallsThrough asserts that once a terminal pane has
 // exited, keys are NOT intercepted (they reach the normal trie), so close/quit
 // keybindings keep working.
@@ -875,5 +975,123 @@ func TestTerminalCursorInView(t *testing.T) {
 	tp.MarkExited(0)
 	if a.View().Cursor != nil {
 		t.Fatal("cursor should be nil for an exited terminal pane")
+	}
+}
+
+// TestTerminalCursorBorderlessZoom asserts that when the focused terminal pane is
+// zoomed (borderless, fullscreen), the cursor is positioned with the borderless
+// content offset: dx=0 (no left border) and dy=1 (one header line). The rect is
+// the full fullscreen split rect.
+func TestTerminalCursorBorderlessZoom(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	a = drainModel(t, model)
+
+	fe := newFakeExecutor()
+	sess := openTestTerminal(t, &a, "exec:zoomcursor", fe) // terminal becomes focused
+	defer sess.Close()
+
+	tp, found := a.layout.TerminalPaneByID("exec:zoomcursor")
+	if !found {
+		t.Fatal("terminal pane not found")
+	}
+	if _, err := tp.Write([]byte("abc")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	// Zoom the focused split fullscreen-borderless and push the new sizes.
+	a = a.toggleZoomSplitAndSync()
+	if !a.layout.SplitZoomed() {
+		t.Fatal("precondition: split should be zoomed")
+	}
+
+	idx := terminalSplitIndex(t, &a, "exec:zoomcursor")
+	rect := paneRectForSplit(t, &a, idx)
+	cur := a.View().Cursor
+	if cur == nil {
+		t.Fatal("expected a non-nil cursor for a focused zoomed terminal pane")
+	}
+	// Borderless offset: dx=0, dy=1; cursor sits at inner (3,0).
+	wantX, wantY := rect.X+0+3, rect.Y+1+0
+	if cur.Position.X != wantX || cur.Position.Y != wantY {
+		t.Fatalf("zoomed cursor at (%d,%d), want (%d,%d)", cur.Position.X, cur.Position.Y, wantX, wantY)
+	}
+
+	// Bottom-row check: under zoom the pane is sized one row taller than the
+	// hit-test rect (the status bar is hidden), so the cursor must be able to
+	// reach the LAST emulator row. Move the emulator cursor there by writing
+	// enough newlines to scroll/advance to the final inner line, then assert the
+	// cursor lands on the absolute bottom row (rect.Y + dy + (ih-1)).
+	iw, ih := tp.InnerSize()
+	// Carriage-return to column 0, then advance to the last inner row.
+	nl := make([]byte, 0, ih+1)
+	nl = append(nl, '\r')
+	for range ih {
+		nl = append(nl, '\n')
+	}
+	if _, err := tp.Write(nl); err != nil {
+		t.Fatalf("Write newlines: %v", err)
+	}
+	cx, cy, visible := tp.CursorPos()
+	if !visible {
+		t.Fatal("cursor should be visible after writing newlines")
+	}
+	if cy != ih-1 {
+		t.Fatalf("emulator cursor row = %d, want bottom row %d (inner height %d)", cy, ih-1, ih)
+	}
+	cur = a.View().Cursor
+	if cur == nil {
+		t.Fatal("expected a non-nil cursor at the bottom row")
+	}
+	wantBottomY := rect.Y + 1 + (ih - 1)
+	if cur.Position.Y != wantBottomY {
+		t.Fatalf("zoomed bottom-row cursor Y = %d, want %d (must not be clamped one row high)", cur.Position.Y, wantBottomY)
+	}
+	// Sanity: the bottom row is the last on-screen row (no status bar under zoom).
+	if wantBottomY != a.height-1 {
+		t.Fatalf("bottom emulator row Y=%d should equal screen bottom %d under zoom", wantBottomY, a.height-1)
+	}
+	_ = iw
+	_ = cx
+}
+
+// TestViewDropsStatusBarUnderZoom asserts that View() appends the status bar when
+// nothing is zoomed, and drops it for ANY zoom (ZoomSplit included, which is now
+// fullscreen-borderless).
+//
+// The status bar is detected by rendering the live ui.StatusBar component
+// directly and taking its stripped content as the marker. This keeps the test
+// in lockstep with the real component (no hand-copied magic token to drift),
+// and is robust because the marker is exactly what App composites into the view.
+func TestViewDropsStatusBarUnderZoom(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	a = drainModel(t, model)
+
+	fe := newFakeExecutor()
+	sess := openTestTerminal(t, &a, "exec:zoomview", fe)
+	defer sess.Close()
+
+	// Derive the marker from the actual status-bar render rather than a literal.
+	statusBarMarker := strings.TrimSpace(ansi.Strip(a.statusBar.View()))
+	if statusBarMarker == "" {
+		t.Fatal("precondition: status bar should render non-empty content")
+	}
+
+	if a.layout.SplitZoomed() {
+		t.Fatal("precondition: split should not start zoomed")
+	}
+	unzoomed := ansi.Strip(a.View().Content)
+	if !strings.Contains(unzoomed, statusBarMarker) {
+		t.Fatalf("non-zoomed view should render the status bar (marker %q missing)", statusBarMarker)
+	}
+
+	a = a.toggleZoomSplitAndSync()
+	if a.layout.EffectiveZoom() == layout.ZoomNone {
+		t.Fatal("precondition: split should be zoomed")
+	}
+	zoomed := ansi.Strip(a.View().Content)
+	if strings.Contains(zoomed, statusBarMarker) {
+		t.Fatalf("zoomed view should drop the status bar (marker %q still present)", statusBarMarker)
 	}
 }

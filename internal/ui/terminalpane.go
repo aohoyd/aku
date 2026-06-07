@@ -34,7 +34,6 @@ const (
 	PaneCmdFocusRight                    // move focus to the pane on the right
 	PaneCmdFocusUp                       // move focus to the pane above
 	PaneCmdFocusDown                     // move focus to the pane below
-	PaneCmdZoom                          // toggle zoom (maximize) of this pane
 	PaneCmdClose                         // close this pane
 	PaneCmdScrollUp                      // scroll the pane's scrollback up
 	PaneCmdScrollDown                    // scroll the pane's scrollback down
@@ -68,6 +67,12 @@ type TerminalPane struct {
 	// shows older output. New shell output and any key/typing resets it to 0 so
 	// the user is snapped back to the prompt.
 	scrollOffset int
+
+	// borderless renders the pane fullscreen with a single top header bar and no
+	// border box (mirroring LogView/DetailView's zoom path). When set, the
+	// emulator is sized to the full width and height-1 (one header line) instead
+	// of the bordered inner area (width-2, height-2).
+	borderless bool
 
 	width, height int // outer dimensions including the border box
 }
@@ -109,6 +114,47 @@ func innerSize(w, h int) (int, int) {
 		ih = 1
 	}
 	return iw, ih
+}
+
+// innerDims returns the emulator content size for the pane's current outer size,
+// borderless-aware. In borderless mode the content spans the full width and
+// height minus a single header line; in bordered mode it is the usual
+// (width-2, height-2) inner box. Both branches clamp to >=1 like innerSize so a
+// degenerate size cannot panic the backend.
+func (t *TerminalPane) innerDims() (w, h int) {
+	if t.borderless {
+		w, h = t.width, t.height-1
+		if w < 1 {
+			w = 1
+		}
+		if h < 1 {
+			h = 1
+		}
+		return w, h
+	}
+	return innerSize(t.width, t.height)
+}
+
+// ContentOffset returns the (dx, dy) offset from the pane's top-left corner to
+// the first cell of the emulator content. The app uses this to translate the
+// emulator's inner cursor coordinates into an absolute frame position.
+//
+//	borderless → (0, 1): no left border; one header line sits above the content.
+//	bordered   → (1, 1): one border cell on each axis.
+func (t *TerminalPane) ContentOffset() (dx, dy int) {
+	if t.borderless {
+		return 0, 1
+	}
+	return 1, 1
+}
+
+// SetBorderless toggles fullscreen borderless rendering and re-applies sizing so
+// the emulator matches the new content area (full width / h-1 when borderless,
+// the bordered inner box otherwise).
+func (t *TerminalPane) SetBorderless(b bool) {
+	t.borderless = b
+	iw, ih := t.innerDims()
+	t.emu.Resize(iw, ih)
 }
 
 // Write forwards shell output bytes (ANSI included) to the emulator. The App's
@@ -183,7 +229,7 @@ func (t *TerminalPane) ID() string { return t.id }
 // outer size. The App pushes these to the session's Resize so the remote shell
 // reflows to match what the emulator renders.
 func (t *TerminalPane) InnerSize() (w, h int) {
-	return innerSize(t.width, t.height)
+	return t.innerDims()
 }
 
 // IsHidden reports whether the pane is currently hidden, i.e. it was assigned a
@@ -205,7 +251,7 @@ func (t *TerminalPane) IsHidden() bool {
 func (t *TerminalPane) SetSize(w, h int) {
 	t.width = w
 	t.height = h
-	iw, ih := innerSize(w, h)
+	iw, ih := t.innerDims()
 	t.emu.Resize(iw, ih)
 }
 
@@ -274,19 +320,8 @@ func (t *TerminalPane) StopReplies() { _ = t.emu.CloseReplies() }
 // session has exited, a dim "[exited — status N]" banner (plus any exit note)
 // is overlaid on the first content line above the frozen final screen.
 func (t *TerminalPane) View() string {
-	content := t.emu.RenderViewport(t.scrollOffset)
-
-	if t.exited {
-		iw, _ := innerSize(t.width, t.height)
-		content = overlayExitBanner(content, t.exitBannerText(), iw)
-	}
-
-	borderStyle := UnfocusedBorderStyle
-	if t.focused {
-		borderStyle = FocusedBorderStyle
-	}
-	styled := borderStyle.Width(t.width).Height(t.height).Render(content)
-
+	// Title string is shared by both render paths: base label plus the NAV and
+	// scrollback indicators.
 	title := t.title
 	// Subtle NAV indicator only while focused and waiting for a nav command.
 	if t.focused && t.mode == modeNav {
@@ -296,6 +331,37 @@ func (t *TerminalPane) View() string {
 	if t.scrollOffset > 0 {
 		title += fmt.Sprintf(" [scroll -%d]", t.scrollOffset)
 	}
+
+	if t.borderless {
+		content := t.emu.RenderViewport(t.scrollOffset)
+		if t.exited {
+			iw, _ := t.innerDims()
+			content = overlayExitBanner(content, t.exitBannerText(), iw)
+		}
+		// Fold the context badge and the exit-zoom hint into the header title.
+		headerTitle := title
+		if t.ctx != "" && !t.ctxBadgeHidden {
+			headerTitle += " [" + truncateContext(t.ctx, maxBadgeContext) + "]"
+		}
+		headerTitle += "  (alt+z: exit zoom)"
+		titleRendered := BuildPanelTitle(headerTitle, "", "", t.width, "")
+		headerLine := DetailHeaderStyle.Width(t.width).Render(titleRendered)
+		return lipgloss.JoinVertical(lipgloss.Left, headerLine, content)
+	}
+
+	content := t.emu.RenderViewport(t.scrollOffset)
+
+	if t.exited {
+		iw, _ := t.innerDims()
+		content = overlayExitBanner(content, t.exitBannerText(), iw)
+	}
+
+	borderStyle := UnfocusedBorderStyle
+	if t.focused {
+		borderStyle = FocusedBorderStyle
+	}
+	styled := borderStyle.Width(t.width).Height(t.height).Render(content)
+
 	titleRendered := BuildPanelTitle(title, "", "", t.width, "")
 
 	var rightRendered string
@@ -349,11 +415,19 @@ func overlayExitBanner(content, banner string, innerWidth int) string {
 // prefix is the configured prefix keystroke (e.g. "ctrl+a"), compared against
 // msg.String().
 //
+// isCaptured reports whether a key string (e.g. "alt+z", "shift+up") must be
+// reserved for the App's global trie even while a live terminal is focused. In
+// modeTyping, a captured key is NOT forwarded to the shell: the pane returns
+// handled=false so the App falls through to its trie. It may be nil (treated as
+// "nothing captured").
+//
 // Behavior:
 //
 //	exited        → handled=false (pane is now a normal closeable split; the App
 //	                 owns close/focus). Keys never reach a dead shell.
 //	modeTyping    → prefix key flips to modeNav (handled, no bytes);
+//	                 a captured key falls through (handled=false) so the App's
+//	                 trie can act on it (the viewport is NOT snapped to bottom);
 //	                 any other key is encoded to terminal bytes (handled).
 //	modeNav       → the key is interpreted as a command, then mode→typing:
 //	                 prefix prefix → send one literal prefix byte to the shell
@@ -363,10 +437,9 @@ func overlayExitBanner(content, banner string, innerWidth int) string {
 //	                 j / down      → PaneCmdFocusDown
 //	                 pgup          → PaneCmdScrollUp
 //	                 pgdown        → PaneCmdScrollDown
-//	                 z             → PaneCmdZoom
 //	                 x             → PaneCmdClose
 //	                 (any other)   → no-op (consumed, returns to typing)
-func (t *TerminalPane) HandleKey(msg tea.KeyPressMsg, prefix string) (handled bool, toShell []byte, cmd PaneCommand) {
+func (t *TerminalPane) HandleKey(msg tea.KeyPressMsg, prefix string, isCaptured func(string) bool) (handled bool, toShell []byte, cmd PaneCommand) {
 	// A dead shell is just a normal split — let the App handle every key.
 	if t.exited {
 		return false, nil, PaneCmdNone
@@ -378,6 +451,12 @@ func (t *TerminalPane) HandleKey(msg tea.KeyPressMsg, prefix string) (handled bo
 		if key == prefix {
 			t.mode = modeNav
 			return true, nil, PaneCmdNone
+		}
+		// A captured key is reserved for the App's global trie even over a live
+		// shell: fall through (handled=false) without forwarding bytes and
+		// without snapping the viewport to the live bottom.
+		if isCaptured != nil && isCaptured(key) {
+			return false, nil, PaneCmdNone
 		}
 		// Any keystroke sent to the shell snaps the viewport back to the live
 		// bottom so the user types at the prompt, not in stale history.
@@ -406,8 +485,6 @@ func (t *TerminalPane) HandleKey(msg tea.KeyPressMsg, prefix string) (handled bo
 		return true, nil, PaneCmdScrollUp
 	case "pgdown":
 		return true, nil, PaneCmdScrollDown
-	case "z":
-		return true, nil, PaneCmdZoom
 	case "x":
 		return true, nil, PaneCmdClose
 	default:

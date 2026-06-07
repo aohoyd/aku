@@ -529,8 +529,9 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		// Terminal interception: when a live (non-exited) terminal pane is
 		// focused and no overlay is open, the pane's prefix input machine owns
-		// every key — including ctrl+c, which must reach the shell rather than
-		// quit the app (the prefix is the escape hatch). An exited terminal pane
+		// most keys — including ctrl+c, which must reach the shell rather than
+		// quit the app (the prefix is the escape hatch). Captured keys like
+		// alt+z / shift+arrows fall through to the trie. An exited terminal pane
 		// is a normal closeable split and falls through to the trie. This is
 		// placed before the global ctrl+c/ctrl+w handling on purpose.
 		if a.activeOverlay == overlayNone {
@@ -781,8 +782,13 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Refresh drill-down child views when relevant resources update
 		a.refreshDrillDownSplits(msg.GVR, msg.Namespace)
-		// Detect resource identity change at cursor and refresh immediately
-		if a.layout.RightPanelVisible() {
+		// Detect resource identity change at cursor and refresh immediately.
+		// Gated on a focused resource list: when a terminal pane is focused
+		// FocusedSplit() is nil and detailKey() is "", which would otherwise be
+		// read as "selection went away" and blank the panel on the next informer
+		// tick. Skipping the block leaves the detail panel frozen on the last
+		// resource (and lastDetailKey intact) until focus returns to a resource.
+		if a.layout.RightPanelVisible() && a.layout.FocusedSplit() != nil {
 			newKey := a.detailKey()
 			if newKey != a.lastDetailKey {
 				if newKey == "" {
@@ -1219,10 +1225,9 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 //     a torn-down session is ignored).
 //   - a PaneCommand is translated to the same layout actions the app already
 //     exposes: Focus{Left,Up}→FocusPrev, Focus{Right,Down}→FocusNext,
-//     Zoom→ToggleZoomSplit, Close→closeFocusedTerminal,
-//     Scroll{Up,Down}→pane scrollback by one page.
+//     Close→closeFocusedTerminal, Scroll{Up,Down}→pane scrollback by one page.
 func (a App) routeTerminalKey(tp *ui.TerminalPane, msg tea.KeyPressMsg) (handled bool, model tea.Model, cmd tea.Cmd) {
-	consumed, toShell, paneCmd := tp.HandleKey(msg, a.config.TerminalPrefix())
+	consumed, toShell, paneCmd := tp.HandleKey(msg, a.config.TerminalPrefix(), a.bindingSet.IsCaptured)
 	if !consumed {
 		return false, a, nil
 	}
@@ -1238,12 +1243,15 @@ func (a App) routeTerminalKey(tp *ui.TerminalPane, msg tea.KeyPressMsg) (handled
 	case ui.PaneCmdFocusLeft, ui.PaneCmdFocusUp:
 		a.layout.FocusPrev()
 		a.syncTerminalSizes()
+		// Keep the status bar context badge in sync after a prefix-nav focus move,
+		// mirroring the trie focus path (executeCommand's focus-left/up).
+		a = a.syncStatusBarContext()
 	case ui.PaneCmdFocusRight, ui.PaneCmdFocusDown:
 		a.layout.FocusNext()
 		a.syncTerminalSizes()
-	case ui.PaneCmdZoom:
-		a.layout.ToggleZoomSplit()
-		a.syncTerminalSizes()
+		// Keep the status bar context badge in sync after a prefix-nav focus move,
+		// mirroring the trie focus path (executeCommand's focus-right/down).
+		a = a.syncStatusBarContext()
 	case ui.PaneCmdClose:
 		a, outCmd = a.closeFocusedTerminal()
 	case ui.PaneCmdScrollUp:
@@ -1767,10 +1775,13 @@ func (a App) syncInlineSearch() {
 // "terminal" context. This drives the statusbar/help hints and the keybinding
 // trie for that pane. Note the trie only governs an EXITED terminal pane: a
 // live (non-exited) terminal's keys are intercepted earlier by routeTerminalKey
-// (see Update's KeyPressMsg branch) and never reach the trie, so the two
-// mechanisms cannot double-handle a key. The terminal trie's nav bindings
-// (focus moves, zoom, close, scroll) intentionally mirror the prefix-machine's
-// nav commands so an exited pane stays navigable with the same intents.
+// (see Update's KeyPressMsg branch) and never reach the trie — except captured
+// keys (alt+z / shift+arrows), which routeTerminalKey deliberately lets fall
+// through. For ordinary keys the two mechanisms cannot double-handle. The
+// terminal trie's nav bindings (focus moves, close, scroll) intentionally
+// mirror the prefix-machine's nav commands so an exited pane stays navigable
+// with the same intents. Zoom is NOT part of that mirror: it was removed from
+// the prefix machine and is now reached only via the captured alt+z → trie path.
 func (a App) currentContext() (componentType, resourceName string) {
 	componentType = "resources"
 	if a.layout.FocusedDetails() {
@@ -1827,7 +1838,16 @@ func (a App) syncIndicators() App {
 // is called after any focus change to keep the badge name and its online/offline
 // color correct immediately (rather than waiting for the next heartbeat tick).
 func (a App) syncStatusBarContext() App {
-	return a.setStatusBarContext(a.contextFor(a.layout.FocusedSplit()))
+	// FocusedSplit() narrows to a resource pane and returns nil for a terminal
+	// pane, which would fall back to the startup context and show the wrong
+	// cluster when a terminal pane is focused. Resolve through paneContext (which
+	// is pane-kind aware: terminal panes expose their context directly) so the
+	// badge tracks whatever pane actually holds focus. A nil focused pane (no
+	// splits) keeps the original contextFor(nil) fallback to the startup context.
+	if focused := a.layout.FocusedPane(); focused != nil {
+		return a.setStatusBarContext(a.paneContext(focused))
+	}
+	return a.setStatusBarContext(a.contextFor(nil))
 }
 
 // setStatusBarContext points the status bar at an explicit context, deriving the
@@ -1959,7 +1979,7 @@ func (a App) View() tea.View {
 	body := a.layout.View()
 
 	var main string
-	if a.layout.EffectiveZoom() == layout.ZoomDetail {
+	if a.layout.EffectiveZoom() != layout.ZoomNone {
 		main = body
 	} else {
 		statusBar := a.statusBar.View()
@@ -1995,8 +2015,10 @@ func (a App) View() tea.View {
 // terminal pane's live cursor, or nil when no cursor should be shown (an overlay
 // owns input, focus is on a non-terminal pane, the pane has exited, or it is
 // scrolled into history). The emulator reports an inner-grid (x, y); the pane's
-// cached rect gives the outer top-left, and the single border cell adds 1 on each
-// axis. paneRects share the frame's coordinate space (the body sits at the top-
+// cached rect gives the outer top-left, and the pane's own ContentOffset adds the
+// gap to the first content cell — (1,1) for a bordered pane, (0,1) for a
+// borderless (zoomed) pane whose left border is gone but which still has a header
+// line. paneRects share the frame's coordinate space (the body sits at the top-
 // left and the status bar is appended below), so these coords are what
 // tea.View.Cursor expects.
 func (a App) terminalCursor() *tea.Cursor {
@@ -2012,18 +2034,33 @@ func (a App) terminalCursor() *tea.Cursor {
 		return nil
 	}
 	rect, ok := a.layout.FocusedSplitRect()
-	if !ok || rect.W <= 2 || rect.H <= 2 {
+	dx, dy := tp.ContentOffset()
+	iw, ih := tp.InnerSize()
+	// The rect must hold at least one content cell past the offset.
+	if !ok || rect.W <= dx || rect.H <= dy {
 		return nil
 	}
-	// Clamp into the inner content box so a cursor at the wrap column can't land
-	// on or past the border.
-	if cx > rect.W-2 {
-		cx = rect.W - 2
+	// Clamp into the content box so a cursor at the wrap column can't land on or
+	// past the frame edge. The horizontal extent is the smaller of the emulator's
+	// inner width and what the rect can fit after the offset. The vertical extent
+	// is the emulator's inner height alone: under ZoomSplit the pane is sized one
+	// row taller than rect.H (the rect stops at l.height to exclude the status-bar
+	// row from mouse hit-testing, but the borderless pane renders over that row
+	// since the status bar is hidden when zoomed), so clamping cy by rect.H-dy
+	// would lose the last emulator row. In bordered mode ih <= rect.H-dy always
+	// holds, so using ih is behaviorally identical there.
+	maxX := min(iw, rect.W-dx) - 1
+	maxY := ih - 1
+	if maxX < 0 || maxY < 0 {
+		return nil
 	}
-	if cy > rect.H-2 {
-		cy = rect.H - 2
+	if cx > maxX {
+		cx = maxX
 	}
-	cur := tea.NewCursor(rect.X+1+cx, rect.Y+1+cy)
+	if cy > maxY {
+		cy = maxY
+	}
+	cur := tea.NewCursor(rect.X+dx+cx, rect.Y+dy+cy)
 	cur.Shape = cursorShape(tp.CursorShape())
 	return cur
 }

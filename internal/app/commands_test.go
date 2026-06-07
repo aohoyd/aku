@@ -3859,6 +3859,62 @@ func TestDescribePanelClearedOnEmptyList(t *testing.T) {
 	}
 }
 
+// TestResourceUpdateKeepsDetailWhenTerminalFocused verifies the detail panel is
+// NOT blanked when an informer tick (ResourceUpdatedMsg) arrives while a terminal
+// pane is focused. FocusedSplit() is nil for a terminal, so detailKey() would be
+// "" and the identity-change handler would otherwise read that as "selection went
+// away" and clear the panel. The guard skips the block so the panel stays frozen
+// on the last resource's content.
+func TestResourceUpdateKeepsDetailWhenTerminalFocused(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	a = drainModel(t, model)
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	podsPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
+	plugin.Register(podsPlugin)
+	a.layout.AddSplit(podsPlugin, "default", "")
+
+	store := k8s.NewStore(nil, "", nil)
+	a = withGlobalStore(a, store)
+
+	pod := &unstructured.Unstructured{}
+	pod.SetName("my-pod")
+	pod.SetNamespace("default")
+	store.CacheUpsert(podsGVR, "default", pod)
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{pod})
+
+	// Show the detail panel with known content while the resource is focused.
+	a.layout.ShowRightPanel()
+	a.layout.RightPanel().SetMode(msgs.DetailYAML)
+	a.lastDetailKey = a.detailKey()
+	if a.lastDetailKey == "" {
+		t.Fatal("expected lastDetailKey to be set while a resource is focused")
+	}
+	keyBefore := a.lastDetailKey
+	sentinel := "SENTINEL-DETAIL-CONTENT"
+	a.layout.RightPanel().SetContent(render.Content{Raw: sentinel, Display: sentinel}, true)
+
+	// Open a terminal — focus moves to it, so FocusedSplit() becomes nil.
+	fe := newFakeExecutor()
+	sess := openTestTerminal(t, &a, "exec:detail", fe)
+	defer sess.Close()
+	if a.layout.FocusedSplit() != nil {
+		t.Fatal("expected the terminal pane to be focused (FocusedSplit nil)")
+	}
+
+	// Informer tick while the terminal is focused must NOT blank the panel.
+	result, _ := a.update(k8s.ResourceUpdatedMsg{GVR: podsGVR, Namespace: "default"})
+	a = result.(App)
+
+	if a.lastDetailKey != keyBefore {
+		t.Fatalf("lastDetailKey changed while terminal focused: %q -> %q", keyBefore, a.lastDetailKey)
+	}
+	if view := a.layout.RightPanel().View(); !strings.Contains(view, sentinel) {
+		t.Fatalf("detail panel was blanked while terminal focused; view:\n%s", view)
+	}
+}
+
 func TestDescribeSameResourceUsesDebounce(t *testing.T) {
 	app := newTestApp()
 

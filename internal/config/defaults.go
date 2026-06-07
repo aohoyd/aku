@@ -10,7 +10,7 @@ func DefaultBindings() []Binding {
 		{Key: "d", Help: "describe", Command: "view-describe-focused", Visible: true},
 		{Key: "x", Help: "uncovered", Command: "view-describe-uncovered", Scope: "resources",
 			For: []string{"pods", "secrets", "containers", "deployments", "statefulsets", "daemonsets"}, Visible: true},
-		{Key: "Z", Help: "zoom", Command: "toggle-zoom", Visible: true},
+		{Key: "alt+z", Help: "zoom", Command: "toggle-zoom", Capture: true, Visible: true},
 		{Key: "e", Help: "edit", Command: "edit", Visible: true},
 		{Key: "g", Help: "go to", Visible: true, Keys: []Binding{
 			{Key: "g", Help: "top", Command: "cursor-top"},
@@ -48,10 +48,10 @@ func DefaultBindings() []Binding {
 		{Key: "ctrl+d", Help: "delete", Command: "delete", Visible: true},
 		{Key: "ctrl+f", Help: "page down", Command: "page-down"},
 		{Key: "ctrl+b", Help: "page up", Command: "page-up"},
-		{Key: "shift+left", Help: "focus left", Command: "focus-left"},
-		{Key: "shift+right", Help: "focus right", Command: "focus-right"},
-		{Key: "shift+up", Help: "focus up", Command: "focus-up"},
-		{Key: "shift+down", Help: "focus down", Command: "focus-down"},
+		{Key: "shift+left", Help: "focus left", Command: "focus-left", Capture: true},
+		{Key: "shift+right", Help: "focus right", Command: "focus-right", Capture: true},
+		{Key: "shift+up", Help: "focus up", Command: "focus-up", Capture: true},
+		{Key: "shift+down", Help: "focus down", Command: "focus-down", Capture: true},
 		{Key: "alt+shift+up", Help: "move pane up", Command: "move-pane-up"},
 		{Key: "alt+shift+down", Help: "move pane down", Command: "move-pane-down"},
 		{Key: "alt+shift+left", Help: "move pane left", Command: "move-pane-left"},
@@ -130,7 +130,10 @@ func DefaultBindings() []Binding {
 		// bound globally; these scope entries make them discoverable in help and
 		// give the exited pane its own visible hint group.
 		{Key: "ctrl+w", Help: "close", Command: "close-current-panel", Scope: "terminal", Visible: true},
-		{Key: "Z", Help: "zoom", Command: "toggle-zoom", Scope: "terminal", Visible: true},
+		// Capture here is redundant: IsCaptured ignores scope and the global
+		// alt+z entry (above) already marks the key captured. This scoped entry is
+		// kept only to drive the terminal help/statusbar hint.
+		{Key: "alt+z", Help: "zoom", Command: "toggle-zoom", Scope: "terminal", Capture: true, Visible: true},
 		{Key: "pgup", Help: "scroll up", Command: "page-up", Scope: "terminal", Visible: true},
 		{Key: "pgdown", Help: "scroll down", Command: "page-down", Scope: "terminal", Visible: true},
 

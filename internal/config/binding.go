@@ -22,6 +22,7 @@ type Binding struct {
 	Scope   string     `yaml:"scope,omitempty"`
 	For     []string   `yaml:"for,omitempty"`
 	Visible bool       `yaml:"visible,omitempty"`
+	Capture bool       `yaml:"capture,omitempty"`
 	Keys    []Binding  `yaml:"keys,omitempty"`
 }
 
@@ -47,11 +48,40 @@ func (b Binding) matchesContext(componentType, resourceName string) bool {
 // BindingSet compiles a flat binding list into context-specific tries and hints.
 type BindingSet struct {
 	bindings []Binding
+
+	// capturedKeys is the memoized set of captured top-level keys. It depends
+	// only on the (immutable) binding list, so it is computed lazily once on
+	// the first IsCaptured call and reused thereafter. It is never exposed, so
+	// no caller can mutate the singleton.
+	capturedKeys map[string]bool
 }
 
 // NewBindingSet creates a BindingSet from a flat binding list.
 func NewBindingSet(bindings []Binding) *BindingSet {
 	return &BindingSet{bindings: bindings}
+}
+
+// IsCaptured reports whether key is a top-level captured key — a key reserved
+// for the App's global trie even while a live terminal pane is focused (e.g.
+// "alt+z", "shift+up"). Only top-level bindings are considered; nested chord
+// children are ignored because capture is single-press only.
+//
+// The capture set is memoized on first call: it is invariant for the lifetime
+// of the BindingSet, and this is read on the hot path (per keystroke in
+// routeTerminalKey). The memoized map is never handed out, so a caller cannot
+// mutate it — this is a method (capture predicate) rather than an exported map
+// precisely so the singleton stays read-only.
+func (bs *BindingSet) IsCaptured(key string) bool {
+	if bs.capturedKeys == nil {
+		captured := make(map[string]bool)
+		for _, b := range bs.bindings {
+			if b.Capture {
+				captured[b.Key] = true
+			}
+		}
+		bs.capturedKeys = captured
+	}
+	return bs.capturedKeys[key]
 }
 
 // TrieFor returns a fresh KeyTrie for the given context.

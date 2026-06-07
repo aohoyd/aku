@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestBindingMatchesContext_Global(t *testing.T) {
@@ -449,6 +451,110 @@ func TestDefaultBindings_PodsExecNotInDeployments(t *testing.T) {
 		}
 	} else if cmd == "exec" {
 		t.Fatal("exec should not be available for deployments")
+	}
+}
+
+func TestBindingSet_IsCaptured_Mixed(t *testing.T) {
+	bs := NewBindingSet([]Binding{
+		{Key: "a", Help: "alpha", Command: "alpha", Capture: true},
+		{Key: "b", Help: "beta", Command: "beta"},
+		{Key: "c", Help: "gamma", Command: "gamma", Capture: true},
+	})
+	if !bs.IsCaptured("a") || !bs.IsCaptured("c") {
+		t.Fatal("expected a and c captured")
+	}
+	if bs.IsCaptured("b") {
+		t.Fatal("b should not be captured")
+	}
+}
+
+func TestBindingSet_IsCaptured_None(t *testing.T) {
+	bs := NewBindingSet([]Binding{
+		{Key: "a", Help: "alpha", Command: "alpha"},
+		{Key: "b", Help: "beta", Command: "beta"},
+	})
+	if bs.IsCaptured("a") || bs.IsCaptured("b") || bs.IsCaptured("missing") {
+		t.Fatal("expected nothing captured")
+	}
+}
+
+// TestBindingSet_IsCaptured_StableAcrossCalls guards the memoization: the
+// internal map is computed once and never handed out, so repeated calls return
+// consistent answers and a caller cannot corrupt the singleton.
+func TestBindingSet_IsCaptured_StableAcrossCalls(t *testing.T) {
+	bs := NewBindingSet([]Binding{
+		{Key: "a", Help: "alpha", Command: "alpha", Capture: true},
+	})
+	for i := 0; i < 3; i++ {
+		if !bs.IsCaptured("a") {
+			t.Fatalf("call %d: a should be captured", i)
+		}
+		if bs.IsCaptured("b") {
+			t.Fatalf("call %d: b should not be captured", i)
+		}
+	}
+}
+
+func TestBindingSet_IsCaptured_IgnoresNestedChildren(t *testing.T) {
+	bs := NewBindingSet([]Binding{
+		// Top-level branch key is not captured, but a nested child is.
+		{Key: "g", Help: "go to", Keys: []Binding{
+			{Key: "p", Help: "pods", Command: "goto-pods", Capture: true},
+		}},
+		// Top-level branch key itself captured; that follows the top-level rule.
+		{Key: "v", Help: "view", Capture: true, Keys: []Binding{
+			{Key: "l", Help: "logs", Command: "view-logs"},
+		}},
+	})
+	if bs.IsCaptured("p") {
+		t.Fatal("nested child 'p' should not be captured")
+	}
+	if bs.IsCaptured("g") {
+		t.Fatal("non-captured branch 'g' should not be captured")
+	}
+	if !bs.IsCaptured("v") {
+		t.Fatal("captured top-level branch 'v' should be captured")
+	}
+}
+
+func TestBinding_CaptureYAMLRoundTrip(t *testing.T) {
+	data := []byte("key: a\nhelp: alpha\ncommand: alpha\ncapture: true\n")
+	var b Binding
+	if err := yaml.Unmarshal(data, &b); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !b.Capture {
+		t.Fatalf("expected Capture to be true after unmarshal, got %+v", b)
+	}
+}
+
+func TestDefaultBindings_CapturedKeys(t *testing.T) {
+	bs := NewBindingSet(DefaultBindings())
+	want := []string{"alt+z", "shift+left", "shift+right", "shift+up", "shift+down"}
+	for _, k := range want {
+		if !bs.IsCaptured(k) {
+			t.Fatalf("expected default binding %q to be captured", k)
+		}
+	}
+	// A non-captured default key must NOT report as captured.
+	for _, k := range []string{"alt+shift+up", "q", "g"} {
+		if bs.IsCaptured(k) {
+			t.Fatalf("did not expect %q to be captured", k)
+		}
+	}
+}
+
+func TestDefaultBindings_ZoomMovedToAltZ(t *testing.T) {
+	trie := DefaultKeyTrie()
+	cmd, _, resolved := trie.Press("alt+z")
+	if !resolved || cmd != "toggle-zoom" {
+		t.Fatalf("expected alt+z -> toggle-zoom, got resolved=%v cmd=%q", resolved, cmd)
+	}
+
+	trie2 := DefaultKeyTrie()
+	cmd, _, resolved = trie2.Press("Z")
+	if cmd == "toggle-zoom" {
+		t.Fatalf("Z should no longer resolve to toggle-zoom, got resolved=%v cmd=%q", resolved, cmd)
 	}
 }
 

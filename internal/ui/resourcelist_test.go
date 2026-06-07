@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -10,6 +11,7 @@ import (
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
 	"github.com/aohoyd/aku/internal/table"
+	"github.com/charmbracelet/x/ansi"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -993,6 +995,58 @@ func TestResourceListScrollResetOnSetSize(t *testing.T) {
 	}
 }
 
+// TestResourceListScrollClampedAcrossBorderlessToggle asserts horizontal scroll
+// stays within the valid clamp across a SetBorderless toggle. The maxOffset
+// anchor is contentWidth-tableWidth(), and tableWidth() differs by 2 between
+// bordered (width-2) and borderless (width) modes — so a stale xOffset could in
+// principle point past the right edge for the active width. SetBorderless re-runs
+// the layout (via SetSize), which re-clamps xOffset to 0; after toggling back to
+// bordered, a fresh scroll must still respect the bordered-mode maxOffset and
+// never exceed it.
+func TestResourceListScrollClampedAcrossBorderlessToggle(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 10)
+	objs := []*unstructured.Unstructured{
+		makeObj("a-very-very-very-very-long-pod-name"),
+	}
+	rl.SetObjects(objs)
+
+	// Scroll right in bordered mode to a non-zero offset.
+	rl.ScrollRight()
+	if rl.xOffset == 0 {
+		t.Fatal("precondition: xOffset should be non-zero after ScrollRight in bordered mode")
+	}
+
+	maxBordered := max(0, rl.contentWidth-rl.tableWidth())
+	if rl.xOffset > maxBordered {
+		t.Fatalf("bordered xOffset %d exceeds maxOffset %d", rl.xOffset, maxBordered)
+	}
+
+	// Toggle to borderless and back; each toggle re-runs layout and re-clamps.
+	rl.SetBorderless(true)
+	if rl.xOffset != 0 {
+		t.Fatalf("xOffset should re-clamp to 0 on SetBorderless(true), got %d", rl.xOffset)
+	}
+	maxBorderless := max(0, rl.contentWidth-rl.tableWidth())
+	if rl.xOffset > maxBorderless {
+		t.Fatalf("borderless xOffset %d exceeds maxOffset %d", rl.xOffset, maxBorderless)
+	}
+
+	rl.SetBorderless(false)
+	if rl.xOffset != 0 {
+		t.Fatalf("xOffset should re-clamp to 0 on SetBorderless(false), got %d", rl.xOffset)
+	}
+
+	// A fresh scroll in the restored bordered mode must respect the bordered
+	// maxOffset and never run past the right edge.
+	for i := 0; i < 20; i++ {
+		rl.ScrollRight()
+	}
+	maxAfter := max(0, rl.contentWidth-rl.tableWidth())
+	if rl.xOffset > maxAfter {
+		t.Fatalf("xOffset %d scrolled past the right edge (maxOffset %d) after toggle", rl.xOffset, maxAfter)
+	}
+}
+
 func TestColumnWidthsCachedWhenRowCountSame(t *testing.T) {
 	rl := NewResourceList(&testPlugin{}, 80, 15)
 	objs := []*unstructured.Unstructured{makeObj("pod-a"), makeObj("pod-b")}
@@ -1160,5 +1214,77 @@ func TestResourceListScrollWheelLeftRightNoOp(t *testing.T) {
 	rl.ScrollWheel(tea.MouseWheelRight)
 	if got := rl.Cursor(); got != before {
 		t.Fatalf("wheel right changed cursor: before=%d after=%d", before, got)
+	}
+}
+
+// rlContainsBorderRune reports whether s contains any of the rounded-border box
+// drawing runes used by the bordered render path.
+func rlContainsBorderRune(s string) bool {
+	for _, r := range []string{"│", "╭", "╮", "╰", "╯", "─"} {
+		if strings.Contains(s, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestResourceListSetBorderlessChangesTableHeight asserts that toggling
+// borderless re-lays-out the table at h-1 (one header line) rather than the
+// bordered h-3, so the table grows by two rows for the same outer size.
+func TestResourceListSetBorderlessChangesTableHeight(t *testing.T) {
+	const (
+		paneH = 12
+		// table.Height() reports the viewport height = the SetLayout height minus
+		// the table's internal header row. Derive the expectations from the
+		// documented chrome relationship so a constant change fails loudly here:
+		//   bordered    lays out at paneH-3 (top border + bottom border + ...),
+		//   borderless  lays out at paneH-1 (single title/header chrome line),
+		// then both subtract the one internal header row.
+		tableHeaderRow   = 1
+		borderedChrome   = 3
+		borderlessChrome = 1
+		wantBordered     = paneH - borderedChrome - tableHeaderRow   // 8
+		wantBorderless   = paneH - borderlessChrome - tableHeaderRow // 10
+	)
+	rl := NewResourceList(&testPlugin{}, 40, paneH)
+	borderedH := rl.table.Height()
+	rl.SetBorderless(true)
+	borderlessH := rl.table.Height()
+	if borderlessH <= borderedH {
+		t.Fatalf("borderless table height = %d, want greater than bordered %d", borderlessH, borderedH)
+	}
+	if borderlessH != wantBorderless {
+		t.Fatalf("borderless table height = %d, want %d (paneH-%d minus header)", borderlessH, wantBorderless, borderlessChrome)
+	}
+	if borderedH != wantBordered {
+		t.Fatalf("bordered table height = %d, want %d (paneH-%d minus header)", borderedH, wantBordered, borderedChrome)
+	}
+}
+
+// TestResourceListBorderlessViewNoBorder asserts the borderless View renders no
+// box-border runes and includes the title header line, while the bordered View
+// does include the border.
+func TestResourceListBorderlessViewNoBorder(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 12)
+	objs := []*unstructured.Unstructured{makeObj("pod-a")}
+	rl.SetObjects(objs)
+
+	bordered := rl.View()
+	if !rlContainsBorderRune(bordered) {
+		t.Fatalf("bordered View should contain border runes; got:\n%s", ansi.Strip(bordered))
+	}
+
+	rl.SetBorderless(true)
+	out := rl.View()
+	if rlContainsBorderRune(out) {
+		t.Fatalf("borderless View should contain no border runes; got:\n%s", ansi.Strip(out))
+	}
+	if !strings.Contains(ansi.Strip(out), "pods") {
+		t.Fatalf("borderless View missing title header; got:\n%s", ansi.Strip(out))
+	}
+	// The (alt+z: exit zoom) hint is intentionally terminal-only: resource lists
+	// must never render it, even in borderless (zoom) mode. Lock that contract.
+	if strings.Contains(ansi.Strip(out), "alt+z") {
+		t.Fatalf("borderless ResourceList header must not show the exit-zoom hint; got:\n%s", ansi.Strip(out))
 	}
 }
