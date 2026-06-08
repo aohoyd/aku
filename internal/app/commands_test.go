@@ -155,6 +155,83 @@ func TestFilterOpenCommand(t *testing.T) {
 	}
 }
 
+// TestSearchOpenThenTypeAppliesToFocusedSplit drives the full overlay path: open
+// the search bar, simulate typing a pattern (SearchChangedMsg), run the returned
+// apply cmd, and verify the apply reaches the focused split (search becomes
+// active). This complements the open-only checks above and the seq-level tests.
+func TestSearchOpenThenTypeAppliesToFocusedSplit(t *testing.T) {
+	a := newTestApp()
+	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	plugin.Register(p)
+	a.layout.AddSplit(p, "default", "")
+	obj := &unstructured.Unstructured{}
+	obj.SetName("pod-1")
+	obj.SetNamespace("default")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{obj})
+
+	model, _ := a.executeCommand("search-open")
+	app := model.(App)
+	if app.activeOverlay != overlaySearchBar {
+		t.Fatal("search-open should show the search bar")
+	}
+
+	// Simulate typing a pattern; this yields the immediate apply cmd.
+	model, cmd := app.update(msgs.SearchChangedMsg{Pattern: "pod", Mode: msgs.SearchModeSearch})
+	if cmd == nil {
+		t.Fatal("typing a non-empty pattern should return an apply cmd")
+	}
+	app = model.(App)
+
+	// The cmd must yield a SearchApplyMsg with the typed pattern/mode (not some
+	// other message), proving the immediate-apply mechanism is what drives it.
+	applyMsg, ok := cmd().(msgs.SearchApplyMsg)
+	if !ok {
+		t.Fatalf("expected SearchApplyMsg from typing cmd, got %T", cmd())
+	}
+	if applyMsg.Pattern != "pod" || applyMsg.Mode != msgs.SearchModeSearch {
+		t.Fatalf("expected apply msg {pattern=pod mode=search}, got {pattern=%q mode=%v}", applyMsg.Pattern, applyMsg.Mode)
+	}
+
+	// Drive the apply path and verify it reaches the focused split.
+	model, _ = app.update(applyMsg)
+	app = model.(App)
+	if !app.layout.FocusedSplit().SearchActive() {
+		t.Fatal("typing a pattern should activate search on the focused split")
+	}
+}
+
+// TestFilterOpenThenTypeAppliesToFocusedSplit mirrors the search variant for the
+// filter mode: open, type a pattern, run the apply cmd, and verify the focused
+// split's filter becomes active.
+func TestFilterOpenThenTypeAppliesToFocusedSplit(t *testing.T) {
+	a := newTestApp()
+	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	plugin.Register(p)
+	a.layout.AddSplit(p, "default", "")
+	obj := &unstructured.Unstructured{}
+	obj.SetName("pod-1")
+	obj.SetNamespace("default")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{obj})
+
+	model, _ := a.executeCommand("filter-open")
+	app := model.(App)
+	if app.activeOverlay != overlaySearchBar {
+		t.Fatal("filter-open should show the search bar")
+	}
+
+	model, cmd := app.update(msgs.SearchChangedMsg{Pattern: "pod", Mode: msgs.SearchModeFilter})
+	if cmd == nil {
+		t.Fatal("typing a non-empty filter pattern should return an apply cmd")
+	}
+	app = model.(App)
+
+	model, _ = app.update(cmd())
+	app = model.(App)
+	if !app.layout.FocusedSplit().FilterActive() {
+		t.Fatal("typing a pattern should activate filter on the focused split")
+	}
+}
+
 func TestGotoCommand(t *testing.T) {
 	app := newTestApp()
 
@@ -4418,7 +4495,44 @@ func TestYAMLReloadFiresForMatchingGVR(t *testing.T) {
 	}
 }
 
-func TestSearchDebounceStaleFire(t *testing.T) {
+func TestSearchApplyStaleSeqDiscarded(t *testing.T) {
+	app := newTestApp()
+	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	plugin.Register(p)
+	app.layout.AddSplit(p, "default", "")
+	obj := &unstructured.Unstructured{}
+	obj.SetName("pod-1")
+	obj.SetNamespace("default")
+	app.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{obj})
+
+	// Only seq 5 is current; seqs 3 and 4 are stale in-flight applies.
+	app.searchApplySeq = 5
+
+	// Stale applies (3, 4) must be discarded with no effect.
+	for _, stale := range []uint64{3, 4} {
+		model, cmd := app.update(msgs.SearchApplyMsg{Seq: stale, Pattern: "foo", Mode: msgs.SearchModeSearch})
+		if cmd != nil {
+			t.Fatalf("stale search apply (seq=%d) should return nil cmd", stale)
+		}
+		app = model.(App)
+		if app.searchApplySeq != 5 {
+			t.Fatalf("seq=%d: expected searchApplySeq=5, got %d", stale, app.searchApplySeq)
+		}
+		// Read the split from the UPDATED app rather than a pre-update alias.
+		if app.layout.FocusedSplit().SearchActive() {
+			t.Fatalf("stale search apply (seq=%d) should not activate search", stale)
+		}
+	}
+
+	// The current seq (5) applies.
+	model, _ := app.update(msgs.SearchApplyMsg{Seq: 5, Pattern: "pod", Mode: msgs.SearchModeSearch})
+	app = model.(App)
+	if !app.layout.FocusedSplit().SearchActive() {
+		t.Fatal("current-seq search apply (seq=5) should activate search")
+	}
+}
+
+func TestSearchApplyLatestSeqApplies(t *testing.T) {
 	app := newTestApp()
 	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
 	plugin.Register(p)
@@ -4429,17 +4543,64 @@ func TestSearchDebounceStaleFire(t *testing.T) {
 	obj.SetNamespace("default")
 	split.SetObjects([]*unstructured.Unstructured{obj})
 
-	app.searchDebounceSeq = 5
+	app.searchApplySeq = 5
 
-	// Fire a stale debounce (seq=3, current=5)
-	model, cmd := app.update(msgs.SearchDebounceFiredMsg{Seq: 3, Pattern: "foo", Mode: msgs.SearchModeSearch})
-	if cmd != nil {
-		t.Fatal("stale search debounce should return nil cmd")
+	// The latest seq matches the counter — search must be applied.
+	model, _ := app.update(msgs.SearchApplyMsg{Seq: 5, Pattern: "pod", Mode: msgs.SearchModeSearch})
+	app = model.(App)
+	// Read the split from the UPDATED app rather than a pre-update alias.
+	if !app.layout.FocusedSplit().SearchActive() {
+		t.Fatal("matching-seq search apply should activate search")
+	}
+}
+
+func TestSearchChangedNonEmptyYieldsImmediateApply(t *testing.T) {
+	app := newTestApp()
+	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	plugin.Register(p)
+	app.layout.AddSplit(p, "default", "")
+	split := app.layout.FocusedSplit()
+	obj := &unstructured.Unstructured{}
+	obj.SetName("pod-1")
+	obj.SetNamespace("default")
+	split.SetObjects([]*unstructured.Unstructured{obj})
+
+	// A single non-empty keystroke must bump the seq and return a non-nil cmd.
+	model, cmd := app.update(msgs.SearchChangedMsg{Pattern: "pod", Mode: msgs.SearchModeSearch})
+	if cmd == nil {
+		t.Fatal("non-empty pattern should return an apply cmd")
 	}
 	app = model.(App)
-	// searchDebounceSeq should be unchanged
-	if app.searchDebounceSeq != 5 {
-		t.Fatalf("expected searchDebounceSeq=5, got %d", app.searchDebounceSeq)
+	wantSeq := app.searchApplySeq
+
+	// Invoking the cmd synchronously must yield the apply message directly, proving
+	// there is no timer/delay involved (a tea.Tick-based cmd would not return a
+	// SearchApplyMsg on a plain synchronous call).
+	raw := cmd()
+	applyMsg, ok := raw.(msgs.SearchApplyMsg)
+	if !ok {
+		t.Fatalf("expected SearchApplyMsg, got %T", raw)
+	}
+	if applyMsg.Seq != wantSeq {
+		t.Fatalf("expected Seq=%d, got %d", wantSeq, applyMsg.Seq)
+	}
+	if applyMsg.Pattern != "pod" {
+		t.Fatalf("expected Pattern=pod, got %q", applyMsg.Pattern)
+	}
+	if applyMsg.Mode != msgs.SearchModeSearch {
+		t.Fatalf("expected Mode=search, got %v", applyMsg.Mode)
+	}
+
+	// End-to-end: feeding the apply message back through update must activate
+	// search on the focused split (read from the UPDATED app, not a pre-update
+	// alias), proving the immediate-apply path actually reaches the target.
+	if app.layout.FocusedSplit().SearchActive() {
+		t.Fatal("search should not be active before the apply message is processed")
+	}
+	model, _ = app.update(applyMsg)
+	app = model.(App)
+	if !app.layout.FocusedSplit().SearchActive() {
+		t.Fatal("processing the apply message should activate search on the focused split")
 	}
 }
 
@@ -4448,43 +4609,42 @@ func TestSearchChangedEmptyPatternClearsImmediately(t *testing.T) {
 	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
 	plugin.Register(p)
 	app.layout.AddSplit(p, "default", "")
-	split := app.layout.FocusedSplit()
 	obj := &unstructured.Unstructured{}
 	obj.SetName("pod-1")
 	obj.SetNamespace("default")
-	split.SetObjects([]*unstructured.Unstructured{obj})
+	app.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{obj})
 
 	// First apply a search pattern so we can verify it gets cleared
-	split.ApplySearch("test", msgs.SearchModeSearch)
-	if !split.SearchActive() {
+	app.layout.FocusedSplit().ApplySearch("test", msgs.SearchModeSearch)
+	if !app.layout.FocusedSplit().SearchActive() {
 		t.Fatal("expected search to be active after ApplySearch")
 	}
 
-	// Send empty pattern — should clear immediately, no debounce cmd
+	// Send empty pattern — should clear immediately, no apply cmd
 	model, cmd := app.update(msgs.SearchChangedMsg{Pattern: "", Mode: msgs.SearchModeSearch})
 	if cmd != nil {
-		t.Fatal("empty pattern should not return a debounce cmd")
+		t.Fatal("empty pattern should not return an apply cmd")
 	}
 	app = model.(App)
 
-	// Search should be cleared
-	if split.SearchActive() {
+	// Search should be cleared — read from the updated app, not a stale pointer.
+	if app.layout.FocusedSplit().SearchActive() {
 		t.Fatal("expected search to be cleared after empty pattern")
 	}
 
 	// Now test filter mode
-	split.ApplySearch("test", msgs.SearchModeFilter)
-	if !split.FilterActive() {
+	app.layout.FocusedSplit().ApplySearch("test", msgs.SearchModeFilter)
+	if !app.layout.FocusedSplit().FilterActive() {
 		t.Fatal("expected filter to be active after ApplySearch")
 	}
 
 	model, cmd = app.update(msgs.SearchChangedMsg{Pattern: "", Mode: msgs.SearchModeFilter})
 	if cmd != nil {
-		t.Fatal("empty filter pattern should not return a debounce cmd")
+		t.Fatal("empty filter pattern should not return an apply cmd")
 	}
 	app = model.(App)
 
-	if split.FilterActive() {
+	if app.layout.FocusedSplit().FilterActive() {
 		t.Fatal("expected filter to be cleared after empty pattern")
 	}
 }

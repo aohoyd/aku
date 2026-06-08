@@ -2399,7 +2399,28 @@ func (a App) handleSearchSubmitted(msg msgs.SearchSubmittedMsg) (tea.Model, tea.
 		a.statusBar.SetError("no active panel to search")
 		return a, nil
 	}
-	if err := target.ApplySearch(msg.Pattern, msg.Mode); err != nil {
+	return a.applySearchToTarget(target, msg.Pattern, msg.Mode)
+}
+
+// handleSearchApply applies a coalesced search request. The seq guard discards
+// stale applies from earlier keystrokes; only the latest in-flight seq is honored.
+func (a App) handleSearchApply(msg msgs.SearchApplyMsg) (tea.Model, tea.Cmd) {
+	if msg.Seq != a.searchApplySeq {
+		return a, nil
+	}
+	target := a.searchTarget()
+	if target == nil {
+		return a, nil
+	}
+	return a.applySearchToTarget(target, msg.Pattern, msg.Mode)
+}
+
+// applySearchToTarget applies a search/filter to target and handles the shared
+// error-reporting and detail-panel refresh. On compile error it reports to the
+// status bar; on success it clears the status bar and, when the resource list is
+// focused, refreshes the detail panel.
+func (a App) applySearchToTarget(target ui.Searchable, pattern string, mode msgs.SearchMode) (tea.Model, tea.Cmd) {
+	if err := target.ApplySearch(pattern, mode); err != nil {
 		a.statusBar.SetError("invalid regex: " + err.Error())
 	} else {
 		a.statusBar.SetError("")
@@ -2417,16 +2438,20 @@ func (a App) handleSearchChanged(msg msgs.SearchChangedMsg) (tea.Model, tea.Cmd)
 	if target == nil {
 		return a, nil
 	}
-	// Empty pattern: clear immediately without debounce.
-	// Bump seq to invalidate any pending debounce from a previous non-empty pattern.
+	// Empty pattern: clear immediately.
+	// Bump seq to invalidate any in-flight apply from a previous non-empty pattern.
 	if msg.Pattern == "" {
-		a.searchDebounceSeq++
+		a.searchApplySeq++
 		if msg.Mode == msgs.SearchModeFilter {
 			target.ClearFilter()
 		} else {
 			target.ClearSearch()
 		}
 		a.searchBar.SetError("")
+		// Clear any stale "invalid regex" error left in the status bar by a
+		// previous non-empty (apply/submit) path; that is where regex errors
+		// are reported, so clearing searchBar alone leaves it visible.
+		a.statusBar.SetError("")
 		if a.layout.FocusedResources() {
 			var descCmd tea.Cmd
 			a, descCmd = a.refreshDetailPanel()
@@ -2434,9 +2459,17 @@ func (a App) handleSearchChanged(msg msgs.SearchChangedMsg) (tea.Model, tea.Cmd)
 		}
 		return a, nil
 	}
-	// Non-empty pattern: debounce
-	a.searchDebounceSeq++
-	return a, a.searchDebounceCmd(msg.Pattern, msg.Mode)
+	// Non-empty pattern: apply immediately, no timer. A burst of keystrokes is
+	// coalesced because each keystroke bumps searchApplySeq; the apply handler's
+	// seq guard then discards any earlier in-flight apply whose Seq no longer
+	// matches the counter, so only the latest keystroke's apply takes effect.
+	a.searchApplySeq++
+	seq := a.searchApplySeq
+	pattern := msg.Pattern
+	mode := msg.Mode
+	return a, func() tea.Msg {
+		return msgs.SearchApplyMsg{Seq: seq, Pattern: pattern, Mode: mode}
+	}
 }
 
 func (a App) handleSearchCleared(msg msgs.SearchClearedMsg) (tea.Model, tea.Cmd) {

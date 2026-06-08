@@ -1,7 +1,7 @@
 // Package table is a vendored copy of charm.land/bubbles/v2/table (v2.0.0).
-// Local divergences from upstream: EnsureCursorVisible() and scrollToCursor(),
-// plus the revised MoveUp/MoveDown scroll logic that calls scrollToCursor() for
-// minimal scrolling instead of upstream's default behavior.
+// Local divergences from upstream: EnsureCursorVisible(), scrollToCursor() and
+// VisibleRange(), plus the revised MoveUp/MoveDown scroll logic that calls
+// scrollToCursor() for minimal scrolling instead of upstream's default behavior.
 // Original: MIT License, Copyright (c) 2020-2026 Charmbracelet, Inc.
 package table
 
@@ -365,6 +365,14 @@ func (m Model) Rows() []Row {
 func (m Model) Columns() []Column {
 	return m.cols
 }
+
+// VisibleRange reports the half-open range [start, end) of row indices that
+// the viewport renders around the cursor. Valid after UpdateViewport (called
+// by SetRows/SetColumns/SetCursor/Move*). The window is bounded by ~2*Height.
+//
+// Local divergence from upstream: exposes the internal m.start/m.end window so
+// callers can do work (e.g. highlighting) limited to the rendered rows.
+func (m Model) VisibleRange() (int, int) { return m.start, m.end }
 
 // SetRows sets a new rows state.
 func (m *Model) SetRows(r []Row) {

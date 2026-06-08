@@ -217,11 +217,11 @@ type App struct {
 	pendingRestartGVR schema.GroupVersionResource  // GVR matching pendingRestart
 
 	// Log stream
-	logStreamCancel   context.CancelFunc
-	logCh             <-chan string
-	logDebounceSeq    uint64
-	logStreamGen      uint64
-	searchDebounceSeq uint64
+	logStreamCancel context.CancelFunc
+	logCh           <-chan string
+	logDebounceSeq  uint64
+	logStreamGen    uint64
+	searchApplySeq  uint64
 
 	describeGen         uint64
 	describeDebounceSeq uint64
@@ -878,25 +878,8 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a.handleSearchSubmitted(msg)
 	case msgs.SearchChangedMsg:
 		return a.handleSearchChanged(msg)
-	case msgs.SearchDebounceFiredMsg:
-		if msg.Seq != a.searchDebounceSeq {
-			return a, nil
-		}
-		target := a.searchTarget()
-		if target == nil {
-			return a, nil
-		}
-		if err := target.ApplySearch(msg.Pattern, msg.Mode); err != nil {
-			a.searchBar.SetError(err.Error())
-		} else {
-			a.searchBar.SetError("")
-			if a.layout.FocusedResources() {
-				var descCmd tea.Cmd
-				a, descCmd = a.refreshDetailPanel()
-				return a, descCmd
-			}
-		}
-		return a, nil
+	case msgs.SearchApplyMsg:
+		return a.handleSearchApply(msg)
 	case msgs.SearchClearedMsg:
 		return a.handleSearchCleared(msg)
 
@@ -2800,14 +2783,6 @@ func (a App) logDebounceCmd() tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(250 * time.Millisecond)
 		return msgs.LogDebounceFiredMsg{Seq: seq}
-	}
-}
-
-func (a App) searchDebounceCmd(pattern string, mode msgs.SearchMode) tea.Cmd {
-	seq := a.searchDebounceSeq
-	return func() tea.Msg {
-		time.Sleep(150 * time.Millisecond)
-		return msgs.SearchDebounceFiredMsg{Seq: seq, Pattern: pattern, Mode: mode}
 	}
 }
 

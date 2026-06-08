@@ -282,6 +282,252 @@ func TestResourceListApplySearch(t *testing.T) {
 	if rl.Len() != 3 {
 		t.Fatalf("search should not filter rows, expected 3, got %d", rl.Len())
 	}
+	// At least one visible row must carry highlight ANSI for the matched substring.
+	rows := rl.table.Rows()
+	highlighted := false
+	for _, row := range rows {
+		if rowHighlighted(row) {
+			highlighted = true
+			break
+		}
+	}
+	if !highlighted {
+		t.Fatalf("expected at least one highlighted row after ApplySearch; rows=%q", rows)
+	}
+}
+
+// cellHighlighted reports whether a rendered cell carries either of the search
+// highlight markers: reverse-video (cursor row) or themed color (other rows).
+func cellHighlighted(cell string) bool {
+	return strings.Contains(cell, highlightOn) || strings.Contains(cell, highlightMatchOn)
+}
+
+// cellCursorHighlighted reports whether a cell carries the cursor-row variant
+// (reverse-video) specifically, and not merely the themed-color match variant.
+func cellCursorHighlighted(cell string) bool {
+	return strings.Contains(cell, highlightOn)
+}
+
+// cellMatchHighlighted reports whether a cell carries the non-cursor themed
+// match variant specifically. highlightMatchOn is a distinct ANSI sequence from
+// highlightOn, so this does not also match the cursor variant.
+func cellMatchHighlighted(cell string) bool {
+	return strings.Contains(cell, highlightMatchOn)
+}
+
+// rowHighlighted reports whether any cell in the row carries a highlight marker.
+func rowHighlighted(row table.Row) bool {
+	for _, cell := range row {
+		if cellHighlighted(cell) {
+			return true
+		}
+	}
+	return false
+}
+
+// rowCursorHighlighted reports whether any cell uses the reverse-video variant.
+func rowCursorHighlighted(row table.Row) bool {
+	for _, cell := range row {
+		if cellCursorHighlighted(cell) {
+			return true
+		}
+	}
+	return false
+}
+
+// rowMatchHighlighted reports whether any cell uses the themed-color variant.
+func rowMatchHighlighted(row table.Row) bool {
+	for _, cell := range row {
+		if cellMatchHighlighted(cell) {
+			return true
+		}
+	}
+	return false
+}
+
+func makeSearchObjs(n int) []*unstructured.Unstructured {
+	objs := make([]*unstructured.Unstructured, n)
+	for i := range objs {
+		objs[i] = makeObj(fmt.Sprintf("match-pod-%02d", i))
+	}
+	return objs
+}
+
+// TestResourceListSearchHighlightsWholeShortList covers the non-windowing path:
+// when the list is shorter than the viewport, VisibleRange returns the full list
+// and every matching row is highlighted (no row is left out of the window).
+func TestResourceListSearchHighlightsWholeShortList(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 20) // tall viewport, only 3 rows
+	objs := []*unstructured.Unstructured{makeObj("match-a"), makeObj("match-b"), makeObj("match-c")}
+	rl.SetObjects(objs)
+
+	if err := rl.ApplySearch("match", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+
+	start, end := rl.table.VisibleRange()
+	if start != 0 || end != rl.Len() {
+		t.Fatalf("short list should yield a full-list window [0,%d); got [%d,%d)", rl.Len(), start, end)
+	}
+
+	rows := rl.table.Rows()
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+	for i, row := range rows {
+		if !rowHighlighted(row) {
+			t.Fatalf("matching row %d should be highlighted in non-windowing path; got %q", i, row)
+		}
+	}
+
+	// The cursor row (row 0 by default) must use the reverse-video variant, while
+	// the non-cursor matching rows must use the themed-color variant. Asserting the
+	// specific variant catches a regression that applies the wrong highlight kind.
+	if cursor := rl.table.Cursor(); cursor != 0 {
+		t.Fatalf("expected cursor on row 0, got %d", cursor)
+	}
+	if !rowCursorHighlighted(rows[0]) {
+		t.Fatalf("cursor row should use reverse-video variant; got %q", rows[0])
+	}
+	if rowMatchHighlighted(rows[0]) {
+		t.Fatalf("cursor row should not use the themed-color variant; got %q", rows[0])
+	}
+	for i := 1; i < len(rows); i++ {
+		if !rowMatchHighlighted(rows[i]) {
+			t.Fatalf("non-cursor matching row %d should use themed-color variant; got %q", i, rows[i])
+		}
+		if rowCursorHighlighted(rows[i]) {
+			t.Fatalf("non-cursor row %d should not use reverse-video variant; got %q", i, rows[i])
+		}
+	}
+}
+
+// TestResourceListSearchHighlightsOnlyVisibleWindow verifies that with an active
+// search on a list taller than the viewport, rows inside the visible window carry
+// highlight ANSI for the matched substring while a row known to be outside the
+// window stays plain.
+func TestResourceListSearchHighlightsOnlyVisibleWindow(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 10) // table height ~7, far smaller than 50 rows
+	rl.SetObjects(makeSearchObjs(50))
+
+	if err := rl.ApplySearch("match", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+
+	start, end := rl.table.VisibleRange()
+	if end-start >= rl.Len() {
+		t.Fatalf("expected a window smaller than the full list; window [%d,%d) of %d rows", start, end, rl.Len())
+	}
+
+	rows := rl.table.Rows()
+	// Every row inside the visible window matches "match" and must be highlighted.
+	for i := start; i < end && i < len(rows); i++ {
+		if !rowHighlighted(rows[i]) {
+			t.Fatalf("visible row %d should be highlighted; got %q", i, rows[i])
+		}
+	}
+
+	// A row outside the window must be plain.
+	outside := end
+	if outside >= len(rows) {
+		outside = start - 1
+	}
+	if outside < 0 || outside >= len(rows) {
+		t.Fatalf("could not pick an out-of-window row (window [%d,%d), %d rows)", start, end, len(rows))
+	}
+	if rowHighlighted(rows[outside]) {
+		t.Fatalf("out-of-window row %d should be plain; got %q", outside, rows[outside])
+	}
+
+	// Windowing invariant: even though EVERY row matches "match", only the rows
+	// inside [start,end) may be highlighted. If applyVisibleHighlights ignored the
+	// window and painted all rows, this count would be rl.Len() (50) instead of
+	// the window size, and this assertion would fail.
+	highlighted := 0
+	for i := range rows {
+		if rowHighlighted(rows[i]) {
+			highlighted++
+		}
+	}
+	if highlighted != end-start {
+		t.Fatalf("expected exactly %d highlighted rows (window [%d,%d)), got %d of %d total",
+			end-start, start, end, highlighted, len(rows))
+	}
+}
+
+// TestResourceListSearchHighlightsAfterScroll verifies that paging/scrolling the
+// window re-highlights the newly visible rows (no plain rows showing inside the
+// window for cells that contain the match).
+func TestResourceListSearchHighlightsAfterScroll(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 10)
+	rl.SetObjects(makeSearchObjs(50))
+
+	if err := rl.ApplySearch("match", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+
+	// Record the initial window (top of the list) before scrolling.
+	initStart, initEnd := rl.table.VisibleRange()
+
+	// Jump far down the list so the visible window shifts away from the top.
+	rl.SetCursor(45)
+
+	start, end := rl.table.VisibleRange()
+	if start == 0 {
+		t.Fatalf("expected the window to have scrolled off the top; window [%d,%d)", start, end)
+	}
+
+	rows := rl.table.Rows()
+	for i := start; i < end && i < len(rows); i++ {
+		if !rowHighlighted(rows[i]) {
+			t.Fatalf("newly visible row %d should be highlighted after scroll; got %q", i, rows[i])
+		}
+	}
+
+	// Re-highlight contract: a row that was OUTSIDE the initial window but is now
+	// INSIDE the post-scroll window must have been freshly highlighted by the
+	// scroll. This proves newly-scrolled-in rows get painted, not just rows that
+	// happened to be highlighted at the top before the jump.
+	freshRow := -1
+	for i := start; i < end && i < len(rows); i++ {
+		if i < initStart || i >= initEnd {
+			freshRow = i
+			break
+		}
+	}
+	if freshRow == -1 {
+		t.Fatalf("post-scroll window [%d,%d) did not move outside initial window [%d,%d); cannot test re-highlight",
+			start, end, initStart, initEnd)
+	}
+	if !rowHighlighted(rows[freshRow]) {
+		t.Fatalf("row %d (outside initial window [%d,%d), inside post-scroll window [%d,%d)) should be freshly highlighted; got %q",
+			freshRow, initStart, initEnd, start, end, rows[freshRow])
+	}
+}
+
+// TestResourceListFilterHidesNonMatching verifies filter mode hides non-matching
+// rows. Filter mode does NOT inline-highlight (that is search-only), so the test
+// also asserts the surviving visible rows carry no spurious highlight ANSI.
+func TestResourceListFilterHidesNonMatching(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 80, 15)
+	objs := []*unstructured.Unstructured{makeObj("nginx-pod"), makeObj("redis-pod"), makeObj("mysql-pod")}
+	rl.SetObjects(objs)
+
+	if err := rl.ApplySearch("nginx", msgs.SearchModeFilter); err != nil {
+		t.Fatalf("ApplySearch filter should not error: %v", err)
+	}
+	if rl.Len() != 1 {
+		t.Fatalf("filter should hide non-matching rows, expected 1, got %d", rl.Len())
+	}
+	if rl.Selected().GetName() != "nginx-pod" {
+		t.Fatalf("expected nginx-pod visible, got %q", rl.Selected().GetName())
+	}
+	// Filter mode hides non-matches but must not inline-highlight visible rows.
+	for i, row := range rl.table.Rows() {
+		if rowHighlighted(row) {
+			t.Fatalf("filter-mode row %d should not carry inline highlight ANSI; got %q", i, row)
+		}
+	}
 }
 
 func TestResourceListApplyFilter(t *testing.T) {

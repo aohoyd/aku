@@ -316,10 +316,11 @@ type DescribeDebounceFiredMsg struct {
 	Seq uint64
 }
 
-// SearchDebounceFiredMsg is sent after the debounce interval elapses
-// following a search input change. Seq is compared against the app's
-// counter to discard stale fires.
-type SearchDebounceFiredMsg struct {
+// SearchApplyMsg requests an immediate, coalesced apply of a search input
+// change. It is produced with no debounce/timer; Seq is compared against the
+// app's counter so that a burst of keystrokes collapses to the latest apply
+// (stale messages are discarded).
+type SearchApplyMsg struct {
 	Seq     uint64
 	Pattern string
 	Mode    SearchMode

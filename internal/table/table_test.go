@@ -69,8 +69,23 @@ func TestEnsureCursorVisibleEmptyTable(t *testing.T) {
 		WithColumns([]Column{{Title: "Name", Width: 20}}),
 		WithHeight(10),
 	)
-	// Should not panic
+
+	startBefore := m.start
+	cursorBefore := m.cursor
+	offsetBefore := m.viewport.YOffset()
+
+	// Should not panic and must leave scroll/cursor state untouched on an empty table.
 	m.EnsureCursorVisible()
+
+	if m.start != startBefore {
+		t.Fatalf("start should not change on empty table, was %d now %d", startBefore, m.start)
+	}
+	if m.cursor != cursorBefore {
+		t.Fatalf("cursor should not change on empty table, was %d now %d", cursorBefore, m.cursor)
+	}
+	if m.viewport.YOffset() != offsetBefore {
+		t.Fatalf("yOffset should not change on empty table, was %d now %d", offsetBefore, m.viewport.YOffset())
+	}
 }
 
 func TestSetColumnsAndRows(t *testing.T) {
@@ -709,6 +724,73 @@ func TestMoveOnListShorterThanViewport(t *testing.T) {
 			t.Fatalf("MoveUp: expected cursor %d, got %d", i, m.Cursor())
 		}
 		assertNoScroll(fmt.Sprintf("after MoveUp to %d", i))
+	}
+}
+
+// TestVisibleRangeBoundedAndContainsCursor verifies that VisibleRange returns a
+// bounded window around the cursor when the list is taller than the viewport.
+func TestVisibleRangeBoundedAndContainsCursor(t *testing.T) {
+	const rowCount = 100
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(rowCount)),
+		WithHeight(6), // viewport height 5 after header — far smaller than rowCount
+	)
+	height := m.viewport.Height()
+
+	m.SetCursor(50) // middle row, well inside a windowed list
+
+	start, end := m.VisibleRange()
+
+	if start < 0 {
+		t.Fatalf("expected start >= 0, got %d", start)
+	}
+	if end > len(m.Rows()) {
+		t.Fatalf("expected end <= len(rows)=%d, got %d", len(m.Rows()), end)
+	}
+	if !(start <= m.Cursor() && m.Cursor() < end) {
+		t.Fatalf("expected start <= cursor < end, got start=%d cursor=%d end=%d",
+			start, m.Cursor(), end)
+	}
+	if size := end - start; size > 2*height+1 {
+		t.Fatalf("expected window size <= 2*height+1=%d, got %d", 2*height+1, size)
+	}
+
+	// Pin the exact window with hand-computed literals so a change to the
+	// production windowing formula breaks this test (instead of a tautology
+	// that re-derives the window with the same clamp() call as production).
+	//
+	// Setup: WithHeight(6) minus the 1-line header => viewport height 5.
+	// Cursor is 50, rowCount is 100. The production formula yields:
+	//   start = clamp(50-5, 0, 50) = 45
+	//   end   = clamp(50+5, 50, 100) = 55
+	const (
+		wantStart = 45
+		wantEnd   = 55
+	)
+	if height != 5 {
+		t.Fatalf("test assumes viewport height 5 (WithHeight(6) - header); got %d", height)
+	}
+	if start != wantStart || end != wantEnd {
+		t.Fatalf("expected exact window [%d,%d), got [%d,%d)", wantStart, wantEnd, start, end)
+	}
+}
+
+// TestVisibleRangeShorterThanViewport verifies that when the list is shorter than
+// the viewport the window spans the entire list (no windowing): [0, len(rows)).
+func TestVisibleRangeShorterThanViewport(t *testing.T) {
+	const rowCount = 3
+	m := New(
+		WithColumns([]Column{{Title: "Name", Width: 20}}),
+		WithRows(makeRows(rowCount)),
+		WithHeight(10), // viewport taller than the list
+	)
+
+	m.SetCursor(1)
+
+	start, end := m.VisibleRange()
+	if start != 0 || end != rowCount {
+		t.Fatalf("short list should yield full-list window [0,%d); got [%d,%d)", rowCount, start, end)
 	}
 }
 

@@ -40,9 +40,8 @@ type ResourceList struct {
 	xOffset            int
 	navStack           NavStack
 	inlineSearch       string
-	contextLabel       string // when non-empty, rendered as a right-aligned top-border badge; "" hides it
-	offline            bool   // when true, the context badge is colored red (offline) instead of green
-	lastSearchCursor   int
+	contextLabel       string                 // when non-empty, rendered as a right-aligned top-border badge; "" hides it
+	offline            bool                   // when true, the context badge is colored red (offline) instead of green
 	selected           map[types.UID]struct{} // multi-select set
 	cachedColumnWidths []table.Column
 	cachedContentWidth int
@@ -135,6 +134,9 @@ func (r *ResourceList) SetObjects(objs []*unstructured.Unstructured) {
 			}
 			if key == selectedKey {
 				r.table.SetCursor(i)
+				// Re-overlay highlights so the cursor-row highlight follows the
+				// restored cursor when a search is active (no-op otherwise).
+				r.applyVisibleHighlights()
 				return
 			}
 		}
@@ -146,6 +148,9 @@ func (r *ResourceList) SetObjects(objs []*unstructured.Unstructured) {
 			cursor = len(r.displayObjects) - 1
 		}
 		r.table.SetCursor(cursor)
+		// Re-overlay highlights so the cursor-row highlight follows the
+		// restored cursor when a search is active (no-op otherwise).
+		r.applyVisibleHighlights()
 	}
 }
 
@@ -175,28 +180,28 @@ func (r *ResourceList) Len() int {
 }
 
 // GotoTop moves the cursor to the first row.
-func (r *ResourceList) GotoTop() { r.table.GotoTop(); r.refreshSearchHighlights() }
+func (r *ResourceList) GotoTop() { r.table.GotoTop(); r.applyVisibleHighlights() }
 
 // GotoBottom moves the cursor to the last row.
-func (r *ResourceList) GotoBottom() { r.table.GotoBottom(); r.refreshSearchHighlights() }
+func (r *ResourceList) GotoBottom() { r.table.GotoBottom(); r.applyVisibleHighlights() }
 
 // PageUp moves the cursor up by one page.
-func (r *ResourceList) PageUp() { r.table.MoveUp(r.table.Height()); r.refreshSearchHighlights() }
+func (r *ResourceList) PageUp() { r.table.MoveUp(r.table.Height()); r.applyVisibleHighlights() }
 
 // PageDown moves the cursor down by one page.
-func (r *ResourceList) PageDown() { r.table.MoveDown(r.table.Height()); r.refreshSearchHighlights() }
+func (r *ResourceList) PageDown() { r.table.MoveDown(r.table.Height()); r.applyVisibleHighlights() }
 
 // CursorUp moves the table cursor up by one row.
-func (r *ResourceList) CursorUp() { r.table.MoveUp(1); r.refreshSearchHighlights() }
+func (r *ResourceList) CursorUp() { r.table.MoveUp(1); r.applyVisibleHighlights() }
 
 // CursorDown moves the table cursor down by one row.
-func (r *ResourceList) CursorDown() { r.table.MoveDown(1); r.refreshSearchHighlights() }
+func (r *ResourceList) CursorDown() { r.table.MoveDown(1); r.applyVisibleHighlights() }
 
 // SetCursor sets the table cursor to the given row index. Out-of-range values
 // are clamped by the underlying table.
 func (r *ResourceList) SetCursor(row int) {
 	r.table.SetCursor(row)
-	r.refreshSearchHighlights()
+	r.applyVisibleHighlights()
 }
 
 // ScrollWheel advances the cursor by one row in response to a mouse wheel
@@ -523,6 +528,9 @@ func (r *ResourceList) PopNav() bool {
 	if snap.Cursor < len(r.displayObjects) {
 		r.table.SetCursor(snap.Cursor)
 		r.table.EnsureCursorVisible()
+		// Re-overlay highlights so the cursor-row highlight follows the
+		// restored cursor when a search is active (no-op otherwise).
+		r.applyVisibleHighlights()
 	}
 	return true
 }
@@ -795,16 +803,20 @@ func (r *ResourceList) ApplySearch(pattern string, mode msgs.SearchMode) error {
 			return err
 		}
 	}
-	r.rebuildDisplay()
+	// In search mode all rows stay visible (no filtering), so displayObjects is
+	// already the full set and matchingRowIndices is valid before rebuildDisplay.
+	// Position the cursor on the first match up front so the single highlight pass
+	// inside rebuildDisplay paints the correct (post-jump) cursor row, avoiding a
+	// wasted pass that would otherwise highlight the stale cursor position.
 	if mode == msgs.SearchModeSearch && r.searchState.Active() {
 		indices := r.matchingRowIndices()
 		if len(indices) > 0 {
 			r.table.SetCursor(indices[0])
 			r.searchState.CurrentIdx = 0
 			r.searchState.MatchCount = len(indices)
-			r.refreshSearchHighlights()
 		}
 	}
+	r.rebuildDisplay()
 	return nil
 }
 
@@ -841,7 +853,7 @@ func (r *ResourceList) SearchNext() {
 	if len(indices) == 0 {
 		return
 	}
-	defer r.refreshSearchHighlights()
+	defer r.applyVisibleHighlights()
 	cur := r.table.Cursor()
 	// Find first match strictly after current cursor
 	for i, idx := range indices {
@@ -864,7 +876,7 @@ func (r *ResourceList) SearchPrev() {
 	if len(indices) == 0 {
 		return
 	}
-	defer r.refreshSearchHighlights()
+	defer r.applyVisibleHighlights()
 	cur := r.table.Cursor()
 	// Find last match strictly before current cursor
 	for i := len(indices) - 1; i >= 0; i-- {
@@ -898,26 +910,17 @@ func (r *ResourceList) rebuildDisplay() {
 		r.displayObjects = r.allObjects
 	}
 	r.rebindRowStyle()
-	r.renderRows(r.searchHighlightRe())
+	r.renderRows()
+	r.applyVisibleHighlights()
 }
 
-// renderRows builds table rows from displayObjects, optionally highlighting matches.
-func (r *ResourceList) renderRows(re *regexp.Regexp) {
-	cursor := r.table.Cursor()
-	r.lastSearchCursor = cursor
+// renderRows builds plain table rows from displayObjects. Highlighting is
+// overlaid separately onto only the visible window by applyVisibleHighlights, so
+// per-keystroke cost stays O(visible) rather than O(all rows).
+func (r *ResourceList) renderRows() {
 	rows := make([]table.Row, len(r.displayObjects))
 	for i, obj := range r.displayObjects {
-		row := r.effectiveRow(obj)
-		if re != nil {
-			for j, cell := range row {
-				if i == cursor {
-					row[j] = HighlightMatches(cell, re)
-				} else {
-					row[j] = HighlightMatchesColor(cell, re)
-				}
-			}
-		}
-		rows[i] = row
+		rows[i] = r.effectiveRow(obj)
 	}
 
 	if len(rows) == r.cachedRowCount && r.cachedColumnWidths != nil {
@@ -935,44 +938,40 @@ func (r *ResourceList) renderRows(re *regexp.Regexp) {
 	}
 }
 
-// refreshSearchHighlights updates only the old and new cursor rows when
-// search highlighting is active. This avoids rebuilding all rows on every
-// cursor movement.
-func (r *ResourceList) refreshSearchHighlights() {
+// applyVisibleHighlights overlays search highlighting onto only the rows in the
+// table's rendered window [start, end) — VisibleRange returns up to ~2*viewport
+// height rows around the cursor, not just the on-screen rows. Rows outside this
+// window are left plain (or stale); they are repainted fresh the next time they
+// enter the window. This keeps per-keystroke and per-cursor-move highlight cost
+// proportional to the rendered window (~2*height) rather than O(all rows). The
+// cursor row gets reverse-video highlighting; other windowed rows get the themed
+// color. Early-returns when search highlighting is not active.
+func (r *ResourceList) applyVisibleHighlights() {
 	re := r.searchHighlightRe()
 	if re == nil {
 		return
 	}
 
-	oldCursor := r.lastSearchCursor
-	newCursor := r.table.Cursor()
-	r.lastSearchCursor = newCursor
-
+	// Settle the viewport around the (already-positioned) cursor before reading
+	// the window, so the range reflects the rows that will actually render.
+	r.table.EnsureCursorVisible()
+	start, end := r.table.VisibleRange()
 	rows := r.table.Rows()
-	if len(rows) == 0 {
-		return
-	}
+	cursor := r.table.Cursor()
 
-	// Re-render old cursor row (demote from reverse-video to color highlight)
-	if oldCursor >= 0 && oldCursor < len(r.displayObjects) && oldCursor < len(rows) {
-		row := r.effectiveRow(r.displayObjects[oldCursor])
+	for i := start; i < end && i < len(r.displayObjects) && i < len(rows); i++ {
+		row := r.effectiveRow(r.displayObjects[i])
 		for j, cell := range row {
-			row[j] = HighlightMatchesColor(cell, re)
+			if i == cursor {
+				row[j] = HighlightMatches(cell, re)
+			} else {
+				row[j] = HighlightMatchesColor(cell, re)
+			}
 		}
-		rows[oldCursor] = row
-	}
-
-	// Re-render new cursor row (promote from color to reverse-video highlight)
-	if newCursor >= 0 && newCursor < len(r.displayObjects) && newCursor < len(rows) {
-		row := r.effectiveRow(r.displayObjects[newCursor])
-		for j, cell := range row {
-			row[j] = HighlightMatches(cell, re)
-		}
-		rows[newCursor] = row
+		rows[i] = row
 	}
 
 	r.table.SetRows(rows)
-	r.table.EnsureCursorVisible()
 }
 
 // searchHighlightRe returns the compiled regex if search (not filter) mode is active,
