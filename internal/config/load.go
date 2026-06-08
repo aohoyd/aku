@@ -5,8 +5,9 @@ import (
 	"path/filepath"
 )
 
-// configDir returns the aku config directory.
-func configDir() string {
+// ConfigDir returns the aku config directory: $XDG_CONFIG_HOME/aku, or
+// ~/.config/aku when XDG_CONFIG_HOME is unset.
+func ConfigDir() string {
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "aku")
 	}
@@ -16,7 +17,7 @@ func configDir() string {
 
 // KeymapPath returns the default keymap file path.
 func KeymapPath() string {
-	return filepath.Join(configDir(), "keymap.yaml")
+	return filepath.Join(ConfigDir(), "keymap.yaml")
 }
 
 // Load loads both keymap and config from their default paths.

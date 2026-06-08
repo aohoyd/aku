@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/aohoyd/aku/internal/plugins/helmreleases"
 	"github.com/aohoyd/aku/internal/portforward"
 	"github.com/aohoyd/aku/internal/render"
+	"github.com/aohoyd/aku/internal/theme"
 	"github.com/aohoyd/aku/internal/ui"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -1987,11 +1989,22 @@ func (a App) View() tea.View {
 	}
 
 	return tea.View{
-		Content:   main,
-		AltScreen: true,
-		MouseMode: mouseMode(a.config.Mouse.Enabled),
-		Cursor:    a.terminalCursor(),
+		Content:         main,
+		AltScreen:       true,
+		MouseMode:       mouseMode(a.config.Mouse.Enabled),
+		Cursor:          a.terminalCursor(),
+		BackgroundColor: themeColorOrNil(theme.Background),
+		ForegroundColor: themeColorOrNil(theme.Foreground),
 	}
+}
+
+// themeColorOrNil returns c as a color.Color, or nil when c is empty so the
+// terminal keeps its default (an empty theme.Color would resolve to black).
+func themeColorOrNil(c theme.Color) color.Color {
+	if c == "" {
+		return nil
+	}
+	return c
 }
 
 // terminalCursor returns the real terminal cursor positioned at the focused
@@ -2447,8 +2460,16 @@ func (a App) syncTerminalSizes() {
 // App is copied by value. No App-return / struct pointer is needed.
 func (a App) closeTerminalSession(id string) {
 	if sess, ok := a.terminals[id]; ok {
-		sess.Close()
+		// Unregister first so pane close stays instant and any late
+		// TermBytesMsg/TermExitMsg for this id is dropped (the handlers key off
+		// a.terminals). Then ask the remote shell to exit on its own and hard
+		// Close() in a detached goroutine: TerminateGracefully blocks up to the
+		// grace period, which must never stall the UI.
 		delete(a.terminals, id)
+		go func() {
+			sess.TerminateGracefully(session.DefaultGraceTimeout)
+			sess.Close()
+		}()
 	}
 	if meta, ok := a.termCleanup[id]; ok {
 		// Cancel any in-flight pre-flight (GET/patch/create + wait-Running) so
@@ -2680,11 +2701,22 @@ func (a App) ephemeralCloseNote(id string) string {
 // the layered quit command) before returning tea.Quit.
 //
 // Tradeoff: cleanup must not hang quit if the API server is slow. Each node-pod
-// delete runs in its own goroutine under a bounded 3s context; we wait up to 3s
-// total for them to finish, then return regardless. A pod whose delete did not
-// complete in time is left to the kubelet/GC (the debug pod has RestartPolicy
-// Never and no controller, so it is harmless and short-lived). Sessions are
-// closed synchronously (Close only cancels the stream context — it is cheap).
+// delete runs in its own goroutine under a bounded nodeDebugDeleteTimeout (3s)
+// context. A pod whose delete did not complete in time is left to the
+// kubelet/GC (the debug pod has RestartPolicy Never and no controller, so it is
+// harmless and short-lived). The worst-case main-thread block is the grace
+// ceiling (DefaultGraceTimeout, ~400ms) followed by the node-debug wg.Wait()
+// ceiling (nodeDebugDeleteTimeout, 3s) — up to ~3.4s when node-debug pods are
+// present, and just the grace ceiling otherwise.
+//
+// Before the hard close, every live shell is asked to exit gracefully
+// (TerminateGracefully) concurrently under a SINGLE shared grace budget, so
+// quitting N panes costs ~one grace period rather than N × grace. The hard
+// Close() loop AFTER the grace phase is itself cheap (Close only cancels the
+// stream context and closes the stdin pipe). A short-lived graceful goroutine
+// may keep draining its control-byte burst (~150ms) after this function returns;
+// that overrun is harmless (see the shared-budget comment below) and each such
+// goroutine exits promptly once the hard Close() fires.
 //
 // The value receiver is intentional: a.terminals/a.termCleanup are maps
 // (reference types), so the delete() calls below mutate the shared backing maps
@@ -2711,9 +2743,42 @@ func (a App) shutdownTerminals() {
 		delete(a.termCleanup, id)
 	}
 
-	for id, sess := range a.terminals {
-		sess.Close()
-		delete(a.terminals, id)
+	// Best-effort ask every live shell to exit on its own BEFORE the hard close,
+	// concurrently and under a SINGLE shared grace budget: fan out
+	// TerminateGracefully and wait for them all with one bounded select, so
+	// quitting N panes costs ~one grace period, not N × grace. Runs alongside the
+	// node-debug pod deletes fired above.
+	//
+	// The outer time.After(DefaultGraceTimeout) is the HARD ceiling on the main
+	// thread: it blocks here for at most one grace period (~400ms), whether or not
+	// the goroutines have finished. Each goroutine's TerminateGracefully spends up
+	// to ~150ms bursting control bytes before its own time.After(grace), so a
+	// goroutine can run up to ~grace+150ms total and may outlive this function by
+	// up to ~150ms, draining its remaining burst sleeps. That overrun is harmless:
+	// the hard Close() below closes the stdin pipe and cancels the context, which
+	// ends the stream goroutine and closes done; the grace goroutine's next select
+	// then observes done (or its Write hits the closed pipe), so it exits promptly.
+	// It touches only the session it owns.
+	if len(a.terminals) > 0 {
+		var graceWg sync.WaitGroup
+		for _, sess := range a.terminals {
+			graceWg.Add(1)
+			go func() {
+				defer graceWg.Done()
+				sess.TerminateGracefully(session.DefaultGraceTimeout)
+			}()
+		}
+		graceDone := make(chan struct{})
+		go func() { graceWg.Wait(); close(graceDone) }()
+		select {
+		case <-graceDone:
+		case <-time.After(session.DefaultGraceTimeout):
+		}
+
+		for id, sess := range a.terminals {
+			sess.Close()
+			delete(a.terminals, id)
+		}
 	}
 
 	// Bounded wait so a slow API server never hangs quit.
@@ -2721,7 +2786,7 @@ func (a App) shutdownTerminals() {
 	go func() { wg.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(nodeDebugDeleteTimeout):
 	}
 }
 

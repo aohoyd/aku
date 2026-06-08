@@ -2,12 +2,15 @@ package theme
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 
 	"charm.land/lipgloss/v2"
 	"gopkg.in/yaml.v3"
+
+	"github.com/aohoyd/aku/internal/config"
 )
 
 // Color is a string representing a color value (ANSI 256 index or hex like "#FF5555").
@@ -31,6 +34,13 @@ var (
 	Subtle       Color = "#54546D" // SumiInk4 — indicators, YAML markers
 	Prompt       Color = "#727169" // FujiGrey — input prompt labels in overlays
 	Selection    Color = "#FF9E3B" // RoninYellow — multi-select marker foreground
+
+	// Background is unset by default — no global background. Only set by
+	// themes that want a full-screen canvas (e.g. Midnight Commander).
+	Background Color = ""
+	// Foreground is unset by default — terminal default fg. Only set by
+	// themes that want a full-screen canvas (e.g. Midnight Commander).
+	Foreground Color = ""
 
 	// Pane context badge — muted so it sits quietly on the top border.
 	ContextOnline  Color = "#8A9A7B" // muted green — pane context badge, connected
@@ -71,21 +81,84 @@ var (
 	LogIP        Color = "#7FB4CA" // WaveBlue — IP addresses
 )
 
+// initWarning records a non-fatal problem encountered while resolving the
+// theme at init time (e.g. a configured theme name that doesn't exist). The
+// app can surface it to the user. A nil value means the theme resolved cleanly.
+var initWarning error
+
+// InitWarning returns any non-fatal warning produced during theme resolution
+// at package init time, or nil if the theme resolved cleanly.
+func InitWarning() error { return initWarning }
+
+// init resolves the configured theme at startup, applying named-theme and
+// theme.yaml layers over the compile-time defaults before any other package
+// (e.g. ui, highlight) captures these color globals into styles.
+//
+// It reads the config here — even though run() also loads config later — by
+// design: theme resolution must happen at package-init time, before downstream
+// package-level vars that depend on these colors are initialized. The
+// duplicate read is intentional, not a redundancy to remove.
 func init() {
-	_ = Load(ThemePath())
+	cfg, _ := config.LoadConfig(config.ConfigPath())
+	themeName := ""
+	if cfg != nil {
+		themeName = cfg.Theme
+	}
+	initWarning = resolve(ThemesDir(), themeName, ThemePath())
 }
 
 // ThemePath returns the default theme file path.
 func ThemePath() string {
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, "aku", "theme.yaml")
+	return filepath.Join(config.ConfigDir(), "theme.yaml")
+}
+
+// ThemesDir returns the directory holding named theme files.
+func ThemesDir() string {
+	return filepath.Join(config.ConfigDir(), "themes")
+}
+
+// resolve applies themes in layered order over the current (default) colors:
+//
+//  1. If themeName is non-empty, load themesDir/<themeName>.yaml. A missing
+//     named theme is returned as a warning (it's likely a typo or missing file)
+//     but resolution continues. A parse error is also returned as a warning.
+//  2. theme.yaml (at themeYAMLPath) is applied on top, so it always wins over
+//     the named theme. A missing theme.yaml is normal and not a warning; a
+//     parse error in it is returned as a warning.
+//
+// Only the first warning encountered is returned; any later warnings are
+// intentionally dropped. In particular, if a named-theme stat/parse error
+// already set the warning, a subsequent theme.yaml parse error is not
+// surfaced (the layering still proceeds and theme.yaml is still applied).
+// Returns nil when both layers resolve cleanly. themeName is sanitized with
+// filepath.Base to guard against path traversal.
+func resolve(themesDir, themeName, themeYAMLPath string) error {
+	var warning error
+
+	if themeName != "" {
+		named := filepath.Join(themesDir, filepath.Base(themeName)+".yaml")
+		if _, err := os.Stat(named); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				warning = fmt.Errorf("theme %q not found at %s", themeName, named)
+			} else {
+				warning = fmt.Errorf("theme %q: %w", themeName, err)
+			}
+		} else if err := Load(named); err != nil {
+			warning = fmt.Errorf("theme %q: %w", themeName, err)
+		}
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "aku", "theme.yaml")
+
+	if err := Load(themeYAMLPath); err != nil && warning == nil {
+		warning = fmt.Errorf("theme.yaml: %w", err)
+	}
+
+	return warning
 }
 
 // Load reads a YAML theme file and overwrites only the colors present in it.
-// If the file does not exist, the defaults are kept.
+// If the file does not exist, the defaults are kept (nil error). A YAML parse
+// error is returned; because unmarshal runs to completion before any color is
+// applied, a parse error leaves all colors untouched (no partial application).
 func Load(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -110,6 +183,8 @@ func Load(path string) error {
 		setIf(&Subtle, f.UI.Subtle)
 		setIf(&Prompt, f.UI.Prompt)
 		setIf(&Selection, f.UI.Selection)
+		setIf(&Background, f.UI.Background)
+		setIf(&Foreground, f.UI.Foreground)
 		setIf(&ContextOnline, f.UI.ContextOnline)
 		setIf(&ContextOffline, f.UI.ContextOffline)
 	}
@@ -166,6 +241,8 @@ type uiColors struct {
 	Subtle       *string `yaml:"subtle"`
 	Prompt       *string `yaml:"prompt"`
 	Selection    *string `yaml:"selection"`
+	Background   *string `yaml:"background"`
+	Foreground   *string `yaml:"foreground"`
 
 	ContextOnline  *string `yaml:"context_online"`
 	ContextOffline *string `yaml:"context_offline"`

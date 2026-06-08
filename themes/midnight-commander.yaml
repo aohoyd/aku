@@ -1,0 +1,44 @@
+# Midnight Commander theme for aku.
+# Classic Norton/MC DOS look: blue canvas, cyan panels, yellow labels.
+# Install:
+#   mkdir -p ~/.config/aku/themes/
+#   cp themes/midnight-commander.yaml ~/.config/aku/themes/
+# then set
+#   theme: midnight-commander
+# in ~/.config/aku/config.yaml.
+ui:
+  background: "#0000AA"      # DOS blue canvas
+  foreground: "#AAAAAA"      # light-grey body text
+  accent: "#00AAAA"          # cyan — focused border, selection bg
+  muted: "#0088AA"           # dim cyan — unfocused border, help text
+  highlight: "#FFFF55"       # bright yellow — titles, keys, table header, cursor
+  text_on_accent: "#000000"  # black text on cyan selection
+  error: "#FF5555"
+  warning: "#FFFF55"
+  subtle: "#5555FF"
+  prompt: "#AAAAAA"
+  selection: "#FFFF55"       # multi-select marker
+  context_online: "#55FF55"
+  context_offline: "#FF5555"
+status:
+  running: "#55FF55"
+  succeeded: "#AAAAAA"
+  pending: "#FFFF55"
+  failed: "#FF5555"
+syntax:
+  key: "#55FFFF"
+  string: "#55FF55"
+  number: "#FF55FF"
+  bool: "#FFFF55"
+  null: "#AAAAAA"
+  marker: "#5555FF"
+  value: "#FFFFFF"
+search:
+  match: "#FFFF55"
+  selected: "#00AAAA"
+  fg: "#000000"
+log:
+  timestamp: "#FF55FF"
+  time: "#55FFFF"
+  timezone: "#AAAAAA"
+  ip: "#55FFFF"

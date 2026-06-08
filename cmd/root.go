@@ -66,6 +66,7 @@ import (
 	"github.com/aohoyd/aku/internal/plugins/validatingadmissionpolicybindings"
 	"github.com/aohoyd/aku/internal/plugins/validatingwebhookconfigurations"
 	"github.com/aohoyd/aku/internal/portforward"
+	"github.com/aohoyd/aku/internal/theme"
 	"github.com/aohoyd/aku/pkg/build"
 
 	tea "charm.land/bubbletea/v2"
@@ -320,6 +321,16 @@ func parseLayoutOrientation(s string) (layout.Orientation, error) {
 	}
 }
 
+// warnThemeInit writes a non-fatal theme initialization warning to w. It is a
+// no-op when warning is nil. It is a small wrapper (rather than an inline
+// fmt.Fprintf like the k8s-connect warning below) so the formatting can be
+// unit-tested without exercising the full run() path.
+func warnThemeInit(w io.Writer, warning error) {
+	if warning != nil {
+		fmt.Fprintf(w, "Warning: %v\n", warning)
+	}
+}
+
 func run(cmd *cobra.Command, args []string) error {
 	// Suppress klog stderr output that breaks TUI display
 	klog.SetOutput(io.Discard)
@@ -331,6 +342,10 @@ func run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("error loading config: %w", err)
 	}
+
+	// Surface any non-fatal theme resolution warning (missing named theme or
+	// unparseable theme file) before the TUI takes over the screen.
+	warnThemeInit(os.Stderr, theme.InitWarning())
 
 	// Resolve kubeconfig path: flag > env > default
 	kubeconfigPath := kubeconfig

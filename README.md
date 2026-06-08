@@ -44,7 +44,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 
 **Terminals**
 - Exec and debug sessions are first-class panes: place them adjacent to other resources, zoom to focus, keep shells alive in the background
-- tmux-style prefix key (default `Ctrl+a`) escapes raw typing: prefix then `h/j/k/l` or arrows moves focus, prefix then `x` closes the pane; close a live pane with prefix then `x` (`Ctrl+w` is sent to the shell), while `Ctrl+w` directly closes an *exited* pane like any other
+- tmux-style prefix key (default `Ctrl+a`) escapes raw typing: prefix then `h/j/k/l` or arrows moves focus, prefix then `x`/`q`/`Ctrl+w` closes the pane; close a live pane with the prefix then `x`/`q`/`Ctrl+w` (a *bare* `Ctrl+w` is sent to the shell), while a bare `Ctrl+w` directly closes an *exited* pane like any other
 - `alt+z` zooms the focused terminal to fullscreen even over a live shell — its top bar shows an `alt+z: exit zoom` hint; `alt+z` and `shift+arrows` are captured by aku (kept out of the shell), every other key goes to the shell
 - Send a literal prefix byte to the shell by pressing the prefix twice
 - Exited shells keep an `[exited — status N]` banner and scrollback until you close them
@@ -119,7 +119,9 @@ All configuration files are optional. aku uses sensible defaults when no config 
 ~/.config/aku/
 ├── config.yaml    # Application settings
 ├── keymap.yaml    # Custom keybindings
-└── theme.yaml     # Color theme
+├── theme.yaml     # Color theme (override layer)
+└── themes/        # Named theme presets (selected via `theme:` in config.yaml)
+    └── midnight-commander.yaml   # example — copy from repo themes/ (aku never writes it)
 ```
 
 The directory follows the XDG Base Directory specification (`$XDG_CONFIG_HOME/aku/`).
@@ -164,7 +166,12 @@ terminal:
 # Shell launched by exec (s s) into a container
 exec:
   command: ["sh", "-c", "clear; (bash || ash || sh)"]  # default
+
+# Named color theme — loads ~/.config/aku/themes/<name>.yaml
+theme: midnight-commander
 ```
+
+`theme` selects a named theme preset from `~/.config/aku/themes/<name>.yaml`. Themes layer in order: built-in defaults → the named theme file → `theme.yaml` on top (so `theme.yaml` stays a fine-tune override layer, and both are fully optional). If the named theme has no matching file (or a theme file fails to parse), aku prints a warning to stderr and skips that layer — the built-in defaults and any `theme.yaml` still apply on top. It's non-fatal. Only the first warning is shown: if both the named theme is missing/invalid *and* `theme.yaml` fails to parse, only the named-theme warning is reported (the `theme.yaml` parse error is not separately surfaced).
 
 When `mouse.enabled` is `false` or unset, aku does not process mouse events and native terminal text selection works normally.
 
@@ -172,7 +179,7 @@ When mouse support is enabled, aku captures mouse events for click focus, wheel 
 
 To copy text while mouse support is enabled, hold Option (iTerm2, macOS Terminal) or Shift (most Linux terminals) while dragging to bypass aku and use the terminal's native selection.
 
-Exec (`s s`) and debug (`s d` / `s p`) open live terminal panes that run concurrently in the background — split them alongside other resources, zoom to focus, and switch away while a shell stays alive. A focused live terminal owns most keystrokes, so navigation goes through the tmux-style prefix (`terminal.prefix`, default `ctrl+a`): press the prefix, then a nav key (`h/j/k/l` or arrows to move focus, `x` to close the pane). Zoom and focus movement are an exception: by default `alt+z` (zoom) and `shift+left/right/up/down` (move focus between panes) are *captured* — handled by aku rather than forwarded to the shell — so you can zoom or switch panes without leaving the terminal (see the `capture:` keymap field below). `alt+z` is a unified fullscreen zoom: the focused pane (resource list, terminal, or detail/log panel) fills the whole screen borderlessly with a single top bar and the status bar hidden; press `alt+z` again to exit. Only one pane is zoomed at a time, but while zoomed you can still move focus with `shift+arrows` — zoom follows the newly-focused split. A zoomed terminal's top bar shows an `alt+z: exit zoom` hint. To close a *live* pane use the prefix then `x` — a bare `Ctrl+w` is forwarded to the shell, not intercepted. Once a pane has exited it behaves like any other split, so `Ctrl+w` closes it directly (no prefix). Press the prefix twice to send a literal prefix byte to the shell. When a shell exits, its pane keeps an `[exited — status N]` banner and scrollback until you close it. If the I/O stream fails mid-session (network drop, API-server error), the pane freezes with a `[exited — status 1] stream error: <detail>` banner instead of a clean status, so a broken connection is never mistaken for a normal exit. If a debug/exec pre-flight fails before the shell ever starts, the placeholder pane is removed (or, when it is the only pane, frozen as a closeable exited pane showing `debug failed: <reason>` that you dismiss like any other exited pane). Under sustained I/O saturation, keystrokes may be dropped rather than blocking — a deliberate tradeoff that keeps the UI responsive when the remote shell can't keep up. Node-debug pods are removed on pane close and on quit; ephemeral debug containers can't be deleted (a Kubernetes limitation) and the pane notes this on exit. `terminal.scrollback` sets how many off-screen lines each terminal retains for wheel/page scrolling. The shell launched by exec (`s s`) is overridable via `exec.command` (default `["sh", "-c", "clear; (bash || ash || sh)"]`, which clears the screen and prefers `bash`, falling back to `ash`/`sh`).
+Exec (`s s`) and debug (`s d` / `s p`) open live terminal panes that run concurrently in the background — split them alongside other resources, zoom to focus, and switch away while a shell stays alive. A focused live terminal owns most keystrokes, so navigation goes through the tmux-style prefix (`terminal.prefix`, default `ctrl+a`): press the prefix, then a nav key (`h/j/k/l` or arrows to move focus, `x`/`q`/`Ctrl+w` to close the pane). Zoom and focus movement are an exception: by default `alt+z` (zoom) and `shift+left/right/up/down` (move focus between panes) are *captured* — handled by aku rather than forwarded to the shell — so you can zoom or switch panes without leaving the terminal (see the `capture:` keymap field below). `alt+z` is a unified fullscreen zoom: the focused pane (resource list, terminal, or detail/log panel) fills the whole screen borderlessly with a single top bar and the status bar hidden; press `alt+z` again to exit. Only one pane is zoomed at a time, but while zoomed you can still move focus with `shift+arrows` — zoom follows the newly-focused split. A zoomed terminal's top bar shows an `alt+z: exit zoom` hint. To close a *live* pane use the prefix then `x`, `q`, or `Ctrl+w` — a *bare* `Ctrl+w` (no prefix) is forwarded to the shell, not intercepted. Once a pane has exited it behaves like any other split, so `Ctrl+w` closes it directly (no prefix). Press the prefix twice to send a literal prefix byte to the shell. When a shell exits, its pane keeps an `[exited — status N]` banner and scrollback until you close it. If the I/O stream fails mid-session (network drop, API-server error), the pane freezes with a `[exited — status 1] stream error: <detail>` banner instead of a clean status, so a broken connection is never mistaken for a normal exit. If a debug/exec pre-flight fails before the shell ever starts, the placeholder pane is removed (or, when it is the only pane, frozen as a closeable exited pane showing `debug failed: <reason>` that you dismiss like any other exited pane). Under sustained I/O saturation, keystrokes may be dropped rather than blocking — a deliberate tradeoff that keeps the UI responsive when the remote shell can't keep up. Node-debug pods are removed on pane close and on quit; ephemeral debug containers can't be deleted (a Kubernetes limitation) and the pane notes this on exit. `terminal.scrollback` sets how many off-screen lines each terminal retains for wheel/page scrolling. The shell launched by exec (`s s`) is overridable via `exec.command` (default `["sh", "-c", "clear; (bash || ash || sh)"]`, which clears the screen and prefers `bash`, falling back to `ash`/`sh`).
 
 `contexts.directories` lists extra directories aku scans recursively (in addition to the active `$KUBECONFIG`/`~/.kube/config`) for kubeconfig files. Every context across those files becomes switchable; files that aren't valid kubeconfigs or contain zero contexts are skipped. There is no "pinned" pane — every pane simply carries a context, and the focused pane is the source of truth (its context drives new-split defaults and the status bar). `gx` opens a fuzzy overlay picker that moves every pane sharing the focused pane's context to the chosen cluster (focused-context-group move), connecting asynchronously. `gX` opens an in-pane contexts list (a resource view) in the focused pane; Enter switches that pane's context. `oX` opens the contexts list in a new split, so you can bring up another cluster side-by-side. The contexts view has columns NAME, CLUSTER, SERVER, STATUS, and PANES, where STATUS is `●` connected, `○` offline/degraded, or `–` not yet dialed. The `gx` overlay annotates each row: contexts currently open get a `●` marker plus their pane count, and the focused pane's current context is highlighted. All context switches dial asynchronously off the Update goroutine, so the UI never freezes — even when a cluster is unreachable, the pane shows an `⚠ offline` marker instead of hanging. Pane context labels are shown only when more than one distinct context is open across panes; when every pane shares one context, labels are hidden. On switch, a pane lands on the chosen context's default namespace (the kubeconfig `namespace:` field, else `default`); if the pane's current resource type doesn't exist on the new cluster it shows an empty list and a short message in the status bar (there is no inline annotation in the list). That missing-resource check requires the cluster's API discovery to have been populated; until then the pane simply shows an empty list. Different panes can run live on different clusters at the same time, each with its own watches.
 
@@ -213,6 +220,10 @@ For the full list of command names, see the `defaults.go` keymap source (`intern
 
 ```yaml
 ui:
+  # background and foreground are unset by default. Uncomment to paint a
+  # full-screen canvas instead of using your terminal's own colors.
+  # background: "#1a1a2e"
+  # foreground: "#e0e0e0"
   accent: "#7C3AED"
   muted: "#6B7280"
   error: "#EF4444"
@@ -228,6 +239,12 @@ syntax:
   string: "#34D399"
   number: "#F472B6"
 ```
+
+The example above is partial — it shows a representative subset of keys. The full set of settable keys (all `ui`, `status`, `syntax`, `search`, and `log` fields) is enumerated in the theme source (`internal/theme/theme.go`); any key you omit keeps its default.
+
+`ui.background` and `ui.foreground` set the global terminal background and foreground. Both are unset by default; they're used by full-canvas themes (like Midnight Commander) that paint the whole screen rather than relying on your terminal's own colors.
+
+To install the bundled Midnight Commander theme, create the themes directory and copy `themes/midnight-commander.yaml` from the repo into it (`mkdir -p ~/.config/aku/themes/ && cp themes/midnight-commander.yaml ~/.config/aku/themes/`), then set `theme: midnight-commander` in `config.yaml`. It gives aku a classic blue MC-style canvas.
 
 ## Embedded terminals
 
@@ -250,7 +267,7 @@ A focused *live* terminal forwards almost every keystroke straight to the shell,
 - **Captured keys** (handled by aku, never sent to the shell): `alt+z` to zoom and `shift+←/→/↑/↓` to move focus between panes. These work without leaving the shell.
 - **The prefix key** (tmux-style, default `ctrl+a`): press the prefix, then a command key:
   - `h/j/k/l` or arrows — move focus
-  - `x` — close the pane
+  - `x`, `q`, or `Ctrl+w` — close the pane (a *bare* `Ctrl+w` without the prefix is still forwarded to the shell)
   - `PgUp` / `PgDn` — scroll the scrollback
   - press the prefix **twice** to send a literal prefix byte to the shell
 
@@ -265,6 +282,8 @@ A focused *live* terminal forwards almost every keystroke straight to the shell,
 - If a debug/exec pre-flight fails before the shell starts, the placeholder pane is removed — or, when it was the only pane, frozen as a closeable pane showing `debug failed: <reason>`.
 
 Node-debug pods are deleted on pane close and on quit. Ephemeral debug containers can't be deleted (a Kubernetes limitation); the pane notes this on exit.
+
+Closing a pane (or quitting aku) best-effort terminates the remote shell inside the pod rather than leaving it orphaned. This applies to exec, ephemeral-debug, and node-debug sessions alike — for plain exec sessions, where there is no pod to delete, it is the whole cleanup. A foreground full-screen TUI (e.g. `vim`, `less`, `k9s`) may still orphan its shell, since it intercepts the control bytes used to ask the shell to exit.
 
 ### Configuration
 
@@ -415,8 +434,8 @@ A focused live terminal forwards most keystrokes to the shell; use the prefix (d
 | `Alt+z` | Toggle fullscreen zoom (captured; top bar shows an `alt+z: exit zoom` hint) |
 | `Shift+←/→/↑/↓` | Move focus between panes (captured; zoom follows the focused split) |
 | `<prefix>` then `h/j/k/l` or arrows | Move focus |
-| `<prefix>` then `x` | Close pane |
-| `Ctrl+w` | Close pane (exited pane only; on a live pane it is sent to the shell) |
+| `<prefix>` then `x` / `q` / `Ctrl+w` | Close pane |
+| `Ctrl+w` | Close pane (exited pane only; on a live pane a bare `Ctrl+w` is sent to the shell — use `<prefix>` then `Ctrl+w` to close) |
 | `<prefix> <prefix>` | Send a literal prefix byte to the shell |
 | `<prefix>` then `PgUp` / `PgDn` | Scroll scrollback (an exited pane also accepts bare `PgUp` / `PgDn`) |
 

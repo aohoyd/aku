@@ -285,6 +285,39 @@ func TestLoadConfigTerminalOmittedUsesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfigWithTheme(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte("theme: midnight-commander\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Theme != "midnight-commander" {
+		t.Fatalf("loaded theme = %q, want midnight-commander", cfg.Theme)
+	}
+}
+
+func TestLoadConfigThemeOmitted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// A config without a theme key must yield an empty Theme (backward compatible).
+	data := []byte("mouse:\n  enabled: true\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Theme != "" {
+		t.Fatalf("omitted theme should yield empty string, got %q", cfg.Theme)
+	}
+}
+
 func TestLoadConfigWithCharts(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

@@ -55,6 +55,10 @@ type ContextsConfig struct {
 
 // Config holds the application configuration.
 type Config struct {
+	// Theme names a color preset loaded from <config>/themes/<name>.yaml. It is
+	// applied over the built-in defaults; theme.yaml (if present) is layered on
+	// top and overrides it.
+	Theme    string                       `yaml:"theme,omitempty"`
 	Charts   map[string]map[string]string `yaml:"charts,omitempty"`
 	API      APIConfig                    `yaml:"api,omitempty"`
 	Debug    DebugConfig                  `yaml:"debug,omitempty"`
@@ -97,7 +101,7 @@ func LoadConfig(path string) (*Config, error) {
 
 // ConfigPath returns the default config file path.
 func ConfigPath() string {
-	return filepath.Join(configDir(), "config.yaml")
+	return filepath.Join(ConfigDir(), "config.yaml")
 }
 
 // ChartRef returns the chart reference for a release in a namespace, or "" if not found.

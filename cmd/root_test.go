@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/aohoyd/aku/internal/msgs"
@@ -412,5 +415,25 @@ func TestParseDetailMode_Invalid(t *testing.T) {
 	_, err := parseDetailMode("foo")
 	if err == nil {
 		t.Fatal("expected error for invalid detail mode")
+	}
+}
+
+func TestWarnThemeInit_WithWarning(t *testing.T) {
+	var buf bytes.Buffer
+	warnThemeInit(&buf, errors.New("theme \"nope\" not found"))
+	got := buf.String()
+	if !strings.HasPrefix(got, "Warning: ") {
+		t.Errorf("warnThemeInit() = %q, want a \"Warning: \" prefix", got)
+	}
+	if !strings.Contains(got, "theme \"nope\" not found") {
+		t.Errorf("warnThemeInit() = %q, want it to contain the underlying message", got)
+	}
+}
+
+func TestWarnThemeInit_NilWarning(t *testing.T) {
+	var buf bytes.Buffer
+	warnThemeInit(&buf, nil)
+	if got := buf.String(); got != "" {
+		t.Errorf("warnThemeInit() with nil warning wrote %q, want empty", got)
 	}
 }
