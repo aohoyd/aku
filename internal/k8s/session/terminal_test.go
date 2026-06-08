@@ -18,6 +18,14 @@ type fakeExecutor struct {
 	initialWrite []byte
 	// readStdin, if true, reads one chunk from opts.Stdin and records it.
 	readStdin bool
+	// drainStdin, if true, continuously reads opts.Stdin in a goroutine and
+	// records every byte until the stream ends. Used to capture the graceful
+	// control-byte burst.
+	drainStdin bool
+	// exitOnEOT, if true, ends the stream (returns nil, closing t.done) as soon
+	// as the drain goroutine observes an EOT (0x04) byte on stdin. Requires
+	// drainStdin.
+	exitOnEOT bool
 	// readSize, if true, calls opts.TerminalSizeQueue.Next() once and records it.
 	readSize bool
 	// exitErr is returned when the stream ends (after ctx is cancelled, unless
@@ -77,6 +85,42 @@ func (f *fakeExecutor) StreamWithContext(ctx context.Context, opts remotecommand
 
 	if f.returnImmediately {
 		return f.exitErr
+	}
+
+	// drainStdin: continuously read stdin and record bytes so a test can observe
+	// the graceful control-byte burst. When exitOnEOT is set, the first 0x04 byte
+	// ends the stream early (signals sawEOT), mimicking a shell that exits on
+	// Ctrl-D; otherwise the loop runs until ctx is cancelled (drain unblocks via
+	// the pipe close on teardown).
+	if f.drainStdin && opts.Stdin != nil {
+		sawEOT := make(chan struct{})
+		go func() {
+			buf := make([]byte, 1024)
+			for {
+				n, err := opts.Stdin.Read(buf)
+				if n > 0 {
+					chunk := buf[:n]
+					f.mu.Lock()
+					f.gotStdin = append(f.gotStdin, chunk...)
+					f.mu.Unlock()
+					if f.exitOnEOT && bytes.IndexByte(chunk, 0x04) >= 0 {
+						close(sawEOT)
+						return
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+
+		select {
+		case <-ctx.Done():
+			return f.exitErr
+		case <-sawEOT:
+			// Shell "exited" on Ctrl-D: return cleanly so t.done closes.
+			return nil
+		}
 	}
 
 	<-ctx.Done()
@@ -473,6 +517,150 @@ func TestTerminalInputDrainExitsOnClose(t *testing.T) {
 		// done may not be observed by the select arm if the buffer still has room,
 		// in which case the chunk is accepted; either outcome is non-blocking and
 		// safe. The test would have hung if Write blocked.
+	}
+}
+
+// TestTerminateGracefullySendsControlSequence asserts the graceful exit writes
+// Ctrl-C (0x03) followed by gracefulExitEOTBurst × Ctrl-D (0x04) to the shell's
+// stdin when the shell ignores the bytes (the fake drains stdin but never exits).
+func TestTerminateGracefullySendsControlSequence(t *testing.T) {
+	fe := newFakeExecutor()
+	fe.drainStdin = true // ignores EOT: stream stays open until ctx cancel
+
+	term := Start(fe, "t")
+	<-fe.streamStarted
+	defer term.Close()
+
+	// Short grace: the shell never exits, so we expect a false return after the
+	// full burst has been sent.
+	if got := term.TerminateGracefully(50 * time.Millisecond); got {
+		t.Fatalf("TerminateGracefully = true, want false (shell ignores EOT)")
+	}
+
+	want := []byte{0x03}
+	for i := 0; i < gracefulExitEOTBurst; i++ {
+		want = append(want, 0x04)
+	}
+
+	// The bytes travel Write → input drain goroutine → stdinW.Write → fake drain
+	// goroutine, so they are not guaranteed recorded the instant TerminateGracefully
+	// returns. Poll briefly (rather than assert directly) to stay non-flaky across
+	// that hand-off without sleeping on a fixed duration.
+	deadline := time.After(2 * time.Second)
+	for {
+		if bytes.Equal(fe.recordedStdin(), want) {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("stdin = %v, want %v (Ctrl-C then %d × Ctrl-D)", fe.recordedStdin(), want, gracefulExitEOTBurst)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// TestTerminateGracefullyExitsOnEOT asserts that when the shell exits on the
+// first Ctrl-D, TerminateGracefully returns true and stops early — fewer than
+// the full burst of EOTs is sent.
+func TestTerminateGracefullyExitsOnEOT(t *testing.T) {
+	fe := newFakeExecutor()
+	fe.drainStdin = true
+	fe.exitOnEOT = true // stream ends on the first 0x04
+
+	term := Start(fe, "t")
+	<-fe.streamStarted
+	defer term.Close()
+
+	if got := term.TerminateGracefully(gracefulExitGrace); !got {
+		t.Fatalf("TerminateGracefully = false, want true (shell exits on EOT)")
+	}
+
+	// The stream is done; the recorded stdin must start with Ctrl-C and contain at
+	// least one EOT but strictly fewer than the full burst (we bailed early).
+	got := fe.recordedStdin()
+	if len(got) == 0 || got[0] != 0x03 {
+		t.Fatalf("stdin = %v, want it to start with Ctrl-C (0x03)", got)
+	}
+	eots := bytes.Count(got, []byte{0x04})
+	if eots < 1 {
+		t.Fatalf("stdin had %d EOT bytes, want at least 1", eots)
+	}
+	if eots >= gracefulExitEOTBurst {
+		t.Fatalf("stdin had %d EOT bytes, want fewer than the full burst of %d (should stop early)", eots, gracefulExitEOTBurst)
+	}
+}
+
+// TestTerminateGracefullyTimesOut asserts a false return is driven purely by the
+// grace timeout, independent of whether the shell ever reads the control bytes.
+// Unlike TestTerminateGracefullySendsControlSequence (which uses a draining fake),
+// this fake NEVER reads stdin — it just blocks on ctx — so the control bytes pile
+// up unread in the pipe. The stream still stays open, so TerminateGracefully must
+// hit its time.After(grace) arm and return false.
+func TestTerminateGracefullyTimesOut(t *testing.T) {
+	fe := newFakeExecutor()
+	// Default behavior: never reads stdin, blocks on ctx.Done(). No drainStdin.
+
+	term := Start(fe, "t")
+	<-fe.streamStarted
+	defer term.Close()
+
+	if got := term.TerminateGracefully(50 * time.Millisecond); got {
+		t.Fatalf("TerminateGracefully = true, want false (stream stays open past grace)")
+	}
+}
+
+// TestTerminateGracefullyAlreadyDone asserts that a session whose stream has
+// already ended returns true instantly and sends ZERO bytes to stdin.
+func TestTerminateGracefullyAlreadyDone(t *testing.T) {
+	fe := newFakeExecutor()
+	fe.drainStdin = true
+	fe.returnImmediately = true // stream returns at once; t.done closes
+
+	term := Start(fe, "t")
+
+	select {
+	case <-term.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done() did not close on immediate exit")
+	}
+
+	if got := term.TerminateGracefully(gracefulExitGrace); !got {
+		t.Fatalf("TerminateGracefully = false, want true (session already done)")
+	}
+
+	if got := fe.recordedStdin(); len(got) != 0 {
+		t.Fatalf("stdin = %v, want no bytes sent for an already-done session", got)
+	}
+}
+
+// TestTerminateGracefullyAfterCloseSendsNothing asserts that once Close() has
+// been called, TerminateGracefully returns true instantly and sends no bytes
+// (the closed guard short-circuits before any Write).
+func TestTerminateGracefullyAfterCloseSendsNothing(t *testing.T) {
+	fe := newFakeExecutor()
+	fe.drainStdin = true
+
+	term := Start(fe, "t")
+	<-fe.streamStarted
+
+	term.Close()
+
+	// done may not be observed synchronously after Close(), but the closed guard
+	// must still short-circuit and send nothing.
+	if got := term.TerminateGracefully(gracefulExitGrace); !got {
+		t.Fatalf("TerminateGracefully = false, want true (session closed)")
+	}
+
+	select {
+	case <-term.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done() did not close after Close()")
+	}
+
+	// Close() ran first, so the closed-guard short-circuits TerminateGracefully
+	// before it writes anything: no graceful control bytes reach the shell.
+	if got := fe.recordedStdin(); len(got) != 0 {
+		t.Fatalf("stdin = %v, want no bytes sent after Close()", got)
 	}
 }
 

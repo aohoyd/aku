@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"k8s.io/client-go/tools/remotecommand"
 	utilexec "k8s.io/client-go/util/exec"
@@ -51,6 +52,30 @@ type Terminal struct {
 	exitCode int
 	closed   bool // guards idempotent Close
 }
+
+// Graceful-exit tuning for TerminateGracefully. These bound how hard and how
+// long we try to coax the remote shell into exiting on its own before the
+// caller falls back to a hard Close().
+const (
+	// gracefulExitGrace is the post-burst time to wait for the shell to die. It
+	// is the final time.After bound in TerminateGracefully, applied AFTER the
+	// control-byte burst phase; the worst-case total block is therefore this
+	// value plus the burst phase (~(1+gracefulExitEOTBurst) × gracefulExitInterval).
+	gracefulExitGrace = 400 * time.Millisecond
+	// gracefulExitEOTBurst is the number of Ctrl-D (EOT) presses sent to peel
+	// the nested shells of the default exec command (sh → subshell → bash).
+	gracefulExitEOTBurst = 4
+	// gracefulExitInterval is the pause between control-byte presses.
+	gracefulExitInterval = 30 * time.Millisecond
+)
+
+// DefaultGraceTimeout is the recommended grace period to pass to
+// TerminateGracefully. "Default" reflects that it is the package's standard
+// post-burst wait (gracefulExitGrace) exported for callers (e.g. pane-close/quit
+// wiring) so they do not invent their own timeout; callers may pass a different
+// value, but there is no other named alternative in this package. Note it bounds
+// only the wait AFTER the control-byte burst, not the total method duration.
+const DefaultGraceTimeout = gracefulExitGrace
 
 // Start opens the SPDY stream against exec in a background goroutine and returns
 // a live Terminal. The stream runs until it ends on its own (shell exit) or
@@ -224,6 +249,66 @@ func (t *Terminal) Close() {
 	t.cancel()
 	// Closing the write end signals EOF to the SPDY stream's stdin reader.
 	_ = t.stdinW.Close()
+}
+
+// TerminateGracefully best-effort asks the remote shell to exit on its own by
+// writing control bytes to its stdin: Ctrl-C (0x03) to clear any partial line,
+// then a burst of Ctrl-D (0x04, EOT) to peel the nested shells of the default
+// exec command (sh → subshell → bash). It waits up to grace for the stream to
+// end and reports whether it did.
+//
+// It is advisory and never errors. It does NOT tear down the stream: the caller
+// must still call Close() afterward to guarantee the session is released even if
+// the shell ignored the control bytes. If the session has already ended (or been
+// Close()d) at entry it returns true immediately and enqueues no bytes.
+//
+// This is best-effort across a concurrent Close(): the closed check below is a
+// fast-path optimization, not a lock held across the writes. If Close() races in
+// after the check, t.Write may still enqueue control bytes onto the internal
+// input channel, but the drain goroutine's stdinW.Write hits the now-closed pipe
+// (ErrClosedPipe) and drops them, so no byte ever reaches the shell. There is no
+// data race (the channel/pipe ops are synchronized) and no observable effect.
+//
+// Limitation: a foreground full-screen TUI (vim, less, k9s, …) captures these
+// control bytes itself rather than passing them to the shell, so the shell
+// beneath it may still orphan. This is accepted; the hard Close() still runs.
+func (t *Terminal) TerminateGracefully(grace time.Duration) bool {
+	// Fast path: nothing to do if the stream is already gone or Close()d. Check
+	// done (stream returned) and the closed guard (Close() called) and send no
+	// bytes in either case.
+	select {
+	case <-t.done:
+		return true
+	default:
+	}
+	t.mu.Lock()
+	closed := t.closed
+	t.mu.Unlock()
+	if closed {
+		return true
+	}
+
+	// Ctrl-C to discard any partially typed line before asking the shell to exit.
+	_, _ = t.Write([]byte{0x03})
+	time.Sleep(gracefulExitInterval)
+
+	// Burst of EOTs to peel each nested shell, bailing as soon as the stream ends.
+	for i := 0; i < gracefulExitEOTBurst; i++ {
+		select {
+		case <-t.done:
+			return true
+		default:
+		}
+		_, _ = t.Write([]byte{0x04})
+		time.Sleep(gracefulExitInterval)
+	}
+
+	select {
+	case <-t.done:
+		return true
+	case <-time.After(grace):
+		return false
+	}
 }
 
 // chanWriter is an io.Writer that ships copies of written bytes onto out. It

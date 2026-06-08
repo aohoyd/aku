@@ -1,7 +1,9 @@
 package app
 
 import (
+	"bytes"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +21,66 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
+
+// waitAllDone waits for every session's Done() to close under ONE shared ceiling,
+// rather than giving each its own timeout (which would multiply the worst-case
+// wait by the session count). It genuinely fans out — one goroutine per session,
+// each blocking on its OWN Done() — so a hung non-first session cannot mask an
+// already-closed earlier one; a single collector closes the channel once every
+// goroutine has signalled, selected against the shared deadline.
+func waitAllDone(t *testing.T, sessions []*session.Terminal, ceiling time.Duration, ctx string) {
+	t.Helper()
+	var wg sync.WaitGroup
+	for _, s := range sessions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-s.Done()
+		}()
+	}
+	all := make(chan struct{})
+	go func() { wg.Wait(); close(all) }()
+	select {
+	case <-all:
+	case <-time.After(ceiling):
+		t.Fatalf("%s: not all sessions closed within %v", ctx, ceiling)
+	}
+}
+
+// isGracefulSequence reports whether got is a leading Ctrl-C (0x03) followed by
+// at least one Ctrl-D (0x04). Checking got[1:] for the EOT (instead of
+// IndexByte(got, 0x04) > 0) makes the intent explicit: a real EOT lands AFTER the
+// leading Ctrl-C, not merely "somewhere past index 0". Polling loops use this
+// predicate directly; assertGracefulSequence wraps it for one-shot assertions.
+func isGracefulSequence(got []byte) bool {
+	return len(got) >= 2 && got[0] == 0x03 && bytes.IndexByte(got[1:], 0x04) >= 0
+}
+
+// assertGracefulSequence asserts the recorded stdin satisfies isGracefulSequence.
+func assertGracefulSequence(t *testing.T, got []byte, ctx string) {
+	t.Helper()
+	if !isGracefulSequence(got) {
+		t.Fatalf("%s: stdin = %q, want a leading Ctrl-C (0x03) then at least one Ctrl-D (0x04)", ctx, got)
+	}
+}
+
+// waitGracefulSequence polls fe's recorded stdin until it satisfies
+// isGracefulSequence or the deadline elapses, routing the byte-condition through
+// the shared predicate so every graceful test asserts the same thing.
+func waitGracefulSequence(t *testing.T, fe *fakeExecutor, ctx string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if isGracefulSequence(fe.recordedStdin()) {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("%s: graceful sequence (0x03 then 0x04) not delivered; got %q", ctx, fe.recordedStdin())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
 
 // fakeDeleteClient builds a k8s.Client whose typed fake records pod deletes on
 // the returned channel, so lifecycle tests can assert a node-debug pod was
@@ -69,8 +131,12 @@ func TestCloseFocusedTerminalLastSplitGuard(t *testing.T) {
 	model, _ := a.update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	a = drainModel(t, model)
 
-	// Open a terminal as the only split (no resource sibling seeded).
+	// Open a terminal as the only split (no resource sibling seeded). Drain stdin
+	// and exit on the EOT burst so the detached graceful-terminate goroutine
+	// completes promptly rather than blocking the full grace budget.
 	fe := newFakeExecutor()
+	fe.drainStdin = true
+	fe.exitOnEOT = true
 	id := "exec:only"
 	sess := session.Start(fe, id)
 	a.terminals[id] = sess
@@ -80,6 +146,7 @@ func TestCloseFocusedTerminalLastSplitGuard(t *testing.T) {
 	a.layout.AddTerminalSplit(tp)
 	a.syncTerminalSizes()
 	defer sess.Close()
+	<-fe.streamStarted
 
 	if a.layout.SplitCount() != 1 {
 		t.Fatalf("precondition: expected exactly one split, got %d", a.layout.SplitCount())
@@ -99,6 +166,12 @@ func TestCloseFocusedTerminalLastSplitGuard(t *testing.T) {
 	if _, found := a.layout.TerminalPaneByID(id); !found {
 		t.Fatal("last-split close removed the pane; it should remain in place")
 	}
+
+	// The FULL graceful sequence (Ctrl-C then the EOT burst) reaches the shell
+	// before teardown — asserted BEFORE waiting on Done() so a regression that
+	// drops the EOT burst (Ctrl-C alone) cannot slip through on a Done() that
+	// closes via the hard-Close() timeout.
+	waitGracefulSequence(t, fe, "last-split guard close")
 
 	select {
 	case <-sess.Done():
@@ -170,7 +243,11 @@ func TestCloseFocusedTerminalLastSplitEphemeral(t *testing.T) {
 	a = drainModel(t, model)
 
 	// Open an ephemeral debug terminal as the only split (no resource sibling).
+	// Drain stdin and exit on the EOT burst so the detached graceful-terminate
+	// goroutine completes promptly rather than blocking the full grace budget.
 	fe := newFakeExecutor()
+	fe.drainStdin = true
+	fe.exitOnEOT = true
 	id := "debug:only"
 	sess := session.Start(fe, id)
 	a.terminals[id] = sess
@@ -181,6 +258,7 @@ func TestCloseFocusedTerminalLastSplitEphemeral(t *testing.T) {
 	a.layout.AddTerminalSplit(tp)
 	a.syncTerminalSizes()
 	defer sess.Close()
+	<-fe.streamStarted
 
 	if a.layout.SplitCount() != 1 {
 		t.Fatalf("precondition: expected exactly one split, got %d", a.layout.SplitCount())
@@ -223,13 +301,18 @@ func TestNodeDebugCloseDeletesPod(t *testing.T) {
 	a = drainModel(t, model)
 
 	client, deleted := fakeDeleteClient("ktui-debug-node1-aaaaa")
+	// Drain stdin and exit on the EOT burst so the detached graceful-terminate
+	// goroutine completes promptly rather than blocking the full grace budget.
 	fe := newFakeExecutor()
+	fe.drainStdin = true
+	fe.exitOnEOT = true
 	sess := openTestTerminalWithMeta(t, &a, "debug-node:1", fe, terminalMeta{
 		nodeDebug: true,
 		client:    client,
 		podName:   "ktui-debug-node1-aaaaa",
 		namespace: "default",
 	})
+	<-fe.streamStarted
 
 	// Close the focused (terminal) pane via the shared close path.
 	a, _ = a.closeFocusedTerminal()
@@ -255,6 +338,116 @@ func TestNodeDebugCloseDeletesPod(t *testing.T) {
 	case <-sess.Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("session.Done() did not close after pane close (leak)")
+	}
+}
+
+// TestCloseTerminalSessionUnregistersImmediately asserts pane close stays
+// instant: closeTerminalSession removes the session from a.terminals (and the
+// node-debug cleanup metadata) synchronously, BEFORE the detached
+// graceful-terminate goroutine has a chance to run. The graceful sequence +
+// Close() happen in the background; the maps must already be drained on return.
+func TestCloseTerminalSessionUnregistersImmediately(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	a = drainModel(t, model)
+
+	// A fake that blocks on ctx (does not exit) so the background goroutine is
+	// still mid-grace while we assert the synchronous removal.
+	fe := newFakeExecutor()
+	id := "exec:instant"
+	sess := openTestTerminalWithMeta(t, &a, id, fe, terminalMeta{ephemeral: true, podName: "p", namespace: "default"})
+	defer sess.Close()
+	<-fe.streamStarted
+
+	a.closeTerminalSession(id)
+
+	// Synchronous removal: no waiting on the background goroutine.
+	if _, ok := a.terminals[id]; ok {
+		t.Fatal("session not removed from a.terminals synchronously on close")
+	}
+	if _, ok := a.termCleanup[id]; ok {
+		t.Fatal("cleanup metadata not removed synchronously on close")
+	}
+}
+
+// TestCloseTerminalSessionGracefulThenClose asserts the background path: after
+// closeTerminalSession returns, the detached goroutine sends the graceful
+// control sequence (Ctrl-C 0x03 then a burst of Ctrl-D 0x04) to the shell's
+// stdin and then hard-Close()s the session (Done() closes). Assertions poll with
+// a timeout rather than sleeping a fixed duration to stay non-flaky.
+func TestCloseTerminalSessionGracefulThenClose(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	a = drainModel(t, model)
+
+	// drainStdin records every chunk written to stdin so the graceful sequence
+	// is observable; the fake blocks on ctx until Close() cancels it.
+	fe := newFakeExecutor()
+	fe.drainStdin = true
+	id := "exec:graceful"
+	sess := openTestTerminalWithMeta(t, &a, id, fe, terminalMeta{})
+	defer sess.Close()
+	<-fe.streamStarted
+
+	a.closeTerminalSession(id)
+
+	// The background goroutine eventually delivers the graceful sequence: a
+	// leading Ctrl-C (0x03) followed by at least one Ctrl-D (0x04).
+	waitGracefulSequence(t, fe, "closeTerminalSession background path")
+
+	// And the session is hard-Close()d afterward: Done() closes (ctx cancelled).
+	select {
+	case <-sess.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("background path did not Close() the session (Done() never closed)")
+	}
+}
+
+// TestCloseFocusedTerminalLastSplitGraceful asserts the last-split close path
+// (closeFocusedTerminal with SplitCount==1) routes the frozen pane's session
+// through closeTerminalSession, so it still receives graceful termination + a
+// hard Close() even though the pane stays on screen.
+func TestCloseFocusedTerminalLastSplitGraceful(t *testing.T) {
+	a := newTestApp()
+	model, _ := a.update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	a = drainModel(t, model)
+
+	// Open a terminal as the only split (no resource sibling seeded).
+	fe := newFakeExecutor()
+	fe.drainStdin = true
+	id := "exec:lastsplit"
+	sess := session.Start(fe, id)
+	a.terminals[id] = sess
+	w, h := a.layout.SplitSeedSize()
+	tp := ui.NewTerminalPane("exec: only", "ctx-1", w, h)
+	tp.SetID(id)
+	a.layout.AddTerminalSplit(tp)
+	a.syncTerminalSizes()
+	defer sess.Close()
+	<-fe.streamStarted
+
+	if a.layout.SplitCount() != 1 {
+		t.Fatalf("precondition: expected exactly one split, got %d", a.layout.SplitCount())
+	}
+
+	a, _ = a.closeFocusedTerminal()
+
+	// Session unregistered immediately, pane left in place.
+	if _, ok := a.terminals[id]; ok {
+		t.Fatal("last-split close should unregister the session")
+	}
+	if _, found := a.layout.TerminalPaneByID(id); !found {
+		t.Fatal("last-split close removed the pane; it should remain in place")
+	}
+
+	// Full graceful sequence reaches the shell before the hard teardown: a
+	// leading Ctrl-C (0x03) followed by at least one Ctrl-D (0x04).
+	waitGracefulSequence(t, fe, "last-split close")
+
+	select {
+	case <-sess.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("session.Done() did not close after last-split terminal close")
 	}
 }
 
@@ -461,12 +654,161 @@ func TestShutdownTerminalsSweepsNodePods(t *testing.T) {
 	if len(a.terminals) != 0 || len(a.termCleanup) != 0 {
 		t.Fatalf("registries not drained: terminals=%d cleanup=%d", len(a.terminals), len(a.termCleanup))
 	}
-	for _, s := range []*session.Terminal{sessA, sessB, sessC} {
-		select {
-		case <-s.Done():
-		case <-time.After(2 * time.Second):
-			t.Fatalf("session %s not cancelled by shutdownTerminals", s.ID())
-		}
+	waitAllDone(t, []*session.Terminal{sessA, sessB, sessC}, 2*time.Second, "shutdownTerminals sweep")
+}
+
+// TestShutdownTerminalsGracefulMultiSession asserts the quit path asks EVERY
+// live shell to exit gracefully BEFORE the hard close, and that the bytes land
+// while the session is still live. Each fake exits cleanly on the first EOT
+// (exitOnEOT), so the stream ends as a direct consequence of the graceful burst
+// — not the later hard Close(). To prove ordering, run shutdownTerminals in the
+// background and poll for the full graceful sequence FIRST (while the sessions
+// are still draining the burst), then assert Done() closes. The bytes therefore
+// provably arrive at a live shell before teardown completes.
+func TestShutdownTerminalsGracefulMultiSession(t *testing.T) {
+	a := newTestApp()
+
+	type sf struct {
+		id   string
+		fe   *fakeExecutor
+		sess *session.Terminal
+	}
+	specs := []*sf{
+		{id: "exec:g1", fe: newFakeExecutor()},
+		{id: "exec:g2", fe: newFakeExecutor()},
+		{id: "exec:g3", fe: newFakeExecutor()},
+	}
+	for _, s := range specs {
+		s.fe.drainStdin = true // record the graceful control bytes
+		s.fe.exitOnEOT = true  // exit cleanly on the first Ctrl-D, while still live
+		s.sess = session.Start(s.fe, s.id)
+		a.terminals[s.id] = s.sess
+		<-s.fe.streamStarted
+	}
+
+	done := make(chan struct{})
+	go func() {
+		a.shutdownTerminals()
+		close(done)
+	}()
+
+	// Poll for the graceful sequence FIRST — this happens while the sessions are
+	// still live (the shell exits on the EOT we are watching for). Each shell
+	// must receive a leading Ctrl-C (0x03) followed by at least one Ctrl-D (0x04).
+	for _, s := range specs {
+		waitGracefulSequence(t, s.fe, "session "+s.id+" before teardown")
+	}
+
+	// Only after the bytes are observed do we let teardown finish: shutdownTerminals
+	// returns and every session ends up hard-Close()d (Done() closes).
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdownTerminals did not return after sessions exited on EOT")
+	}
+	if len(a.terminals) != 0 {
+		t.Fatalf("terminals not drained after shutdown: %d", len(a.terminals))
+	}
+	sessions := make([]*session.Terminal, 0, len(specs))
+	for _, s := range specs {
+		sessions = append(sessions, s.sess)
+	}
+	waitAllDone(t, sessions, 2*time.Second, "graceful multi-session shutdown")
+}
+
+// TestShutdownTerminalsBoundedWhenShellsIgnoreEOT asserts quit completes within
+// a bounded time even when sessions never exit on their own: the fakes block on
+// ctx (ignoring the EOT burst) until Close() cancels them, so the shared grace
+// phase must hit its time.After ceiling rather than waiting indefinitely. Many
+// sessions share ONE grace budget, so the whole call must finish well under the
+// node-debug 3s ceiling.
+func TestShutdownTerminalsBoundedWhenShellsIgnoreEOT(t *testing.T) {
+	a := newTestApp()
+
+	const n = 6
+	for i := 0; i < n; i++ {
+		fe := newFakeExecutor() // blocks on ctx; never exits on EOT
+		id := "exec:bounded:" + string(rune('a'+i))
+		sess := session.Start(fe, id)
+		a.terminals[id] = sess
+		<-fe.streamStarted
+	}
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		a.shutdownTerminals()
+		close(done)
+	}()
+
+	// Generous ceiling: one shared ~400ms grace budget (plus the ~150ms burst and
+	// slack), far under the node-debug 3s ceiling. If the grace budget were
+	// per-session (N × grace ≈ 2.4s here) or unbounded, this would blow past it.
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("shutdownTerminals did not complete within bounded time (%d sessions ignoring EOT)", n)
+	}
+	// Tighter bound the 2s select can't catch: a shared budget completes well under
+	// 1.5s, whereas a per-session budget (6 × ~400ms) would exceed it. This proves
+	// the sessions share ONE grace window rather than serializing.
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("shutdownTerminals took %v, expected ~one shared grace budget, not N × grace", elapsed)
+	}
+}
+
+// TestShutdownTerminalsFastExitOnEOT asserts the fast-exit path: when every
+// shell exits cleanly on the EOT burst, TerminateGracefully returns true and the
+// shared grace select unblocks via graceDone WELL BEFORE the outer
+// time.After(DefaultGraceTimeout) ceiling fires. The whole shutdown therefore
+// completes in a small fraction of the full grace budget. Measured elapsed with a
+// generous-but-meaningful upper bound to stay non-flaky.
+func TestShutdownTerminalsFastExitOnEOT(t *testing.T) {
+	a := newTestApp()
+
+	const n = 4
+	type sf struct {
+		fe   *fakeExecutor
+		sess *session.Terminal
+	}
+	specs := make([]*sf, 0, n)
+	for i := 0; i < n; i++ {
+		fe := newFakeExecutor()
+		fe.drainStdin = true
+		fe.exitOnEOT = true // exit cleanly on the first Ctrl-D
+		id := "exec:fast:" + string(rune('a'+i))
+		sess := session.Start(fe, id)
+		a.terminals[id] = sess
+		specs = append(specs, &sf{fe: fe, sess: sess})
+		<-fe.streamStarted
+	}
+
+	start := time.Now()
+	a.shutdownTerminals()
+	elapsed := time.Since(start)
+
+	// The grace burst sends Ctrl-C then up to 4× Ctrl-D at ~30ms intervals; the
+	// shells exit on the first EOT, so the grace phase unblocks shortly after the
+	// first Ctrl-D rather than running the full ~400ms ceiling. 350ms is a
+	// comfortable upper bound (well clear of intermittent -race/loaded-CI jitter
+	// over the ~60ms minimum) that still sits below the ~550ms ignore-EOT timeout
+	// path, so it still proves the fast-exit path is taken.
+	if elapsed > 350*time.Millisecond {
+		t.Fatalf("shutdownTerminals took %v with shells exiting on EOT; expected well under the full grace budget", elapsed)
+	}
+
+	if len(a.terminals) != 0 {
+		t.Fatalf("terminals not drained after shutdown: %d", len(a.terminals))
+	}
+	sessions := make([]*session.Terminal, 0, len(specs))
+	for _, s := range specs {
+		sessions = append(sessions, s.sess)
+	}
+	waitAllDone(t, sessions, 2*time.Second, "fast-exit shutdown")
+
+	for i, s := range specs {
+		// The graceful sequence still reached each shell before it exited.
+		assertGracefulSequence(t, s.fe.recordedStdin(), "session "+string(rune('a'+i)))
 	}
 }
 
@@ -494,13 +836,7 @@ func TestShutdownTerminalsExitsReplyPumps(t *testing.T) {
 
 	a.shutdownTerminals()
 
-	for _, s := range []*session.Terminal{sessA, sessB} {
-		select {
-		case <-s.Done():
-		case <-time.After(2 * time.Second):
-			t.Fatalf("session %s not cancelled by shutdownTerminals", s.ID())
-		}
-	}
+	waitAllDone(t, []*session.Terminal{sessA, sessB}, 2*time.Second, "reply-pump shutdown")
 
 	// Two sessions × two pump goroutines each = four exits. A leak in any leaves
 	// the count short and fails under the timeout.

@@ -25,9 +25,14 @@ import (
 // stream starts; readStdin records one chunk read off stdin; returnImmediately
 // ends the stream without waiting for cancellation (simulating shell exit).
 type fakeExecutor struct {
-	initialWrite      []byte
-	readStdin         bool
-	readStdinLoop     bool // when true, drain stdin continuously (multi-reply tests)
+	initialWrite []byte
+	readStdin    bool
+	// drainStdin, when true, drains stdin continuously (multi-reply / graceful
+	// burst tests). Mirrors the session-package fake's drainStdin/exitOnEOT
+	// drain-and-exit-on-EOT behavior so app- and session-level wiring use the same
+	// fake semantics under the same field names.
+	drainStdin        bool
+	exitOnEOT         bool // when true (with drainStdin), end the stream on the first 0x04
 	readSize          bool // when true, read one size off the size queue and record it
 	exitErr           error
 	returnImmediately bool
@@ -70,24 +75,41 @@ func (f *fakeExecutor) StreamWithContext(ctx context.Context, opts remotecommand
 		}()
 	}
 
-	if f.readStdinLoop && opts.Stdin != nil {
+	if f.drainStdin && opts.Stdin != nil {
 		// Drain stdin continuously in the background so multiple replies (e.g.
 		// back-to-back terminal queries) are all recorded. Read returns an error
-		// when the stdin pipe is closed at teardown, ending the loop.
+		// when the stdin pipe is closed at teardown, ending the loop. When
+		// exitOnEOT is set, the first 0x04 (Ctrl-D) byte ends the stream cleanly,
+		// mimicking a shell that exits on EOT (so TerminateGracefully returns true).
+		sawEOT := make(chan struct{})
 		go func() {
 			buf := make([]byte, 1024)
 			for {
 				n, err := opts.Stdin.Read(buf)
 				if n > 0 {
+					chunk := buf[:n]
 					f.mu.Lock()
-					f.gotStdin = append(f.gotStdin, buf[:n]...)
+					f.gotStdin = append(f.gotStdin, chunk...)
 					f.mu.Unlock()
+					if f.exitOnEOT && bytes.IndexByte(chunk, 0x04) >= 0 {
+						close(sawEOT)
+						return
+					}
 				}
 				if err != nil {
 					return
 				}
 			}
 		}()
+		if f.exitOnEOT {
+			select {
+			case <-ctx.Done():
+				return f.exitErr
+			case <-sawEOT:
+				// Shell "exited" on Ctrl-D: return cleanly so the stream ends.
+				return f.exitErr
+			}
+		}
 	} else if f.readStdin && opts.Stdin != nil {
 		buf := make([]byte, 1024)
 		n, _ := opts.Stdin.Read(buf)

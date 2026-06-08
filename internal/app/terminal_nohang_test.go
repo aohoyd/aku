@@ -46,7 +46,7 @@ func TestTerminalTwoQueriesNoHang(t *testing.T) {
 	a = drainModel(t, model)
 
 	fe := newFakeExecutor()
-	fe.readStdinLoop = true // drain all replies, not just one
+	fe.drainStdin = true // drain all replies, not just one
 	id := "exec:twoqueries"
 	sess, _ := openTestTerminalWithPump(t, &a, id, fe)
 	defer sess.Close()

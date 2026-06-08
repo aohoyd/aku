@@ -485,7 +485,7 @@ func (t *TerminalPane) HandleKey(msg tea.KeyPressMsg, prefix string, isCaptured 
 		return true, nil, PaneCmdScrollUp
 	case "pgdown":
 		return true, nil, PaneCmdScrollDown
-	case "x":
+	case "x", "q", "ctrl+w":
 		return true, nil, PaneCmdClose
 	default:
 		// Unmapped nav key: consume it (do not leak to the shell), no-op.

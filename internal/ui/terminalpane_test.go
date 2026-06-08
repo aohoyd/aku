@@ -317,6 +317,8 @@ func TestTerminalPane_NavCommands(t *testing.T) {
 		{tea.KeyPressMsg{Code: tea.KeyPgUp}, PaneCmdScrollUp},
 		{tea.KeyPressMsg{Code: tea.KeyPgDown}, PaneCmdScrollDown},
 		{printable('x'), PaneCmdClose},
+		{printable('q'), PaneCmdClose},
+		{ctrl('w'), PaneCmdClose},
 	}
 	for _, tc := range cases {
 		p := NewTerminalPane("t", "", 40, 10)
@@ -432,7 +434,7 @@ func TestTerminalPane_NavUnmappedIsNoOp(t *testing.T) {
 	p := NewTerminalPane("t", "", 40, 10)
 	p.Focus()
 	p.HandleKey(ctrl('a'), "ctrl+a", nil) // enter nav
-	handled, toShell, cmd := p.HandleKey(printable('q'), "ctrl+a", nil)
+	handled, toShell, cmd := p.HandleKey(printable('m'), "ctrl+a", nil)
 	if !handled {
 		t.Fatal("unmapped nav key should be consumed (handled)")
 	}
