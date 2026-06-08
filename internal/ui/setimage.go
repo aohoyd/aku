@@ -144,17 +144,21 @@ func (s SetImageOverlay) Update(msg tea.Msg) (SetImageOverlay, tea.Cmd) {
 		return s, nil
 
 	case tea.KeyLeft:
-		if !s.inputFocused {
-			s.focusedButton = setImageBtnYes
-			s.updateFooter()
+		if s.inputFocused {
+			cmd := s.overlay.UpdateInputs(km)
+			return s, cmd
 		}
+		s.focusedButton = setImageBtnYes
+		s.updateFooter()
 		return s, nil
 
 	case tea.KeyRight:
-		if !s.inputFocused {
-			s.focusedButton = setImageBtnNo
-			s.updateFooter()
+		if s.inputFocused {
+			cmd := s.overlay.UpdateInputs(km)
+			return s, cmd
 		}
+		s.focusedButton = setImageBtnNo
+		s.updateFooter()
 		return s, nil
 
 	default:

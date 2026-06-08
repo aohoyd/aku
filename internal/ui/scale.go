@@ -141,17 +141,21 @@ func (s ScaleOverlay) Update(msg tea.Msg) (ScaleOverlay, tea.Cmd) {
 		return s, nil
 
 	case tea.KeyLeft:
-		if !s.inputFocused {
-			s.focusedButton = scaleBtnYes
-			s.updateFooter()
+		if s.inputFocused {
+			cmd := s.overlay.UpdateInputs(km)
+			return s, cmd
 		}
+		s.focusedButton = scaleBtnYes
+		s.updateFooter()
 		return s, nil
 
 	case tea.KeyRight:
-		if !s.inputFocused {
-			s.focusedButton = scaleBtnNo
-			s.updateFooter()
+		if s.inputFocused {
+			cmd := s.overlay.UpdateInputs(km)
+			return s, cmd
 		}
+		s.focusedButton = scaleBtnNo
+		s.updateFooter()
 		return s, nil
 
 	default:

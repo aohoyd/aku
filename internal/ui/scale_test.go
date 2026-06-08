@@ -390,3 +390,30 @@ func TestScaleOverlayUpFromButtonsFocusesInput(t *testing.T) {
 		t.Fatal("expected input focused after Up from buttons")
 	}
 }
+
+func TestScaleOverlayArrowsMoveCursorWhenInputFocused(t *testing.T) {
+	s := NewScaleOverlay(80, 30)
+	s.Open("my-deploy", "default", testGVR, 3)
+
+	// Input 0 ("3") is focused after Open. Place the cursor at the end.
+	s.overlay.Input(0).CursorEnd()
+	end := s.overlay.Input(0).Position()
+	if end == 0 {
+		t.Fatal("expected non-zero cursor position at end of input")
+	}
+
+	// Left arrow must move the cursor within the input, not switch buttons.
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if !s.InputFocused() {
+		t.Fatal("expected input to remain focused after Left")
+	}
+	if got := s.overlay.Input(0).Position(); got != end-1 {
+		t.Fatalf("expected cursor at %d after Left, got %d", end-1, got)
+	}
+
+	// Right arrow must move the cursor back toward the end.
+	s, _ = s.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	if got := s.overlay.Input(0).Position(); got != end {
+		t.Fatalf("expected cursor at %d after Right, got %d", end, got)
+	}
+}

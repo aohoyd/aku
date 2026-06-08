@@ -286,6 +286,33 @@ func TestSetImageOverlayButtonNavigation(t *testing.T) {
 	}
 }
 
+func TestSetImageOverlayArrowsMoveCursorWhenInputFocused(t *testing.T) {
+	si := NewSetImageOverlay(80, 30)
+	si.Open("my-deploy", "default", testGVR, "deployments", testContainers)
+
+	// Input 0 is focused after Open. Place the cursor at the end of the value.
+	si.overlay.Input(0).CursorEnd()
+	end := si.overlay.Input(0).Position()
+	if end == 0 {
+		t.Fatal("expected non-zero cursor position at end of input")
+	}
+
+	// Left arrow must move the cursor within the input, not switch buttons.
+	si, _ = si.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if !si.InputFocused() {
+		t.Fatal("expected input to remain focused after Left")
+	}
+	if got := si.overlay.Input(0).Position(); got != end-1 {
+		t.Fatalf("expected cursor at %d after Left, got %d", end-1, got)
+	}
+
+	// Right arrow must move the cursor back toward the end.
+	si, _ = si.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	if got := si.overlay.Input(0).Position(); got != end {
+		t.Fatalf("expected cursor at %d after Right, got %d", end, got)
+	}
+}
+
 func TestSetImageOverlayEnterOnNoButton(t *testing.T) {
 	si := NewSetImageOverlay(80, 30)
 	si.Open("my-deploy", "default", testGVR, "deployments", testContainers)

@@ -148,17 +148,21 @@ func (p PortForwardOverlay) Update(msg tea.Msg) (PortForwardOverlay, tea.Cmd) {
 		return p, nil
 
 	case tea.KeyLeft:
-		if !p.inputFocused {
-			p.focusedButton = pfBtnYes
-			p.updateFooter()
+		if p.inputFocused {
+			cmd := p.overlay.UpdateInputs(km)
+			return p, cmd
 		}
+		p.focusedButton = pfBtnYes
+		p.updateFooter()
 		return p, nil
 
 	case tea.KeyRight:
-		if !p.inputFocused {
-			p.focusedButton = pfBtnNo
-			p.updateFooter()
+		if p.inputFocused {
+			cmd := p.overlay.UpdateInputs(km)
+			return p, cmd
 		}
+		p.focusedButton = pfBtnNo
+		p.updateFooter()
 		return p, nil
 
 	default:

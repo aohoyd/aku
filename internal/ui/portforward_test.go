@@ -366,3 +366,31 @@ func TestPortForwardSubmitViaButtonYes(t *testing.T) {
 		t.Errorf("expected pod my-pod/default, got %s/%s", pfMsg.PodName, pfMsg.PodNamespace)
 	}
 }
+
+func TestPortForwardOverlayArrowsMoveCursorWhenInputFocused(t *testing.T) {
+	pf := NewPortForwardOverlay(80, 30)
+	pf.Open("my-pod", "default", testPorts[:2])
+
+	// Focus the local port input (index 1), which holds an auto-filled value.
+	pf.focusToInput(1)
+	pf.overlay.Input(1).CursorEnd()
+	end := pf.overlay.Input(1).Position()
+	if end == 0 {
+		t.Fatal("expected non-zero cursor position at end of input")
+	}
+
+	// Left arrow must move the cursor within the input, not switch buttons.
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if !pf.InputFocused() {
+		t.Fatal("expected input to remain focused after Left")
+	}
+	if got := pf.overlay.Input(1).Position(); got != end-1 {
+		t.Fatalf("expected cursor at %d after Left, got %d", end-1, got)
+	}
+
+	// Right arrow must move the cursor back toward the end.
+	pf, _ = pf.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	if got := pf.overlay.Input(1).Position(); got != end {
+		t.Fatalf("expected cursor at %d after Right, got %d", end, got)
+	}
+}
