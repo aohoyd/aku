@@ -35,7 +35,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Exec into containers as live, embeddable terminal panes (multiple concurrent, zoomable, run in the background)
 - Ephemeral debug containers (pods and nodes, with optional privileged mode) as live terminal panes — node-debug pods are cleaned up on pane close and on quit
 - Port forwarding with live status tracking
-- Update container images across workloads
+- Update container images and per-container `imagePullPolicy` across workloads
 - Scale deployments, statefulsets, and replicasets
 - Rollout restart for deployments, statefulsets, and daemonsets (supports multi-select)
 - Multi-select resources for bulk delete and rollout restart
@@ -424,6 +424,16 @@ Saved logs go to `$XDG_STATE_HOME/aku/logs/<cluster>/<ns>-<pod>-<container>-<YYY
 | `ss` | Pods, Containers | Exec (live terminal pane) |
 | `sd` | Pods, Containers, Nodes | Debug container (live terminal pane) |
 | `sp` | Pods, Containers, Nodes | Privileged debug (live terminal pane) |
+
+#### Set Image (`i`)
+
+The Set Image overlay shows one row per container (init containers included). Each row has an image text input plus a pull-policy cycle that toggles between `Always`, `IfNotPresent`, `Never`, and `(default)`.
+
+- `Tab`/`Down` step, per container, through the image input then its pull-policy cycle, and finally the `Yes`/`No` buttons, wrapping back to the first container; `Shift+Tab`/`Up` walk the same order in reverse.
+- When a pull-policy cycle is focused, `Left` selects the previous value and `Right` or `Space` the next.
+- Image and policy are diffed independently, so changing only one leaves the other untouched.
+
+Reverting a previously-set policy back to `(default)` is intentionally a no-op: Kubernetes cannot reliably clear `imagePullPolicy` through a merge patch, so the revert is suppressed (any image change on the same row still applies).
 
 ### Terminal Pane
 

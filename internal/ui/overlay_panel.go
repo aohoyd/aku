@@ -282,11 +282,49 @@ func (o *Overlay) FocusPrevInput() {
 // UpdateInputs forwards a message to the focused input and returns any command.
 func (o *Overlay) UpdateInputs(msg tea.Msg) tea.Cmd {
 	if o.focusIdx >= 0 && o.focusIdx < len(o.inputs) {
+		// Override word motion/deletion with sub-word boundaries before the
+		// textinput sees the key (its built-in word motion only breaks on
+		// whitespace, which is useless for space-free dialog values).
+		if km, ok := msg.(tea.KeyPressMsg); ok && o.handleWordKey(km) {
+			return nil
+		}
 		var cmd tea.Cmd
 		o.inputs[o.focusIdx], cmd = o.inputs[o.focusIdx].Update(msg)
 		return cmd
 	}
 	return nil
+}
+
+// handleWordKey applies sub-word cursor motion or deletion to the focused
+// input. It returns true if the key was a word-motion/word-delete key and was
+// consumed; false otherwise (the caller should forward the key normally).
+func (o *Overlay) handleWordKey(km tea.KeyPressMsg) bool {
+	if dir := wordMotionDir(km); dir != 0 {
+		in := &o.inputs[o.focusIdx]
+		runes := []rune(in.Value())
+		if dir > 0 {
+			in.SetCursor(nextWordBoundary(runes, in.Position()))
+		} else {
+			in.SetCursor(prevWordBoundary(runes, in.Position()))
+		}
+		return true
+	}
+	if dir := wordDeleteDir(km); dir != 0 {
+		in := &o.inputs[o.focusIdx]
+		runes := []rune(in.Value())
+		pos := in.Position()
+		if dir > 0 {
+			end := nextWordBoundary(runes, pos)
+			in.SetValue(string(runes[:pos]) + string(runes[end:]))
+			in.SetCursor(pos)
+		} else {
+			start := prevWordBoundary(runes, pos)
+			in.SetValue(string(runes[:start]) + string(runes[pos:]))
+			in.SetCursor(start)
+		}
+		return true
+	}
+	return false
 }
 
 // blurAll blurs all text inputs.
@@ -310,10 +348,26 @@ func (o Overlay) View() string {
 	if !o.active {
 		return ""
 	}
+	return o.finishBox(o.composeLines(), o.computeInnerWidth())
+}
 
-	// Compute inner width for the overlay box.
-	innerWidth := o.computeInnerWidth()
+// ViewWithBody renders the overlay using the caller-supplied, pre-composed body
+// as the entire box content. The panel supplies only the title/footer/box
+// chrome and does NOT wrap the body with TitleStyle, render its own content,
+// auto-render its text inputs, or draw the item list. Owners that interleave
+// custom widgets between text inputs (whose .View() cursors they fold into
+// body) use this to keep a single clean render. Returns "" if inactive.
+func (o Overlay) ViewWithBody(body string) string {
+	if !o.active {
+		return ""
+	}
+	return o.finishBox(body, o.computeInnerWidth())
+}
 
+// composeLines builds the box content for the standard View() path: content +
+// inputs + list, joined into a single string. ViewWithBody bypasses this and
+// supplies its own pre-composed body.
+func (o Overlay) composeLines() string {
 	var lines []string
 
 	// Content (rendered inside the box)
@@ -379,13 +433,24 @@ func (o Overlay) View() string {
 		}
 	}
 
-	// Footer
+	return strings.Join(lines, "\n")
+}
+
+// finishBox appends the footer (if any) to the pre-joined content and wraps it
+// in the overlay border/title chrome.
+func (o Overlay) finishBox(content string, innerWidth int) string {
 	if o.footer != "" {
-		lines = append(lines, "")
-		lines = append(lines, lipgloss.NewStyle().Width(innerWidth-overlayChrome()).Align(lipgloss.Center).Render(o.footer))
+		footer := lipgloss.NewStyle().Width(innerWidth - overlayChrome()).Align(lipgloss.Center).Render(o.footer)
+		// Append a blank spacer line then the footer. When content is empty the
+		// box is just the spacer + footer (matching the prior slice-join, which
+		// joined ["", footer] with no leading content line).
+		if content == "" {
+			content = "\n" + footer
+		} else {
+			content = content + "\n\n" + footer
+		}
 	}
 
-	content := strings.Join(lines, "\n")
 	box := OverlayStyle.Width(innerWidth).Render(content)
 	return injectCenteredBorderTitle(box, o.title)
 }

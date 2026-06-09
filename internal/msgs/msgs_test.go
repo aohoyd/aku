@@ -42,7 +42,7 @@ func TestSetImageRequestedMsg(t *testing.T) {
 		Namespace:    "default",
 		PluginName:   "deployments",
 		Images: []ContainerImageChange{
-			{Name: "nginx", Image: "nginx:1.26", Init: false},
+			{Name: "nginx", Image: "nginx:1.26", Init: false, PullPolicy: "Always"},
 			{Name: "init-db", Image: "busybox:latest", Init: true},
 		},
 	}
@@ -51,6 +51,12 @@ func TestSetImageRequestedMsg(t *testing.T) {
 	}
 	if msg.Images[1].Init != true {
 		t.Fatal("expected init container to be marked as Init")
+	}
+	if msg.Images[0].PullPolicy != "Always" {
+		t.Fatalf("expected PullPolicy 'Always', got %q", msg.Images[0].PullPolicy)
+	}
+	if msg.Images[1].PullPolicy != "" {
+		t.Fatalf("expected empty PullPolicy (default/unset), got %q", msg.Images[1].PullPolicy)
 	}
 }
 

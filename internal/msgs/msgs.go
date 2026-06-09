@@ -158,7 +158,9 @@ type PortForwardStatusMsg struct {
 type ContainerImageChange struct {
 	Name  string
 	Image string
-	Init  bool
+	// PullPolicy is the container's imagePullPolicy ("" = default/unset).
+	PullPolicy string
+	Init       bool
 }
 
 // SetImageRequestedMsg is emitted by the set-image overlay when the user confirms.

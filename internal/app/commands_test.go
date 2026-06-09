@@ -6800,3 +6800,176 @@ func TestGlobalContextSwitchSinglePaneFullSwitch(t *testing.T) {
 		t.Fatalf("expected ctx-b refCount 1, got %d", cl.RefCount())
 	}
 }
+
+// TestExtractContainerImagesPod verifies extractContainerImages reads a pod's
+// container image and imagePullPolicy from spec.containers.
+func TestExtractContainerImagesPod(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata":   map[string]any{"name": "my-pod"},
+		"spec": map[string]any{
+			"containers": []any{
+				map[string]any{
+					"name":            "nginx",
+					"image":           "nginx:1.25",
+					"imagePullPolicy": "IfNotPresent",
+				},
+			},
+		},
+	}}
+
+	got := extractContainerImages("pods", obj)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 container image change, got %d", len(got))
+	}
+	c := got[0]
+	if c.Name != "nginx" {
+		t.Errorf("expected name 'nginx', got %q", c.Name)
+	}
+	if c.Image != "nginx:1.25" {
+		t.Errorf("expected image 'nginx:1.25', got %q", c.Image)
+	}
+	if c.PullPolicy != "IfNotPresent" {
+		t.Errorf("expected pull policy 'IfNotPresent', got %q", c.PullPolicy)
+	}
+	if c.Init {
+		t.Error("expected Init false for a regular pod container")
+	}
+}
+
+// TestExtractContainerImagesWorkload verifies extractContainerImages reads a
+// deployment's container image and imagePullPolicy from
+// spec.template.spec.containers.
+func TestExtractContainerImagesWorkload(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]any{"name": "my-deploy"},
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{
+							"name":            "app",
+							"image":           "myapp:v1",
+							"imagePullPolicy": "Always",
+						},
+					},
+				},
+			},
+		},
+	}}
+
+	got := extractContainerImages("deployments", obj)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 container image change, got %d", len(got))
+	}
+	c := got[0]
+	if c.Name != "app" {
+		t.Errorf("expected name 'app', got %q", c.Name)
+	}
+	if c.Image != "myapp:v1" {
+		t.Errorf("expected image 'myapp:v1', got %q", c.Image)
+	}
+	if c.PullPolicy != "Always" {
+		t.Errorf("expected pull policy 'Always', got %q", c.PullPolicy)
+	}
+	if c.Init {
+		t.Error("expected Init false for a regular workload container")
+	}
+}
+
+// TestExtractContainerImagesWorkloadInitContainer verifies an initContainer's
+// image and imagePullPolicy are read from spec.template.spec.initContainers and
+// flagged Init==true.
+func TestExtractContainerImagesWorkloadInitContainer(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]any{"name": "my-deploy"},
+		"spec": map[string]any{
+			"template": map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{
+							"name":  "app",
+							"image": "myapp:v1",
+						},
+					},
+					"initContainers": []any{
+						map[string]any{
+							"name":            "migrate",
+							"image":           "migrator:v2",
+							"imagePullPolicy": "IfNotPresent",
+						},
+					},
+				},
+			},
+		},
+	}}
+
+	got := extractContainerImages("deployments", obj)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 container image changes, got %d", len(got))
+	}
+
+	// initContainers are appended after containers.
+	init := got[1]
+	if init.Name != "migrate" {
+		t.Errorf("expected init name 'migrate', got %q", init.Name)
+	}
+	if init.Image != "migrator:v2" {
+		t.Errorf("expected init image 'migrator:v2', got %q", init.Image)
+	}
+	if !init.Init {
+		t.Error("expected Init true for an initContainer")
+	}
+	if init.PullPolicy != "IfNotPresent" {
+		t.Errorf("expected init pull policy 'IfNotPresent', got %q", init.PullPolicy)
+	}
+}
+
+// TestExtractContainerImagesContainersPlugin verifies the "containers" plugin
+// path reads a synthetic object's _spec (image + imagePullPolicy) and maps
+// _type=="init" to the Init flag.
+func TestExtractContainerImagesContainersPlugin(t *testing.T) {
+	tests := []struct {
+		name     string
+		typ      string
+		wantInit bool
+	}{
+		{name: "regular container", typ: "container", wantInit: false},
+		{name: "init container", typ: "init", wantInit: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			obj := &unstructured.Unstructured{Object: map[string]any{
+				"metadata": map[string]any{"name": "sidecar"},
+				"_type":    tc.typ,
+				"_spec": map[string]any{
+					"image":           "envoy:v1.28",
+					"imagePullPolicy": "Always",
+				},
+			}}
+
+			got := extractContainerImages("containers", obj)
+			if len(got) != 1 {
+				t.Fatalf("expected 1 container image change, got %d", len(got))
+			}
+			c := got[0]
+			if c.Name != "sidecar" {
+				t.Errorf("expected name 'sidecar', got %q", c.Name)
+			}
+			if c.Image != "envoy:v1.28" {
+				t.Errorf("expected image 'envoy:v1.28', got %q", c.Image)
+			}
+			if c.PullPolicy != "Always" {
+				t.Errorf("expected pull policy 'Always', got %q", c.PullPolicy)
+			}
+			if c.Init != tc.wantInit {
+				t.Errorf("expected Init %v, got %v", tc.wantInit, c.Init)
+			}
+		})
+	}
+}

@@ -2576,8 +2576,9 @@ func extractContainerImages(pluginName string, obj *unstructured.Unstructured) [
 			return nil
 		}
 		image, _ := specMap["image"].(string)
+		pullPolicy, _ := specMap["imagePullPolicy"].(string)
 		return []msgs.ContainerImageChange{
-			{Name: obj.GetName(), Image: image, Init: typ == "init"},
+			{Name: obj.GetName(), Image: image, Init: typ == "init", PullPolicy: pullPolicy},
 		}
 	}
 
@@ -2605,8 +2606,9 @@ func appendImageChanges(result []msgs.ContainerImageChange, obj *unstructured.Un
 		}
 		name, _ := specMap["name"].(string)
 		image, _ := specMap["image"].(string)
+		pullPolicy, _ := specMap["imagePullPolicy"].(string)
 		if name != "" {
-			result = append(result, msgs.ContainerImageChange{Name: name, Image: image, Init: init})
+			result = append(result, msgs.ContainerImageChange{Name: name, Image: image, Init: init, PullPolicy: pullPolicy})
 		}
 	}
 	return result

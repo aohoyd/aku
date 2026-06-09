@@ -79,6 +79,101 @@ func TestBuildImagePatch_InitOnly(t *testing.T) {
 	}
 }
 
+func TestBuildImagePatch_PolicyOnly(t *testing.T) {
+	images := []msgs.ContainerImageChange{
+		{Name: "nginx", PullPolicy: "Always", Init: false},
+	}
+	patch, err := buildImagePatch("pods", images)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(patch, &m); err != nil {
+		t.Fatal(err)
+	}
+	spec := m["spec"].(map[string]any)
+	containers := spec["containers"].([]any)
+	if len(containers) != 1 {
+		t.Fatalf("expected 1 container, got %d", len(containers))
+	}
+	c := containers[0].(map[string]any)
+	if c["name"] != "nginx" {
+		t.Errorf("unexpected name: %v", c["name"])
+	}
+	if c["imagePullPolicy"] != "Always" {
+		t.Errorf("expected imagePullPolicy=Always, got %v", c["imagePullPolicy"])
+	}
+	if _, ok := c["image"]; ok {
+		t.Errorf("should not have image key for policy-only entry, got %v", c)
+	}
+}
+
+func TestBuildImagePatch_ImageAndPolicy(t *testing.T) {
+	images := []msgs.ContainerImageChange{
+		{Name: "nginx", Image: "nginx:1.26", PullPolicy: "IfNotPresent", Init: false},
+	}
+	patch, err := buildImagePatch("pods", images)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(patch, &m); err != nil {
+		t.Fatal(err)
+	}
+	spec := m["spec"].(map[string]any)
+	containers := spec["containers"].([]any)
+	c := containers[0].(map[string]any)
+	if c["image"] != "nginx:1.26" {
+		t.Errorf("expected image=nginx:1.26, got %v", c["image"])
+	}
+	if c["imagePullPolicy"] != "IfNotPresent" {
+		t.Errorf("expected imagePullPolicy=IfNotPresent, got %v", c["imagePullPolicy"])
+	}
+}
+
+func TestBuildImagePatch_InitPolicy(t *testing.T) {
+	images := []msgs.ContainerImageChange{
+		{Name: "init-db", PullPolicy: "Always", Init: true},
+	}
+	patch, err := buildImagePatch("deployments", images)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(patch, &m); err != nil {
+		t.Fatal(err)
+	}
+	templateSpec := m["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	if _, ok := templateSpec["containers"]; ok {
+		t.Fatal("should not have regular containers key")
+	}
+	initContainers := templateSpec["initContainers"].([]any)
+	if len(initContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(initContainers))
+	}
+	c := initContainers[0].(map[string]any)
+	if c["name"] != "init-db" {
+		t.Errorf("unexpected name: %v", c["name"])
+	}
+	if c["imagePullPolicy"] != "Always" {
+		t.Errorf("expected imagePullPolicy=Always, got %v", c["imagePullPolicy"])
+	}
+	if _, ok := c["image"]; ok {
+		t.Errorf("should not have image key for policy-only init entry, got %v", c)
+	}
+}
+
+func TestBuildImagePatch_Empty(t *testing.T) {
+	patch, err := buildImagePatch("pods", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// With no images, the inner spec stays empty: {"spec":{}}.
+	if got := string(patch); got != `{"spec":{}}` {
+		t.Fatalf("expected empty pod patch %q, got %q", `{"spec":{}}`, got)
+	}
+}
+
 func TestBuildImagePatch_StatefulSet(t *testing.T) {
 	images := []msgs.ContainerImageChange{
 		{Name: "app", Image: "myapp:v2", Init: false},

@@ -16,11 +16,17 @@ import (
 // buildImagePatch constructs a strategic merge patch JSON for changing container images.
 // pluginName determines the path: "pods" uses spec.containers, workloads use spec.template.spec.containers.
 func buildImagePatch(pluginName string, images []msgs.ContainerImageChange) ([]byte, error) {
-	var regular, init []map[string]string
+	var regular, initContainers []map[string]string
 	for _, img := range images {
-		entry := map[string]string{"name": img.Name, "image": img.Image}
+		entry := map[string]string{"name": img.Name}
+		if img.Image != "" {
+			entry["image"] = img.Image
+		}
+		if img.PullPolicy != "" {
+			entry["imagePullPolicy"] = img.PullPolicy
+		}
 		if img.Init {
-			init = append(init, entry)
+			initContainers = append(initContainers, entry)
 		} else {
 			regular = append(regular, entry)
 		}
@@ -30,8 +36,8 @@ func buildImagePatch(pluginName string, images []msgs.ContainerImageChange) ([]b
 	if len(regular) > 0 {
 		innerSpec["containers"] = regular
 	}
-	if len(init) > 0 {
-		innerSpec["initContainers"] = init
+	if len(initContainers) > 0 {
+		innerSpec["initContainers"] = initContainers
 	}
 
 	var patch map[string]any
