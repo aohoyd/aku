@@ -11,6 +11,7 @@ import (
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/msgs"
+	"github.com/aohoyd/aku/internal/notify"
 	"github.com/aohoyd/aku/internal/plugin"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -105,7 +106,7 @@ func newContextSwitchApp(t *testing.T, mgr *cluster.Manager) App {
 	startupCtx := ""
 	mgr.ForEach(func(c *cluster.Cluster) { startupCtx = c.Context() })
 
-	a := New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical, startupCtx)
+	a := New(mgr, km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, startupCtx)
 	// The second pane is born carrying the startup context, mirroring the real
 	// inherit-on-split behavior (panes are never created context-less).
 	a.layout.AddSplit(pods, "default", startupCtx)
@@ -719,8 +720,8 @@ func TestHandleClusterReady_FailedConnect_PaneEmptyAndWarned(t *testing.T) {
 	if pane.Len() != 0 {
 		t.Fatalf("expected pane empty after failed connect, got %d objects", pane.Len())
 	}
-	if et := app.statusBar.ErrText(); et == "" {
-		t.Fatal("expected a status error after a failed connect")
+	if !hasNotifyLevel(app, notify.LevelError) {
+		t.Fatal("expected an error notification after a failed connect")
 	}
 }
 
@@ -800,8 +801,8 @@ func TestHandleClusterReady_MissingResourceLeavesPaneEmpty(t *testing.T) {
 	if pane.Len() != 0 {
 		t.Fatalf("expected pane empty (pods not available on staging), got %d", pane.Len())
 	}
-	if wt := app.statusBar.WarningText(); wt == "" {
-		t.Fatal("expected a missing-resource warning")
+	if !hasNotifyLevel(app, notify.LevelWarning) {
+		t.Fatal("expected a missing-resource warning notification")
 	}
 	// No subscribe should have happened: the staging store must have no pods
 	// informer registered for the pane's GVR/namespace.

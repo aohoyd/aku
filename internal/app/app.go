@@ -19,6 +19,7 @@ import (
 	"github.com/aohoyd/aku/internal/k8s/session"
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/msgs"
+	"github.com/aohoyd/aku/internal/notify"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/apiresources"
 	"github.com/aohoyd/aku/internal/plugins/generic"
@@ -212,6 +213,20 @@ type App struct {
 	// deleted. Entries are removed alongside the session in closeTerminalSession.
 	termCleanup       map[string]terminalMeta
 	config            *config.Config
+
+	// notify is the shared store of aku's own info/warning/error messages. It
+	// backs both the toast overlay (rendered each frame in View via Live) and the
+	// aku-messages synthetic resource. Injected at New; may be nil on some
+	// construction paths (notably tests), so every read path guards against nil.
+	notify *notify.Store
+	// toasts is the pure renderer for the top-right toast stack. It holds no
+	// state: View feeds it the currently-visible messages each frame.
+	toasts ui.ToastStack
+	// dismissed records message IDs that have expired (per-level TTL tick) or been
+	// explicitly cleared (clear-notifications). The visible toast set is
+	// notify.Live(now, toastTTL) minus these IDs. The store's history is never
+	// mutated — dismissal is purely an overlay concern.
+	dismissed map[uint64]bool
 	pendingRun        *config.RunConfig            // external command waiting for confirm
 	pendingDelete     []*unstructured.Unstructured // delete targets (always-list) waiting for confirm
 	pendingDebug      *pendingDebugAction          // debug action waiting for confirm
@@ -265,7 +280,7 @@ type ResourceSpec struct {
 // of client/store/discovery; the App resolves them per pane via clusterFor /
 // clusterForFocused. chartResolver is used to build per-cluster helm clients
 // lazily (see helmClientFor).
-func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, pfRegistry *portforward.Registry, chartResolver helm.ChartResolver, specs []ResourceSpec, initialDetail *msgs.DetailMode, initialOrientation layout.Orientation, startupContext string) App {
+func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, notifyStore *notify.Store, pfRegistry *portforward.Registry, chartResolver helm.ChartResolver, specs []ResourceSpec, initialDetail *msgs.DetailMode, initialOrientation layout.Orientation, startupContext string) App {
 	bs := keymap.BindingSet()
 	defaultTimeRange := cfg.LogDefaultTimeRange()
 	defaultSinceSeconds, ok := ui.LookupTimePreset(defaultTimeRange)
@@ -283,6 +298,14 @@ func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, pfRegi
 	if startup != nil {
 		client = startup.Client()
 		startupStore = startup.Store()
+	}
+
+	// Every error/warning/info now flows through the notify store (it backs both
+	// the toast overlay and the aku-messages resource). Default a nil store to a
+	// fresh one so call sites can append unconditionally; the send callback stays
+	// nil until root wires it, so Add records history without dispatching toasts.
+	if notifyStore == nil {
+		notifyStore = notify.NewStore(0)
 	}
 
 	a := App{
@@ -306,6 +329,9 @@ func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, pfRegi
 		setImageOverlay:     ui.NewSetImageOverlay(40, 20),
 		helmRollbackOverlay: ui.NewHelmRollbackOverlay(40, 20),
 		config:              cfg,
+		notify:              notifyStore,
+		toasts:              ui.NewToastStack(cfg.NotifyMaxVisible()),
+		dismissed:           make(map[uint64]bool),
 		chartInputOverlay:   ui.NewChartInputOverlay(40, 20),
 		containerPicker:     ui.NewContainerPicker(40, 20),
 		timeRangePicker:     ui.NewTimeRangePicker(40, 20),
@@ -689,8 +715,8 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgs.NamespacesLoadedMsg:
 		a.statusBar.EndOperation()
 		if msg.Err != nil {
-			cmd := a.statusBar.SetError("namespaces: " + msg.Err.Error())
-			return a, cmd
+			a.notify.Add(notify.LevelError, "namespaces: "+msg.Err.Error(), a.contextFor(nil), "namespaces")
+			return a, nil
 		} else if a.activeOverlay == overlayNsPicker {
 			a.nsPicker.SetNamespaces(msg.Namespaces)
 		}
@@ -743,11 +769,10 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case msgs.ActionResultMsg:
-		var clearCmd tea.Cmd
 		if msg.Err != nil {
-			clearCmd = a.statusBar.SetError(msg.Err.Error())
-		} else {
-			clearCmd = a.statusBar.SetError("") // clear any previous error
+			a.notify.Add(notify.LevelError, msg.Err.Error(), a.contextFor(nil), actionSource(msg.ActionID))
+		} else if note := actionSuccessNote(msg.ActionID); note != "" {
+			a.notify.Add(notify.LevelInfo, note, a.contextFor(nil), actionSource(msg.ActionID))
 		}
 		if strings.HasPrefix(msg.ActionID, "helm-") {
 			model, helmCmd := a.refreshHelmSplits()
@@ -757,11 +782,11 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// variant, also re-fetch values so the panel reflects the upgrade.
 			if strings.HasPrefix(msg.ActionID, "helm-edit-values:") {
 				app := model.(App)
-				return app.maybeRefetchValuesAfterEdit(clearCmd, helmCmd)
+				return app.maybeRefetchValuesAfterEdit(nil, helmCmd)
 			}
-			return model, tea.Batch(clearCmd, helmCmd)
+			return model, helmCmd
 		}
-		return a, clearCmd
+		return a, nil
 
 	case k8s.ResourceUpdatedMsg:
 		// Find plugin by GVR and update matching splits. List from the store of
@@ -916,8 +941,8 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgs.HelmReleasesLoadedMsg:
 		a.statusBar.EndOperation()
 		if msg.Err != nil {
-			cmd := a.statusBar.SetError("helm releases: " + msg.Err.Error())
-			return a, cmd
+			a.notify.Add(notify.LevelError, "helm releases: "+msg.Err.Error(), a.contextFor(nil), "helm")
+			return a, nil
 		}
 		for i := range a.layout.SplitCount() {
 			split := a.layout.SplitAt(i)
@@ -938,57 +963,124 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgs.PortForwardStartedMsg:
 		if msg.Err != nil {
-			cmd := a.statusBar.SetError("port-forward failed: " + msg.Err.Error())
-			return a, cmd
+			a.notify.Add(notify.LevelError, "port-forward failed: "+msg.Err.Error(), a.contextFor(nil), "port-forward")
+			return a, nil
 		}
-		clearCmd := a.statusBar.SetError(fmt.Sprintf("port-forward starting: localhost:%d", msg.LocalPort))
+		a.notify.Add(notify.LevelInfo, fmt.Sprintf("port-forward starting: localhost:%d", msg.LocalPort), a.contextFor(nil), "port-forward")
 		a = a.syncIndicators()
-		a = a.refreshPortforwardSplits()
+		a = a.refreshSelfPopulatingSplits("portforwards")
 		// Store the handle in the main Update loop (single-threaded) to avoid data race.
 		if msg.Handle != nil {
 			a.pfHandles[msg.ID] = msg.Handle
-			return a, tea.Batch(clearCmd, watchPortForwardReady(msg.ID, msg.Handle))
+			return a, watchPortForwardReady(msg.ID, msg.Handle)
 		}
-		return a, clearCmd
+		return a, nil
 
 	case msgs.PortForwardStatusMsg:
 		a.pfRegistry.UpdateStatus(msg.ID, msg.Status)
 		switch msg.Status {
 		case portforward.StatusReady:
-			clearCmd := a.statusBar.SetError(fmt.Sprintf("port-forward ready: localhost:%d", a.localPortForPF(msg.ID)))
+			a.notify.Add(notify.LevelInfo, fmt.Sprintf("port-forward ready: localhost:%d", a.localPortForPF(msg.ID)), a.contextFor(nil), "port-forward")
 			var cmd tea.Cmd
 			if apf, ok := a.pfHandles[msg.ID]; ok {
 				cmd = watchPortForwardDone(msg.ID, apf)
 			}
 			a = a.syncIndicators()
-			a = a.refreshPortforwardSplits()
-			return a, tea.Batch(clearCmd, cmd)
+			a = a.refreshSelfPopulatingSplits("portforwards")
+			return a, cmd
 		case portforward.StatusError:
 			errMsg := "port-forward error"
 			if msg.Err != nil {
 				errMsg = "port-forward error: " + msg.Err.Error()
 			}
-			clearCmd := a.statusBar.SetError(errMsg)
+			a.notify.Add(notify.LevelError, errMsg, a.contextFor(nil), "port-forward")
 			a.pfRegistry.Remove(msg.ID)
 			delete(a.pfHandles, msg.ID)
 			a = a.syncIndicators()
-			a = a.refreshPortforwardSplits()
-			return a, clearCmd
+			a = a.refreshSelfPopulatingSplits("portforwards")
+			return a, nil
 		case portforward.StatusStopped:
 			a.pfRegistry.Remove(msg.ID)
 			delete(a.pfHandles, msg.ID)
 		}
 		a = a.syncIndicators()
-		a = a.refreshPortforwardSplits()
+		a = a.refreshSelfPopulatingSplits("portforwards")
+		return a, nil
+
+	case msgs.MessageAddedMsg:
+		// A new message landed in the notify store. The toast appears
+		// automatically because View reads notify.Live each frame and this msg
+		// forces a re-render; we additionally (1) re-poll any open aku-messages
+		// splits so the synthetic resource shows the new row, and (2) arm a
+		// per-toast auto-expiry tick for non-sticky levels. A sticky level
+		// (ttl == 0) gets no tick and lingers until clear-notifications.
+		a = a.refreshSelfPopulatingSplits("aku-messages")
+		ttl := a.toastTTL(notify.Level(msg.Level))
+		if ttl == 0 {
+			// Sticky: no auto-expiry tick.
+			return a, nil
+		}
+		// The message was stamped with its creation time when Add ran, which is
+		// slightly before this handler runs. Arm the tick for the time remaining
+		// from CREATION, not from arrival, so a backlog of queued MessageAddedMsg
+		// does not extend each toast's lifetime. Look the message up by ID in the
+		// store's current window.
+		created, found := a.messageCreatedAt(msg.ID)
+		if !found {
+			// Already evicted from the ring before we could arm a tick: treat as
+			// expired so it never lingers in the visible set.
+			if a.dismissed != nil {
+				a.dismissed[msg.ID] = true
+			}
+			a.pruneDismissed()
+			return a, nil
+		}
+		remaining := ttl - a.now().Sub(created)
+		if remaining <= 0 {
+			// Created longer than ttl ago (e.g. a delayed MessageAddedMsg): it is
+			// already past its lifetime, so dismiss immediately with no tick.
+			if a.dismissed != nil {
+				a.dismissed[msg.ID] = true
+			}
+			a.pruneDismissed()
+			return a, nil
+		}
+		id := msg.ID
+		return a, tea.Tick(remaining, func(time.Time) tea.Msg {
+			return msgs.ToastExpiredMsg{ID: id}
+		})
+
+	case msgs.ToastExpiredMsg:
+		// The level's TTL elapsed for this toast: drop it from the visible set.
+		// The store's history is untouched (it still shows in aku-messages).
+		if a.dismissed != nil {
+			a.dismissed[msg.ID] = true
+		}
+		a.pruneDismissed()
+		return a, nil
+
+	case msgs.ClearNotificationsMsg:
+		// Dismiss every currently-live toast at once (e.g. user keybinding). Mark
+		// each live ID dismissed; history in the store is left intact.
+		if a.notify != nil && a.dismissed != nil {
+			for _, m := range a.notify.Live(a.now(), a.toastTTL) {
+				a.dismissed[m.ID] = true
+			}
+		}
+		a.pruneDismissed()
 		return a, nil
 
 	case msgs.WarningMsg:
-		cmd := a.statusBar.SetWarning(msg.Text)
-		return a, cmd
+		// WarningMsg carries the originating cluster context (set by the per-client
+		// k8s warning handler), so warnings land tagged with the cluster that
+		// produced them. Context may be "" when the producing client could not
+		// resolve a context name.
+		a.notify.Add(notify.LevelWarning, msg.Text, msg.Context, "k8s")
+		return a, nil
 
 	case msgs.ErrMsg:
-		cmd := a.statusBar.SetError(msg.Error())
-		return a, cmd
+		a.notify.Add(notify.LevelError, msg.Error(), a.contextFor(nil), "k8s")
+		return a, nil
 
 	case msgs.LogLineMsg:
 		if msg.Gen != a.logStreamGen {
@@ -1006,12 +1098,11 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Gen != a.logStreamGen {
 			return a, nil
 		}
-		var clearCmd tea.Cmd
 		if msg.Err != nil {
-			clearCmd = a.statusBar.SetError("log stream: " + msg.Err.Error())
+			a.notify.Add(notify.LevelError, "log stream: "+msg.Err.Error(), a.contextFor(nil), "logs")
 		}
 		a.logCh = nil
-		return a, clearCmd
+		return a, nil
 
 	case msgs.LogStreamReadyMsg:
 		a.statusBar.EndOperation()
@@ -1019,9 +1110,9 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil // stale, discard
 		}
 		if msg.Err != nil {
-			clearCmd := a.statusBar.SetError("logs: " + msg.Err.Error())
+			a.notify.Add(notify.LevelError, "logs: "+msg.Err.Error(), a.contextFor(nil), "logs")
 			a.logStreamCancel = nil
-			return a, clearCmd
+			return a, nil
 		}
 		a.logCh = msg.Ch
 		return a, readLogLine(msg.Ch, msg.Gen)
@@ -1174,7 +1265,7 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a, cmd := a.reloadDetailPanel()
 		return a, cmd
 
-	case msgs.StatusBarClearErrorMsg, msgs.StatusBarClearWarningMsg, msgs.StatusBarShowSpinnerMsg:
+	case msgs.StatusBarShowSpinnerMsg:
 		cmd := a.statusBar.Update(msg)
 		return a, cmd
 
@@ -1276,7 +1367,7 @@ func (a App) closeFocusedTerminal() (App, tea.Cmd) {
 			note := a.ephemeralCloseNote(tp.ID())
 			a.closeTerminalSession(tp.ID())
 			if note != "" {
-				return a, a.statusBar.SetError(note)
+				a.notify.Add(notify.LevelWarning, note, a.contextFor(nil), "debug")
 			}
 		}
 		return a, nil
@@ -1681,8 +1772,8 @@ func (a App) restartLogForCursor() (tea.Model, tea.Cmd) {
 	} else {
 		containers = extractContainerNames(selected)
 		if len(containers) == 0 {
-			cmd := a.statusBar.SetError("no containers found")
-			return a, cmd
+			a.notify.Add(notify.LevelError, "no containers found", a.contextFor(nil), "logs")
+			return a, nil
 		}
 		containerName = containers[0]
 	}
@@ -1850,16 +1941,126 @@ func (a App) setStatusBarContext(ctx string) App {
 	return a
 }
 
-func (a App) refreshPortforwardSplits() App {
+// refreshSelfPopulatingSplits re-polls every open split whose plugin name
+// matches resource and is SelfPopulating, pushing its current Objects() into the
+// pane. Used to force synthetic resources (portforwards, aku-messages, …) to
+// re-render when their backing model changes outside the informer path.
+func (a App) refreshSelfPopulatingSplits(resource string) App {
 	for i := range a.layout.SplitCount() {
 		split := a.layout.SplitAt(i)
-		if split != nil && split.Plugin().Name() == "portforwards" {
+		if split != nil && split.Plugin().Name() == resource {
 			if sp, ok := split.Plugin().(plugin.SelfPopulating); ok {
 				split.SetObjects(sp.Objects())
 			}
 		}
 	}
 	return a
+}
+
+// actionSource extracts the short op label (the verb before the first ':') from
+// an ActionResultMsg.ActionID, used as the notify message Source. ActionIDs are
+// formatted "<verb>:<detail>" (e.g. "scale:nginx", "delete:3-resources").
+func actionSource(actionID string) string {
+	if i := strings.IndexByte(actionID, ':'); i >= 0 {
+		return actionID[:i]
+	}
+	if actionID == "" {
+		return "action"
+	}
+	return actionID
+}
+
+// actionSuccessNote returns a short human note for a successful action, derived
+// from the ActionID's "<verb>:<detail>" shape. Returns "" for verbs that have
+// no useful success text (the caller then records nothing on success).
+func actionSuccessNote(actionID string) string {
+	verb, detail, found := strings.Cut(actionID, ":")
+	if !found {
+		return ""
+	}
+	switch verb {
+	case "scale":
+		return "scaled " + detail
+	case "delete":
+		return "deleted " + detail
+	case "restart":
+		return "rollout restart " + detail
+	case "set-image":
+		return "updated image for " + detail
+	case "helm-rollback":
+		return "rolled back " + detail
+	case "helm-uninstall":
+		return "uninstalled " + detail
+	case "edit":
+		return "applied edit to " + detail
+	default:
+		return ""
+	}
+}
+
+// toastTTL resolves the auto-hide duration for a toast of level l from config. A
+// return of 0 means sticky (no auto-expiry tick). Used both as the TTL predicate
+// passed to notify.Store.Live and to choose each toast's tea.Tick duration.
+func (a App) toastTTL(l notify.Level) time.Duration {
+	return a.config.ToastTTL(int(l))
+}
+
+// pruneDismissed drops any ID from the dismissed set that no longer exists in
+// the store's current window. The notify ring buffer evicts old messages, so
+// without this the dismissed map would grow without bound for the session
+// lifetime. An evicted ID is simply forgotten — it cannot reappear because it is
+// gone from the store — while a dismissed ID still in the window is preserved so
+// it stays hidden. Called after every mutation of dismissed; O(n) over the
+// store window, which is bounded by the ring capacity. Deleting keys during a
+// range is safe in Go. The map is a reference, so mutation on the value receiver
+// persists.
+func (a App) pruneDismissed() {
+	if a.dismissed == nil || a.notify == nil {
+		return
+	}
+	live := make(map[uint64]bool, len(a.dismissed))
+	for _, m := range a.notify.List() {
+		live[m.ID] = true
+	}
+	for id := range a.dismissed {
+		if !live[id] {
+			delete(a.dismissed, id)
+		}
+	}
+}
+
+// messageCreatedAt returns the creation timestamp of the message with the given
+// ID from the store's current window, and whether it was found. A miss means the
+// message was evicted from the ring buffer (the caller treats it as expired).
+func (a App) messageCreatedAt(id uint64) (time.Time, bool) {
+	if a.notify == nil {
+		return time.Time{}, false
+	}
+	for _, m := range a.notify.List() {
+		if m.ID == id {
+			return m.Time, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// visibleToasts returns the messages that should currently be drawn as toasts:
+// notify.Live(now, toastTTL) minus any IDs in dismissed (expired or cleared). It
+// is nil-safe for the store so View never panics on a construction path that did
+// not inject one (e.g. tests).
+func visibleToasts(store *notify.Store, dismissed map[uint64]bool, now time.Time, ttl func(notify.Level) time.Duration) []notify.Message {
+	if store == nil {
+		return nil
+	}
+	live := store.Live(now, ttl)
+	out := live[:0]
+	for _, m := range live {
+		if dismissed[m.ID] {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 func (a App) localPortForPF(id string) int {
@@ -1885,13 +2086,12 @@ func (a App) localPortForPF(id string) int {
 // (contextFor(FocusedSplit())). Results tagged with any other context still
 // populated their own cluster's Discovery (above) but are skipped here.
 func (a App) handleAPIResourcesDiscovered(msg k8s.APIResourcesDiscoveredMsg) (tea.Model, tea.Cmd) {
-	var clearCmd tea.Cmd
 	if msg.Err != nil && len(msg.Resources) == 0 {
-		clearCmd = a.statusBar.SetError("api discovery: " + msg.Err.Error())
-		return a, clearCmd
+		a.notify.Add(notify.LevelError, "api discovery: "+msg.Err.Error(), a.contextFor(nil), "discovery")
+		return a, nil
 	}
 	if msg.Err != nil {
-		clearCmd = a.statusBar.SetError("api discovery partial: " + msg.Err.Error())
+		a.notify.Add(notify.LevelWarning, "api discovery partial: "+msg.Err.Error(), a.contextFor(nil), "discovery")
 	}
 
 	// Only the focused pane's context feeds the shared plugin registry / picker.
@@ -1909,7 +2109,7 @@ func (a App) handleAPIResourcesDiscovered(msg k8s.APIResourcesDiscoveredMsg) (te
 		tagged = registryCtx
 	}
 	if tagged != registryCtx {
-		return a, clearCmd
+		return a, nil
 	}
 
 	// Register generic plugins for undiscovered resources
@@ -1932,16 +2132,9 @@ func (a App) handleAPIResourcesDiscovered(msg k8s.APIResourcesDiscoveredMsg) (te
 	a.resourcePicker.SetPlugins(buildPickerEntries())
 
 	// If any split is currently showing api-resources, update its objects
-	for i := range a.layout.SplitCount() {
-		split := a.layout.SplitAt(i)
-		if split != nil && split.Plugin().Name() == "api-resources" {
-			if sp, ok := split.Plugin().(plugin.SelfPopulating); ok {
-				split.SetObjects(sp.Objects())
-			}
-		}
-	}
+	a = a.refreshSelfPopulatingSplits("api-resources")
 
-	return a, clearCmd
+	return a, nil
 }
 
 // toggleZoomDetailAndSync toggles detail zoom and updates the indicator.
@@ -1986,6 +2179,17 @@ func (a App) View() tea.View {
 		main = rendered
 	} else {
 		a.clearOverlayRect()
+	}
+
+	// Toasts float above everything, including modals: composite them LAST,
+	// anchored to the top-right with no backdrop dim. visibleToasts is nil-safe
+	// for a missing store and excludes expired/cleared IDs. Sample the clock once
+	// so the whole render pass uses a single "now".
+	now := a.now()
+	if visible := visibleToasts(a.notify, a.dismissed, now, a.toastTTL); len(visible) > 0 {
+		if tv := a.toasts.View(visible, a.width, a.height); tv != "" {
+			main = ui.PlaceOverlay(a.width, a.height, main, tv, ui.WithOverlayPosition(1.0, 0.0), ui.WithDim(false))
+		}
 	}
 
 	return tea.View{
@@ -2209,8 +2413,8 @@ func (a App) refreshDrillDownSplits(updatedGVR schema.GroupVersionResource, name
 func (a App) handleHelmRollback(msg msgs.HelmRollbackRequestedMsg) (tea.Model, tea.Cmd) {
 	hc := a.helmClientForFocused()
 	if hc == nil {
-		cmd := a.statusBar.SetError("helm: no client")
-		return a, cmd
+		a.notify.Add(notify.LevelError, "helm: no client", a.contextFor(nil), "helm")
+		return a, nil
 	}
 	return a, func() tea.Msg {
 		if err := hc.Rollback(msg.ReleaseName, msg.Namespace, msg.Revision); err != nil {
@@ -2267,8 +2471,8 @@ func (a App) handleHelmChartRefSet(msg msgs.HelmChartRefSetMsg) (tea.Model, tea.
 	}
 	hc := a.helmClientForFocused()
 	if hc == nil {
-		cmd := a.statusBar.SetError("helm: no client")
-		return a, cmd
+		a.notify.Add(notify.LevelError, "helm: no client", a.contextFor(nil), "helm")
+		return a, nil
 	}
 	return a, helm.EditValuesCmd(hc, msg.ReleaseName, msg.Namespace)
 }
@@ -2507,7 +2711,7 @@ func (a App) handleDebugReady(msg msgs.DebugReadyMsg) (tea.Model, tea.Cmd) {
 	tp, found := a.layout.TerminalPaneByID(msg.ID)
 
 	if msg.Err != nil {
-		cmd := a.statusBar.SetError("debug: " + msg.Err.Error())
+		a.notify.Add(notify.LevelError, "debug: "+msg.Err.Error(), a.contextFor(nil), "debug")
 		// Remove the placeholder pane (if still present) and its metadata. Cancel
 		// the pre-flight context so its goroutine bookkeeping (parent is
 		// Background) is released rather than leaked for the process lifetime.
@@ -2518,7 +2722,7 @@ func (a App) handleDebugReady(msg msgs.DebugReadyMsg) (tea.Model, tea.Cmd) {
 		if found {
 			a = a.failTerminalPane(tp, "debug failed: "+msg.Err.Error())
 		}
-		return a, cmd
+		return a, nil
 	}
 
 	// The user may have closed the placeholder pane while the pre-flight ran.
@@ -2548,7 +2752,7 @@ func (a App) handleDebugReady(msg msgs.DebugReadyMsg) (tea.Model, tea.Cmd) {
 	meta := a.termCleanup[msg.ID]
 	exec, err := a.attachExecutorFn(meta.client, msg.PodName, msg.ContainerName, msg.Namespace)
 	if err != nil {
-		cmd := a.statusBar.SetError("debug: " + err.Error())
+		a.notify.Add(notify.LevelError, "debug: "+err.Error(), a.contextFor(nil), "debug")
 		// The attach failed but the pre-flight already created the node-debug
 		// pod; delete it best-effort so it does not leak. Read the client off
 		// the cleanup metadata BEFORE removing it.
@@ -2561,7 +2765,7 @@ func (a App) handleDebugReady(msg msgs.DebugReadyMsg) (tea.Model, tea.Cmd) {
 		}
 		delete(a.termCleanup, msg.ID)
 		a = a.failTerminalPane(tp, "debug failed: "+err.Error())
-		return a, cmd
+		return a, nil
 	}
 
 	// Fill in the now-known pod identity so close/quit can delete a node pod.

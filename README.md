@@ -42,6 +42,10 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Helm values editing, rollback to any revision, and chart reference updates
 - Save log buffer to file (and optionally open in `$EDITOR`)
 
+**Notifications**
+- noice.nvim-style toast overlay for aku's own info/warning/error messages — floats top-right (newest on top), never steals focus, auto-hides per level, with a `+N more…` line past a configurable cap (`ctrl+x` clears live toasts)
+- `aku-messages` resource (`g m`, short name `msg`) — the full session-wide message history, browsable like Events, with an `Enter` detail view for the untruncated message
+
 **Terminals**
 - Exec and debug sessions are first-class panes: place them adjacent to other resources, zoom to focus, keep shells alive in the background
 - tmux-style prefix key (default `Ctrl+a`) escapes raw typing: prefix then `h/j/k/l` or arrows moves focus, prefix then `x`/`q`/`Ctrl+w` closes the pane; close a live pane with the prefix then `x`/`q`/`Ctrl+w` (a *bare* `Ctrl+w` is sent to the shell), while a bare `Ctrl+w` directly closes an *exited* pane like any other
@@ -143,6 +147,16 @@ debug:
 logs:
   buffer_size: 10000       # max lines to buffer (default)
 
+# Notification toasts and the aku-messages history
+notifications:
+  buffer_size: 1000        # message history ring-buffer size (default)
+  max_visible: 5           # toasts shown before "+N more…" (default)
+  timeout_info: 3          # seconds before info toasts auto-hide (default)
+  timeout_warning: 5       # seconds before warning toasts auto-hide (default)
+  timeout_error: 8         # seconds before error toasts auto-hide (default)
+  # timeout_*: 0 (or omitted) uses the default; a negative value is sticky
+  # (never auto-hides), e.g. timeout_error: -1 keeps errors until dismissed.
+
 # Extra directories to scan for kubeconfig files (multi-cluster context switching)
 contexts:
   directories:
@@ -182,6 +196,8 @@ To copy text while mouse support is enabled, hold Option (iTerm2, macOS Terminal
 Exec (`s s`) and debug (`s d` / `s p`) open live terminal panes that run concurrently in the background — split them alongside other resources, zoom to focus, and switch away while a shell stays alive. A focused live terminal owns most keystrokes, so navigation goes through the tmux-style prefix (`terminal.prefix`, default `ctrl+a`): press the prefix, then a nav key (`h/j/k/l` or arrows to move focus, `x`/`q`/`Ctrl+w` to close the pane). Zoom and focus movement are an exception: by default `alt+z` (zoom) and `shift+left/right/up/down` (move focus between panes) are *captured* — handled by aku rather than forwarded to the shell — so you can zoom or switch panes without leaving the terminal (see the `capture:` keymap field below). `alt+z` is a unified fullscreen zoom: the focused pane (resource list, terminal, or detail/log panel) fills the whole screen borderlessly with a single top bar and the status bar hidden; press `alt+z` again to exit. Only one pane is zoomed at a time, but while zoomed you can still move focus with `shift+arrows` — zoom follows the newly-focused split. A zoomed terminal's top bar shows an `alt+z: exit zoom` hint. To close a *live* pane use the prefix then `x`, `q`, or `Ctrl+w` — a *bare* `Ctrl+w` (no prefix) is forwarded to the shell, not intercepted. Once a pane has exited it behaves like any other split, so `Ctrl+w` closes it directly (no prefix). Press the prefix twice to send a literal prefix byte to the shell. When a shell exits, its pane keeps an `[exited — status N]` banner and scrollback until you close it. If the I/O stream fails mid-session (network drop, API-server error), the pane freezes with a `[exited — status 1] stream error: <detail>` banner instead of a clean status, so a broken connection is never mistaken for a normal exit. If a debug/exec pre-flight fails before the shell ever starts, the placeholder pane is removed (or, when it is the only pane, frozen as a closeable exited pane showing `debug failed: <reason>` that you dismiss like any other exited pane). Under sustained I/O saturation, keystrokes may be dropped rather than blocking — a deliberate tradeoff that keeps the UI responsive when the remote shell can't keep up. Node-debug pods are removed on pane close and on quit; ephemeral debug containers can't be deleted (a Kubernetes limitation) and the pane notes this on exit. `terminal.scrollback` sets how many off-screen lines each terminal retains for wheel/page scrolling. The shell launched by exec (`s s`) is overridable via `exec.command` (default `["sh", "-c", "clear; (bash || ash || sh)"]`, which clears the screen and prefers `bash`, falling back to `ash`/`sh`).
 
 `contexts.directories` lists extra directories aku scans recursively (in addition to the active `$KUBECONFIG`/`~/.kube/config`) for kubeconfig files. Every context across those files becomes switchable; files that aren't valid kubeconfigs or contain zero contexts are skipped. There is no "pinned" pane — every pane simply carries a context, and the focused pane is the source of truth (its context drives new-split defaults and the status bar). `gx` opens a fuzzy overlay picker that moves every pane sharing the focused pane's context to the chosen cluster (focused-context-group move), connecting asynchronously. `gX` opens an in-pane contexts list (a resource view) in the focused pane; Enter switches that pane's context. `oX` opens the contexts list in a new split, so you can bring up another cluster side-by-side. The contexts view has columns NAME, CLUSTER, SERVER, STATUS, and PANES, where STATUS is `●` connected, `○` offline/degraded, or `–` not yet dialed. The `gx` overlay annotates each row: contexts currently open get a `●` marker plus their pane count, and the focused pane's current context is highlighted. All context switches dial asynchronously off the Update goroutine, so the UI never freezes — even when a cluster is unreachable, the pane shows an `⚠ offline` marker instead of hanging. Pane context labels are shown only when more than one distinct context is open across panes; when every pane shares one context, labels are hidden. On switch, a pane lands on the chosen context's default namespace (the kubeconfig `namespace:` field, else `default`); if the pane's current resource type doesn't exist on the new cluster it shows an empty list and a short message in the status bar (there is no inline annotation in the list). That missing-resource check requires the cluster's API discovery to have been populated; until then the pane simply shows an empty list. Different panes can run live on different clusters at the same time, each with its own watches.
+
+aku surfaces its own info/warning/error messages as noice.nvim-style **toasts** that float in the top-right corner (newest on top), non-modally — they never steal focus from the pane you're working in. Each toast auto-hides after a per-level timeout: `timeout_info` (default `3`s), `timeout_warning` (default `5`s), and `timeout_error` (default `8`s), so errors linger longer than transient successes. A timeout of `0` (or omitted) falls back to the default; a *negative* value makes that level **sticky** — it never auto-hides until dismissed (e.g. `timeout_error: -1` keeps every error on screen until you clear it). At most `max_visible` toasts (default `5`) are shown at once; any beyond that collapse into a `+N more…` line. Press `ctrl+x` to clear all live toasts at once (the history is kept). Async operation results — scale, delete, restart, helm, context switch, port-forward, save-logs, and the like — now appear as toasts rather than in the status bar, so the status bar shows only key hints and the activity spinner. The full session-wide history lives in the **`aku-messages`** resource (open it with `g m`, or via the `:` picker / short name `msg`), browsable like Events with columns TIME / LEVEL / CONTEXT / SOURCE / MESSAGE, newest-first. The TIME column shows a *relative age* (e.g. `2m`, `1h`) — how long ago the message was recorded, just like the Events view's LAST SEEN column — not a wall-clock time. Press `Enter` on a row for a detail view that shows, in order, the full untruncated message body first, then its level, the exact timestamp, the origin context, and the source. `notifications.buffer_size` (default `1000`) caps that history ring buffer.
 
 ### keymap.yaml
 
@@ -362,6 +378,7 @@ The contexts list is itself a resource view, with columns **NAME, CLUSTER, SERVE
 | `e` | Edit resource |
 | `Alt+z` | Toggle fullscreen zoom of the focused pane (captured: works over a live terminal too) |
 | `Ctrl+r` | Reload all |
+| `Ctrl+x` | Clear notifications (dismiss live toasts; history kept) |
 | `/` | Search (regex) |
 | `\|` / `Ctrl+/` | Filter (regex) |
 
@@ -376,7 +393,7 @@ The contexts list is itself a resource view, with columns **NAME, CLUSTER, SERVE
 | `Space` | Toggle select |
 | `Ctrl+a` | Select all |
 | `Ctrl+d` | Delete selected |
-| `g + p/d/s/v/c/n` | Go to pods/deployments/secrets/services/configmaps/namespaces |
+| `g + p/d/s/v/c/n/m` | Go to pods/deployments/secrets/services/configmaps/namespaces/aku-messages |
 | `o + p/d/s/v/c` | Open split: pods/deployments/secrets/services/configmaps |
 | `gX` / `oX` | Open the contexts list (`g` in current pane, `o` in a new split) |
 | `S + n/N/a/s` | Sort by name/namespace/age/status |
@@ -420,7 +437,7 @@ Saved logs go to `$XDG_STATE_HOME/aku/logs/<cluster>/<ns>-<pod>-<container>-<YYY
 | `v` | Helm releases | View user values |
 | `V` | Helm releases | View all (coalesced) values |
 | `x` | Pods, Secrets, Containers, Deployments, StatefulSets, DaemonSets | Resolve/show env variables (list and detail) |
-| `pf` | Pods, Containers | Port forward |
+| `f` | Pods, Containers | Port forward |
 | `ss` | Pods, Containers | Exec (live terminal pane) |
 | `sd` | Pods, Containers, Nodes | Debug container (live terminal pane) |
 | `sp` | Pods, Containers, Nodes | Privileged debug (live terminal pane) |

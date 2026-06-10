@@ -12,6 +12,7 @@ import (
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/k8s/session"
 	"github.com/aohoyd/aku/internal/msgs"
+	"github.com/aohoyd/aku/internal/notify"
 	"github.com/aohoyd/aku/internal/ui"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -265,11 +266,12 @@ func TestCloseFocusedTerminalLastSplitEphemeral(t *testing.T) {
 	}
 	before := a.layout.SplitCount()
 
-	a, cmd := a.closeFocusedTerminal()
+	a, _ = a.closeFocusedTerminal()
 
-	// The ephemeral note cmd is returned (status-bar note).
-	if cmd == nil {
-		t.Fatal("last-split ephemeral close should return a non-nil status-bar note cmd")
+	// The ephemeral note is recorded in the notify store (toast), not returned as
+	// a status-bar cmd.
+	if !hasNotifyLevel(a, notify.LevelWarning) {
+		t.Fatal("last-split ephemeral close should record an ephemeral note in the notify store")
 	}
 	// Session torn down...
 	if _, ok := a.terminals[id]; ok {
@@ -877,9 +879,9 @@ func TestEphemeralCloseSurfacesNote(t *testing.T) {
 	if _, ok := a.termCleanup["debug:1"]; ok {
 		t.Fatal("ephemeral metadata not removed on close")
 	}
-	// Status bar reflects the note.
-	if !strings.Contains(a.statusBar.View(), "ephemeral container") {
-		t.Fatalf("status bar did not surface ephemeral note:\n%s", a.statusBar.View())
+	// The notify store reflects the ephemeral note (it backs the toast overlay).
+	if !notifyContains(a, "ephemeral container") {
+		t.Fatalf("notify store did not surface ephemeral note:\n%v", a.notify.List())
 	}
 }
 
@@ -955,8 +957,8 @@ func TestDebugReadyErrorSurfacesAndCleansUp(t *testing.T) {
 	if _, ok := a.terminals[id]; ok {
 		t.Fatal("no session should exist for a failed pre-flight")
 	}
-	if !strings.Contains(a.statusBar.View(), "boom") {
-		t.Fatalf("error not surfaced on status bar:\n%s", a.statusBar.View())
+	if !notifyContains(a, "boom") {
+		t.Fatalf("error not surfaced in notify store:\n%v", a.notify.List())
 	}
 }
 
@@ -1156,8 +1158,8 @@ func TestDebugReadyAttachExecErrorDeletesNodePod(t *testing.T) {
 	if _, ok := a.terminals[id]; ok {
 		t.Fatal("no session should exist after attach error")
 	}
-	if !strings.Contains(a.statusBar.View(), "attach failed") {
-		t.Fatalf("attach error not surfaced on status bar:\n%s", a.statusBar.View())
+	if !notifyContains(a, "attach failed") {
+		t.Fatalf("attach error not surfaced in notify store:\n%v", a.notify.List())
 	}
 	select {
 	case name := <-deleted:

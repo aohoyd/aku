@@ -53,20 +53,38 @@ type ContextsConfig struct {
 	Directories []string `yaml:"directories,omitempty"`
 }
 
+// NotificationsConfig holds configuration for the toast overlay and the backing
+// notify store.
+//
+// The timeout_* fields are per-level auto-hide durations IN SECONDS. Because the
+// YAML tags use omitempty, a value of 0 is indistinguishable from "unset", so
+// BOTH 0 and an omitted field yield the per-level DEFAULT (info 3s, warning 5s,
+// error 8s) — a 0-second (instant-hide) timeout is therefore NOT configurable.
+// Use a NEGATIVE value (e.g. timeout_error: -1) to make a level STICKY (never
+// auto-hide). See ToastTTL for the exact mapping.
+type NotificationsConfig struct {
+	BufferSize     int `yaml:"buffer_size,omitempty"`
+	MaxVisible     int `yaml:"max_visible,omitempty"`
+	TimeoutInfo    int `yaml:"timeout_info,omitempty"`
+	TimeoutWarning int `yaml:"timeout_warning,omitempty"`
+	TimeoutError   int `yaml:"timeout_error,omitempty"`
+}
+
 // Config holds the application configuration.
 type Config struct {
 	// Theme names a color preset loaded from <config>/themes/<name>.yaml. It is
 	// applied over the built-in defaults; theme.yaml (if present) is layered on
 	// top and overrides it.
-	Theme    string                       `yaml:"theme,omitempty"`
-	Charts   map[string]map[string]string `yaml:"charts,omitempty"`
-	API      APIConfig                    `yaml:"api,omitempty"`
-	Debug    DebugConfig                  `yaml:"debug,omitempty"`
-	Exec     ExecConfig                   `yaml:"exec,omitempty"`
-	Logs     LogsConfig                   `yaml:"logs,omitempty"`
-	Mouse    MouseConfig                  `yaml:"mouse,omitempty"`
-	Terminal TerminalConfig               `yaml:"terminal,omitempty"`
-	Contexts ContextsConfig               `yaml:"contexts,omitempty"`
+	Theme         string                       `yaml:"theme,omitempty"`
+	Charts        map[string]map[string]string `yaml:"charts,omitempty"`
+	API           APIConfig                    `yaml:"api,omitempty"`
+	Debug         DebugConfig                  `yaml:"debug,omitempty"`
+	Exec          ExecConfig                   `yaml:"exec,omitempty"`
+	Logs          LogsConfig                   `yaml:"logs,omitempty"`
+	Mouse         MouseConfig                  `yaml:"mouse,omitempty"`
+	Terminal      TerminalConfig               `yaml:"terminal,omitempty"`
+	Contexts      ContextsConfig               `yaml:"contexts,omitempty"`
+	Notifications NotificationsConfig          `yaml:"notifications,omitempty"`
 }
 
 // Default terminal settings, returned by the accessors when the corresponding
@@ -74,6 +92,18 @@ type Config struct {
 const (
 	defaultTerminalPrefix     = "ctrl+a"
 	defaultTerminalScrollback = 5000
+)
+
+// Default notification settings, returned by the accessors when the
+// corresponding config field is empty/zero.
+const (
+	// defaultNotifyBufferSize: keep in sync with notify.defaultCapacity (the
+	// store's own defensive fallback for non-positive capacities).
+	defaultNotifyBufferSize    = 1000
+	defaultNotifyMaxVisible    = 5
+	defaultToastTimeoutInfo    = 3 * time.Second
+	defaultToastTimeoutWarning = 5 * time.Second
+	defaultToastTimeoutError   = 8 * time.Second
 )
 
 // DefaultConfig returns a config with default settings.
@@ -197,6 +227,74 @@ func (c *Config) ContextDirectories() []string {
 		return nil
 	}
 	return c.Contexts.Directories
+}
+
+// NotifyBufferSize returns the configured notify store capacity, defaulting to
+// 1000 when zero or negative.
+func (c *Config) NotifyBufferSize() int {
+	if c.Notifications.BufferSize > 0 {
+		return c.Notifications.BufferSize
+	}
+	return defaultNotifyBufferSize
+}
+
+// NotifyMaxVisible returns the maximum number of toasts shown at once,
+// defaulting to 5 when zero or negative.
+func (c *Config) NotifyMaxVisible() int {
+	if c.Notifications.MaxVisible > 0 {
+		return c.Notifications.MaxVisible
+	}
+	return defaultNotifyMaxVisible
+}
+
+// Toast severity levels, matching the iota order of notify.Level
+// (LevelInfo=0, LevelWarning=1, LevelError=2). ToastTTL takes the int level
+// rather than notify.Level to avoid an import cycle: config is imported
+// (transitively, via theme) by the notify dependency graph, so config cannot
+// import notify. Callers in the app pass int(notify.Level).
+//
+// These are exported (as plain ints, not the notify.Level type) so tests and
+// callers can reference them without redefining the magic numbers. They MUST
+// stay in sync with notify.Level's iota order; the import cycle only blocks
+// importing the notify TYPE, not exposing matching int constants here.
+const (
+	ToastLevelInfo = iota
+	ToastLevelWarning
+	ToastLevelError
+)
+
+// ToastTTL returns the auto-hide duration for a toast of the given level. The
+// level is the int value of notify.Level (0=info, 1=warning, 2=error); see the
+// ToastLevel* constants for why this is an int rather than notify.Level.
+//
+// Per-level timeouts are configured in seconds. Because the YAML tags use
+// omitempty, a configured 0 is indistinguishable from "unset", so the zero/unset
+// value always maps to the per-level default (info 3s, warning 5s, error 8s). A
+// POSITIVE value is used verbatim (in seconds), and a NEGATIVE value (e.g. -1)
+// is the explicit, unambiguous way to make a level STICKY: ToastTTL returns 0,
+// which notify.Store.Live treats as "never auto-hide". To pin error toasts on
+// screen, set `timeout_error: -1`.
+func (c *Config) ToastTTL(level int) time.Duration {
+	var (
+		secs int
+		def  time.Duration
+	)
+	switch level {
+	case ToastLevelWarning:
+		secs, def = c.Notifications.TimeoutWarning, defaultToastTimeoutWarning
+	case ToastLevelError:
+		secs, def = c.Notifications.TimeoutError, defaultToastTimeoutError
+	default:
+		secs, def = c.Notifications.TimeoutInfo, defaultToastTimeoutInfo
+	}
+	switch {
+	case secs > 0:
+		return time.Duration(secs) * time.Second
+	case secs < 0:
+		return 0 // sticky
+	default:
+		return def
+	}
 }
 
 // SetChartRef sets the chart reference for a release in a namespace.

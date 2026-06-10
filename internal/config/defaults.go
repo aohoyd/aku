@@ -28,6 +28,7 @@ func DefaultBindings() []Binding {
 			{Key: "P", Help: "pvc", Command: "goto-pvc"},
 			{Key: "x", Help: "context", Command: "context-picker"},
 			{Key: "X", Help: "pane context", Command: "goto-contexts"},
+			{Key: "m", Help: "messages", Command: "goto-aku-messages"},
 		}},
 		{Key: "G", Help: "bottom", Command: "cursor-bottom"},
 		{Key: "o", Help: "split", Visible: true, Keys: []Binding{
@@ -45,6 +46,7 @@ func DefaultBindings() []Binding {
 			{Key: "P", Help: "pvc", Command: "split-pvc"},
 			{Key: "X", Help: "contexts", Command: "split-contexts"},
 		}},
+		{Key: "ctrl+x", Help: "clear msgs", Command: "clear-notifications"},
 		{Key: "ctrl+d", Help: "delete", Command: "delete", Visible: true},
 		{Key: "ctrl+f", Help: "page down", Command: "page-down"},
 		{Key: "ctrl+b", Help: "page up", Command: "page-up"},

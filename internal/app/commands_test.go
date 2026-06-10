@@ -16,6 +16,7 @@ import (
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/msgs"
+	"github.com/aohoyd/aku/internal/notify"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/helmreleases"
 	"github.com/aohoyd/aku/internal/plugins/portforwards"
@@ -83,7 +84,7 @@ func newTestApp() App {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	return New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
+	return New(newTestManager(), km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, "")
 }
 
 // newAppWithClient creates an App whose single startup cluster wraps the given
@@ -100,7 +101,7 @@ func newAppWithClient(client *k8s.Client) App {
 		store = k8s.NewStore(client.Dynamic, client.Context, nil)
 	}
 	mgr.Register(cluster.New(client.Context, "", client, store, k8s.NewDiscovery(), nil))
-	return New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical, client.Context)
+	return New(mgr, km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, client.Context)
 }
 
 // withGlobalStore rebinds the App's startup cluster to one wrapping the given
@@ -275,6 +276,37 @@ func TestGotoCommand(t *testing.T) {
 	// Split count should still be 1 (goto replaces, not adds)
 	if app.layout.SplitCount() != 1 {
 		t.Fatalf("expected 1 split after goto, got %d", app.layout.SplitCount())
+	}
+}
+
+func TestGotoAkuMessages(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := &mockPlugin{
+		name: "pods",
+		gvr:  schema.GroupVersionResource{Version: "v1", Resource: "pods"},
+	}
+	// aku-messages is cluster-scoped and synthetic; a name-only mock is enough to
+	// prove the generic goto-<resource> handler resolves it via plugin.ByName.
+	messagesPlugin := &mockPlugin{
+		name: "aku-messages",
+		gvr:  schema.GroupVersionResource{Group: "_ktui", Version: "v1", Resource: "aku-messages"},
+	}
+
+	plugin.Register(podsPlugin)
+	plugin.Register(messagesPlugin)
+
+	app.layout.AddSplit(podsPlugin, "default", "")
+
+	model, _ := app.executeCommand("goto-aku-messages")
+	app = model.(App)
+
+	focused := app.layout.FocusedSplit()
+	if focused == nil {
+		t.Fatal("expected a focused split after goto")
+	}
+	if focused.Plugin().Name() != "aku-messages" {
+		t.Fatalf("expected focused plugin 'aku-messages' after goto, got %q", focused.Plugin().Name())
 	}
 }
 
@@ -800,7 +832,7 @@ func TestScopedKeyPodsExecBinding(t *testing.T) {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
+	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, "")
 
 	podsPlugin := &mockPlugin{
 		name: "pods",
@@ -823,7 +855,7 @@ func TestScopedKeyDeploymentNoExec(t *testing.T) {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
+	app := New(newTestManager(), km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, "")
 
 	deploymentsPlugin := &mockPlugin{
 		name: "deployments",
@@ -1980,7 +2012,7 @@ func TestHandleGotoSelfPopulating(t *testing.T) {
 
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
-	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
+	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, "")
 
 	// Add initial split with pods so goto has a focused split
 	a.layout.AddSplit(podsPlugin, "default", "")
@@ -2021,7 +2053,7 @@ func TestEnterDetailApiResourcesGoto(t *testing.T) {
 
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
-	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, layout.OrientationVertical, "")
+	a := New(newTestManager(), km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, "")
 
 	a.layout.AddSplit(gotoPlugin, "default", "")
 	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
@@ -5353,10 +5385,10 @@ func TestViewHelmValuesUserCommand_NilHelmClient(t *testing.T) {
 	a.layout.ShowRightPanel()
 	a.layout.RightPanel().SetMode(msgs.DetailYAML)
 
-	model, cmd := a.executeCommand("view-helm-values-user")
+	model, _ := a.executeCommand("view-helm-values-user")
 	app := model.(App)
-	if cmd == nil {
-		t.Fatal("expected an error-bar cmd when helm client is nil, got nil")
+	if !hasNotifyLevel(app, notify.LevelError) {
+		t.Fatal("expected an error notification when helm client is nil")
 	}
 	// Mode should NOT be switched to DetailValues since we bailed out before SetMode.
 	if got := app.layout.RightPanel().Mode(); got != msgs.DetailYAML {
@@ -5613,19 +5645,15 @@ func TestRolloutRestart_NoK8sClient_NoOp(t *testing.T) {
 	app.mgr = newTestManager()
 	prevOverlay := app.activeOverlay
 
-	_, cmd := app.executeCommand("rollout-restart")
-
-	// The handler should report the missing-client error to the user (consistent
-	// with edit/scale/exec). The returned cmd is the status-bar error timer,
-	// not a restart command.
-	if cmd == nil {
-		t.Fatal("expected non-nil cmd reporting missing k8s client")
-	}
-	// Use the post-cmd App snapshot via SetError side effects: we re-fetch state
-	// from the model returned alongside cmd. The dispatch must NOT have set
-	// pending state nor opened the confirm overlay.
 	model, _ := app.executeCommand("rollout-restart")
 	got := model.(App)
+
+	// The handler should report the missing-client error to the user (consistent
+	// with edit/scale/exec) via the notify store, not a restart command.
+	if !hasNotifyLevel(got, notify.LevelError) {
+		t.Fatal("expected an error notification reporting missing k8s client")
+	}
+	// The dispatch must NOT have set pending state nor opened the confirm overlay.
 	if got.pendingRestart != nil {
 		t.Fatalf("expected pendingRestart to remain nil with no k8sClient, got %v", got.pendingRestart)
 	}
@@ -6238,24 +6266,23 @@ func TestSaveLogsCommand_NotInLogMode(t *testing.T) {
 func TestSaveLogsCommand_NoLinesShowsError(t *testing.T) {
 	a := newTestApp()
 	a.layout.SetLogMode(true)
-	// LogView has no lines -> SetError("No log lines to save"), returns its cmd.
-	model, cmd := a.executeCommand("save-logs")
+	// LogView has no lines -> the "No log lines to save" error is recorded in the
+	// notify store. No tea.Cmd is returned: the MessageAddedMsg + auto-expiry tick
+	// are produced by the store's send callback (wired by root), not the call site.
+	model, _ := a.executeCommand("save-logs")
 	got, ok := model.(App)
 	if !ok {
 		t.Fatalf("expected App model, got %T", model)
 	}
-	if cmd == nil {
-		t.Fatal("expected non-nil cmd from SetError")
+	notes := got.notify.List()
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 notify message, got %d", len(notes))
 	}
-	// SetError and SetWarning both return non-nil tea.Cmd, so a non-nil cmd
-	// alone does not prove the error path ran. Assert the actual message
-	// landed in the status bar's error field — and that the warning field
-	// stayed empty, ruling out an accidental swap to SetWarning.
-	if errText := got.statusBar.ErrText(); errText != "No log lines to save" {
-		t.Errorf("status bar errText: got %q, want %q", errText, "No log lines to save")
+	if notes[0].Level != notify.LevelError {
+		t.Errorf("notify level: got %v, want error", notes[0].Level)
 	}
-	if w := got.statusBar.WarningText(); w != "" {
-		t.Errorf("status bar warning should be empty, got %q", w)
+	if notes[0].Text != "No log lines to save" {
+		t.Errorf("notify text: got %q, want %q", notes[0].Text, "No log lines to save")
 	}
 }
 
@@ -6273,12 +6300,15 @@ func TestSaveLogsCommand_WritesFile(t *testing.T) {
 	lv.SetPodName("pod-x")
 	lv.SetActiveContainer("ctr")
 
-	model, cmd := a.executeCommand("save-logs")
-	if _, ok := model.(App); !ok {
+	model, _ := a.executeCommand("save-logs")
+	got2, ok := model.(App)
+	if !ok {
 		t.Fatalf("expected App model, got %T", model)
 	}
-	if cmd == nil {
-		t.Fatal("expected non-nil cmd (status bar warning)")
+	// The success confirmation lands in the notify store as an info message.
+	msgsList := got2.notify.List()
+	if len(msgsList) != 1 || msgsList[0].Level != notify.LevelInfo {
+		t.Fatalf("expected 1 info notify message, got %d (%+v)", len(msgsList), msgsList)
 	}
 
 	// Verify a file landed under base/aku/logs/prod/.
@@ -6354,20 +6384,25 @@ func TestSaveAndOpenLogsCommand_WritesFileAndReturnsExecCmd(t *testing.T) {
 func TestSaveAndOpenLogsCommand_NoLinesShowsError(t *testing.T) {
 	a := newTestApp()
 	a.layout.SetLogMode(true)
-	// LogView has no lines -> ok=false branch -> SetError, no editor exec.
+	// LogView has no lines -> ok=false branch -> error recorded in notify store,
+	// no editor exec and no tea.Cmd from the call site.
 	model, cmd := a.executeCommand("save-and-open-logs")
 	got, ok := model.(App)
 	if !ok {
 		t.Fatalf("expected App model, got %T", model)
 	}
-	if cmd == nil {
-		t.Fatal("expected non-nil cmd from SetError")
+	if cmd != nil {
+		t.Fatal("expected nil cmd: no editor exec on the no-lines error path")
 	}
-	if errText := got.statusBar.ErrText(); errText != "No log lines to save" {
-		t.Errorf("status bar errText: got %q, want %q", errText, "No log lines to save")
+	notes := got.notify.List()
+	if len(notes) != 1 {
+		t.Fatalf("expected 1 notify message, got %d", len(notes))
 	}
-	if w := got.statusBar.WarningText(); w != "" {
-		t.Errorf("status bar warning should be empty, got %q", w)
+	if notes[0].Level != notify.LevelError {
+		t.Errorf("notify level: got %v, want error", notes[0].Level)
+	}
+	if notes[0].Text != "No log lines to save" {
+		t.Errorf("notify text: got %q, want %q", notes[0].Text, "No log lines to save")
 	}
 }
 
@@ -6439,7 +6474,7 @@ func appWithManager(t *testing.T, ctxNames ...string) App {
 
 	// New() with empty specs seeds a single pods pane and stamps it with the
 	// startup context.
-	return New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical, gctx)
+	return New(mgr, km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, gctx)
 }
 
 // addSplit adds a following split for the named registered plugin and stamps it
@@ -6668,9 +6703,33 @@ func TestGlobalContextSwitchFailedConnectLeavesGroupRetargetable(t *testing.T) {
 	if _, ok := app.mgr.Get("ctx-b"); ok {
 		t.Errorf("failed connect leaked a manager entry for ctx-b")
 	}
-	if et := app.statusBar.ErrText(); et == "" {
-		t.Error("expected a status error after a failed connect")
+	if !hasNotifyLevel(app, notify.LevelError) {
+		t.Error("expected an error notification after a failed connect")
 	}
+}
+
+// hasNotifyLevel reports whether the app's notify store contains at least one
+// message at the given level. Used by tests that previously asserted on the
+// status bar's error/warning slot, which the toast/notify store replaced.
+func hasNotifyLevel(a App, level notify.Level) bool {
+	for _, m := range a.notify.List() {
+		if m.Level == level {
+			return true
+		}
+	}
+	return false
+}
+
+// notifyContains reports whether any message in the app's notify store contains
+// substr in its text. Used by tests migrated off the status-bar error/warning
+// slot to the toast/notify store.
+func notifyContains(a App, substr string) bool {
+	for _, m := range a.notify.List() {
+		if strings.Contains(m.Text, substr) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestGlobalContextSwitchFailedConnectMarksGroupOffline mirrors

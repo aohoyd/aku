@@ -18,11 +18,9 @@ var (
 	NamespaceStyle = lipgloss.NewStyle().Foreground(theme.TextOnAccent).Background(theme.Accent).Bold(true).Padding(0, 1)
 
 	// Status bar
-	StatusBarStyle     = lipgloss.NewStyle().Foreground(theme.Muted).Padding(0, 1)
-	StatusKeyStyle     = lipgloss.NewStyle().Bold(true).Foreground(theme.Highlight)
-	StatusHelpStyle    = lipgloss.NewStyle().Foreground(theme.Muted)
-	StatusErrorStyle   = lipgloss.NewStyle().Foreground(theme.Error).Bold(true)
-	StatusWarningStyle = lipgloss.NewStyle().Foreground(theme.Warning).Bold(true)
+	StatusBarStyle  = lipgloss.NewStyle().Foreground(theme.Muted).Padding(0, 1)
+	StatusKeyStyle  = lipgloss.NewStyle().Bold(true).Foreground(theme.Highlight)
+	StatusHelpStyle = lipgloss.NewStyle().Foreground(theme.Muted)
 	// Context badge in status bar
 	ContextBadgeOnlineStyle  = lipgloss.NewStyle().Foreground(theme.TextOnAccent).Background(theme.StatusRunning).Bold(true).Padding(0, 1)
 	ContextBadgeOfflineStyle = lipgloss.NewStyle().Foreground(theme.TextOnAccent).Background(theme.Error).Bold(true).Padding(0, 1)

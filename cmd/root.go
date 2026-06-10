@@ -15,6 +15,7 @@ import (
 	"github.com/aohoyd/aku/internal/k8s"
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/msgs"
+	"github.com/aohoyd/aku/internal/notify"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugins/apiresources"
 	"github.com/aohoyd/aku/internal/plugins/certificatesigningrequests"
@@ -45,6 +46,7 @@ import (
 	"github.com/aohoyd/aku/internal/plugins/namespaces"
 	"github.com/aohoyd/aku/internal/plugins/networkpolicies"
 	"github.com/aohoyd/aku/internal/plugins/nodes"
+	"github.com/aohoyd/aku/internal/plugins/notifications"
 	"github.com/aohoyd/aku/internal/plugins/persistentvolumeclaims"
 	"github.com/aohoyd/aku/internal/plugins/persistentvolumes"
 	"github.com/aohoyd/aku/internal/plugins/poddisruptionbudgets"
@@ -482,6 +484,12 @@ func run(cmd *cobra.Command, args []string) error {
 	pfRegistry := portforward.NewRegistry()
 	plugin.Register(portforwards.New(pfRegistry))
 
+	// Shared notify store for aku's own messages, created here so the
+	// aku-messages plugin and the App share the SAME instance. SetSend
+	// (program.Send) is wired after the program is created, below.
+	notifyStore := notify.NewStore(cfg.NotifyBufferSize())
+	plugin.Register(notifications.New(notifyStore))
+
 	// Parse resource specs from -r flag
 	specs, err := parseResourceSpecs(resources)
 	if err != nil {
@@ -502,7 +510,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	// Create app. The Manager is the single source of client/store/discovery;
 	// chartResolver lets the app build per-cluster helm clients lazily.
-	application := app.New(mgr, km, cfg, pfRegistry, chartResolver, specs, detailMode, orientation, startupContext)
+	application := app.New(mgr, km, cfg, notifyStore, pfRegistry, chartResolver, specs, detailMode, orientation, startupContext)
 
 	// Create program
 	p := tea.NewProgram(application)
@@ -511,6 +519,10 @@ func run(cmd *cobra.Command, args []string) error {
 	// already-created cluster's store + warning handler (the startup cluster was
 	// created by Connect above) and is recorded for clusters created later.
 	mgr.SetSend(p.Send)
+
+	// Wire the notify store's send so that Add emits MessageAddedMsg into the
+	// Bubble Tea loop (driving the toast overlay). Must run before p.Run.
+	notifyStore.SetSend(p.Send)
 
 	teardown := func() {
 		mgr.ForEach(func(c *cluster.Cluster) {

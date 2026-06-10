@@ -18,6 +18,7 @@ import (
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/logs"
 	"github.com/aohoyd/aku/internal/msgs"
+	"github.com/aohoyd/aku/internal/notify"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/portforward"
 	"github.com/aohoyd/aku/internal/ui"
@@ -448,6 +449,11 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		a.helpOverlay.Open(a.bindingSet.HelpGroups(ct, rn))
 		return a, nil
 
+	case command == "clear-notifications":
+		// Dismiss all live toasts. The work (marking IDs dismissed) lives in the
+		// ClearNotificationsMsg handler so it stays the single source of truth.
+		return a, func() tea.Msg { return msgs.ClearNotificationsMsg{} }
+
 	case command == "close-panel":
 		a = a.closeRightPanel()
 		return a, nil
@@ -610,8 +616,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		execClient := a.clientForFocused()
 		if execClient == nil {
-			cmd := a.statusBar.SetError("exec: no k8s client")
-			return a, cmd
+			a.notify.Add(notify.LevelError, "exec: no k8s client", a.contextFor(focused), "exec")
+			return a, nil
 		}
 		ns := selected.GetNamespace()
 		if ns == "" {
@@ -650,8 +656,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		ports := a.extractPorts(focused, selected)
 		if len(ports) == 0 {
-			cmd := a.statusBar.SetError("no ports found on this resource")
-			return a, cmd
+			a.notify.Add(notify.LevelError, "no ports found on this resource", a.contextFor(focused), "port-forward")
+			return a, nil
 		}
 		ns := selected.GetNamespace()
 		if ns == "" {
@@ -667,8 +673,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
-			cmd := a.statusBar.SetError("rollout-restart: no k8s client")
-			return a, cmd
+			a.notify.Add(notify.LevelError, "rollout-restart: no k8s client", a.contextFor(focused), "rollout-restart")
+			return a, nil
 		}
 		var objs []*unstructured.Unstructured
 		if focused.HasSelection() {
@@ -702,14 +708,14 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		editCl := a.clusterFor(focused)
 		if editCl == nil || !editCl.Connected() {
-			cmd := a.statusBar.SetError("edit: no k8s client")
-			return a, cmd
+			a.notify.Add(notify.LevelError, "edit: no k8s client", a.contextFor(focused), "edit")
+			return a, nil
 		}
 		if focused.Plugin().Name() == "helmreleases" {
 			hc := a.helmClientFor(editCl)
 			if hc == nil {
-				cmd := a.statusBar.SetError("helm: no client")
-				return a, cmd
+				a.notify.Add(notify.LevelError, "helm: no client", a.contextFor(focused), "helm")
+				return a, nil
 			}
 			name := selected.GetName()
 			ns := selected.GetNamespace()
@@ -736,14 +742,14 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
-			cmd := a.statusBar.SetError("set-image: no k8s client")
-			return a, cmd
+			a.notify.Add(notify.LevelError, "set-image: no k8s client", a.contextFor(focused), "set-image")
+			return a, nil
 		}
 		pluginName := focused.Plugin().Name()
 		containers := extractContainerImages(pluginName, selected)
 		if len(containers) == 0 {
-			cmd := a.statusBar.SetError("no containers found on this resource")
-			return a, cmd
+			a.notify.Add(notify.LevelError, "no containers found on this resource", a.contextFor(focused), "set-image")
+			return a, nil
 		}
 
 		// Resolve target resource for patching
@@ -773,8 +779,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
-			cmd := a.statusBar.SetError("scale: no k8s client")
-			return a, cmd
+			a.notify.Add(notify.LevelError, "scale: no k8s client", a.contextFor(focused), "scale")
+			return a, nil
 		}
 		gvr := focused.Plugin().GVR()
 		name := selected.GetName()
@@ -820,8 +826,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		hc := a.helmClientFor(a.clusterFor(focused))
 		if hc == nil {
-			cmd := a.statusBar.SetError("helm: no client")
-			return a, cmd
+			a.notify.Add(notify.LevelError, "helm: no client", a.contextFor(focused), "helm")
+			return a, nil
 		}
 		name := selected.GetName()
 		ns := selected.GetNamespace()
@@ -852,42 +858,20 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if !a.layout.IsLogMode() {
 			return a, nil
 		}
-		cluster, ns, pod, container, lines, ok := a.currentLogContext()
+		path, lineCount, ok := a.saveLogBuffer()
 		if !ok {
-			cmd := a.statusBar.SetError("No log lines to save")
-			return a, cmd
+			return a, nil
 		}
-		path, err := logs.BuildPath(cluster, ns, pod, container, time.Now())
-		if err != nil {
-			cmd := a.statusBar.SetError(fmt.Sprintf("Save failed: %s", err))
-			return a, cmd
-		}
-		if err := logs.Write(path, lines); err != nil {
-			cmd := a.statusBar.SetError(fmt.Sprintf("Save failed: %s", err))
-			return a, cmd
-		}
-		// SetWarning is reused for success confirmation: no SetInfo channel exists
-		// and the 5s timeout fits a transient acknowledgement.
-		cmd := a.statusBar.SetWarning(fmt.Sprintf("Saved %d lines → %s", len(lines), path))
-		return a, cmd
+		a.notify.Add(notify.LevelInfo, fmt.Sprintf("Saved %d lines → %s", lineCount, path), a.contextFor(nil), "save-logs")
+		return a, nil
 
 	case command == "save-and-open-logs":
 		if !a.layout.IsLogMode() {
 			return a, nil
 		}
-		cluster, ns, pod, container, lines, ok := a.currentLogContext()
+		path, _, ok := a.saveLogBuffer()
 		if !ok {
-			cmd := a.statusBar.SetError("No log lines to save")
-			return a, cmd
-		}
-		path, err := logs.BuildPath(cluster, ns, pod, container, time.Now())
-		if err != nil {
-			cmd := a.statusBar.SetError(fmt.Sprintf("Save failed: %s", err))
-			return a, cmd
-		}
-		if err := logs.Write(path, lines); err != nil {
-			cmd := a.statusBar.SetError(fmt.Sprintf("Save failed: %s", err))
-			return a, cmd
+			return a, nil
 		}
 		return a, logs.OpenCmd(path)
 
@@ -1007,8 +991,8 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	cmd := a.statusBar.SetError(fmt.Sprintf("unknown command: %s", command))
-	return a, cmd
+	a.notify.Add(notify.LevelError, fmt.Sprintf("unknown command: %s", command), a.contextFor(nil), "command")
+	return a, nil
 }
 
 // currentLogContext returns the metadata needed to save the current log view's
@@ -1033,6 +1017,30 @@ func (a *App) currentLogContext() (cluster, ns, pod, container string, lines []s
 		cluster = cl.Context()
 	}
 	return cluster, ns, pod, container, lines, true
+}
+
+// saveLogBuffer writes the current log buffer to disk and emits the failure
+// notifications (no log lines, BuildPath error, Write error) shared by the
+// "save-logs" and "save-and-open-logs" commands. On success it returns the
+// written path and the number of lines saved with ok=true and emits NO
+// notification, leaving the success action (an info toast vs. opening the file)
+// to the caller. Callers must guard on IsLogMode() before invoking this.
+func (a App) saveLogBuffer() (path string, lineCount int, ok bool) {
+	cluster, ns, pod, container, lines, ctxOk := a.currentLogContext()
+	if !ctxOk {
+		a.notify.Add(notify.LevelError, "No log lines to save", a.contextFor(nil), "save-logs")
+		return "", 0, false
+	}
+	path, err := logs.BuildPath(cluster, ns, pod, container, time.Now())
+	if err != nil {
+		a.notify.Add(notify.LevelError, fmt.Sprintf("Save failed: %s", err), a.contextFor(nil), "save-logs")
+		return "", 0, false
+	}
+	if err := logs.Write(path, lines); err != nil {
+		a.notify.Add(notify.LevelError, fmt.Sprintf("Save failed: %s", err), a.contextFor(nil), "save-logs")
+		return "", 0, false
+	}
+	return path, len(lines), true
 }
 
 // closeRightPanel performs full right-panel teardown: stops log stream,
@@ -1075,9 +1083,8 @@ func (a App) closeFocusedSplit() (App, tea.Cmd) {
 	if tp, ok := a.layout.FocusedPane().(*ui.TerminalPane); ok {
 		note := a.ephemeralCloseNote(tp.ID())
 		a.closeTerminalSession(tp.ID())
-		var cmd tea.Cmd
 		if note != "" {
-			cmd = a.statusBar.SetError(note)
+			a.notify.Add(notify.LevelWarning, note, a.contextFor(nil), "debug")
 		}
 		a.keyTrie.Reset()
 		a.layout.CloseCurrentSplit()
@@ -1089,7 +1096,7 @@ func (a App) closeFocusedSplit() (App, tea.Cmd) {
 		// AFTER CloseCurrentSplit so the just-closed pane is no longer counted.
 		a.mgr.SyncRefs(a.paneContexts())
 		a.syncTerminalSizes()
-		return a, cmd
+		return a, nil
 	}
 
 	closing := a.layout.FocusedSplit()
@@ -1130,8 +1137,8 @@ func (a App) closeFocusedSplit() (App, tea.Cmd) {
 func (a App) openExecTerminal(client *k8s.Client, podName, containerName, ns, ctxName, title string) (tea.Model, tea.Cmd) {
 	exec, err := a.execExecutorFn(client, podName, containerName, ns, a.config.ExecCommand())
 	if err != nil {
-		cmd := a.statusBar.SetError("exec: " + err.Error())
-		return a, cmd
+		a.notify.Add(notify.LevelError, "exec: "+err.Error(), ctxName, "exec")
+		return a, nil
 	}
 
 	a.termSeq++
@@ -1281,8 +1288,8 @@ func (a App) handleGoto(resourceName string, targetNs string) (tea.Model, tea.Cm
 		p, ok = plugin.ByName(resourceName)
 	}
 	if !ok {
-		cmd := a.statusBar.SetError(fmt.Sprintf("unknown resource: %s", resourceName))
-		return a, cmd
+		a.notify.Add(notify.LevelError, fmt.Sprintf("unknown resource: %s", resourceName), a.contextFor(nil), "goto")
+		return a, nil
 	}
 	return a.handleGotoPlugin(p, targetNs)
 }
@@ -1335,13 +1342,13 @@ func (a App) handleGotoGVR(gvrStr string) (tea.Model, tea.Cmd) {
 		// version/resource (core group, group="")
 		gvr = schema.GroupVersionResource{Version: parts[0], Resource: parts[1]}
 	default:
-		cmd := a.statusBar.SetError(fmt.Sprintf("invalid GVR format: %s (expected group/version/resource or version/resource)", gvrStr))
-		return a, cmd
+		a.notify.Add(notify.LevelError, fmt.Sprintf("invalid GVR format: %s (expected group/version/resource or version/resource)", gvrStr), a.contextFor(nil), "goto")
+		return a, nil
 	}
 	p, ok := plugin.ByGVR(gvr)
 	if !ok {
-		cmd := a.statusBar.SetError(fmt.Sprintf("unknown GVR: %s", gvrStr))
-		return a, cmd
+		a.notify.Add(notify.LevelError, fmt.Sprintf("unknown GVR: %s", gvrStr), a.contextFor(nil), "goto")
+		return a, nil
 	}
 	return a.handleGotoPlugin(p, "")
 }
@@ -1349,8 +1356,8 @@ func (a App) handleGotoGVR(gvrStr string) (tea.Model, tea.Cmd) {
 func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 	p, ok := plugin.ByName(resourceName)
 	if !ok {
-		cmd := a.statusBar.SetError(fmt.Sprintf("unknown resource: %s", resourceName))
-		return a, cmd
+		a.notify.Add(notify.LevelError, fmt.Sprintf("unknown resource: %s", resourceName), a.contextFor(nil), "split")
+		return a, nil
 	}
 
 	if a.layout.AnyZoomed() {
@@ -1416,8 +1423,8 @@ func (a App) syncContextPaneCounts() {
 func (a App) handleGotoContexts() (tea.Model, tea.Cmd) {
 	p, ok := a.contextsPlugin()
 	if !ok {
-		cmd := a.statusBar.SetError("contexts view unavailable")
-		return a, cmd
+		a.notify.Add(notify.LevelError, "contexts view unavailable", a.contextFor(nil), "contexts")
+		return a, nil
 	}
 
 	focused := a.layout.FocusedSplit()
@@ -1488,7 +1495,8 @@ func (a App) handlePaneSwitchContext(ctxName string) (tea.Model, tea.Cmd) {
 			// contexts list) and surface the failure rather than silently keeping the
 			// contexts view after the switch.
 			focused.ResetNav()
-			return a, a.statusBar.SetError("cannot switch context: 'pods' plugin not registered")
+			a.notify.Add(notify.LevelError, "cannot switch context: 'pods' plugin not registered", a.contextFor(focused), "context")
+			return a, nil
 		}
 	}
 
@@ -1595,8 +1603,8 @@ func (a App) handleViewHelmValues(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
 	// `helm-rollback`): surface an explicit status when no helm client is
 	// configured rather than silently falling through to the manifest path.
 	if a.helmClientForFocused() == nil {
-		cmd := a.statusBar.SetError("helm: no client")
-		return a, cmd
+		a.notify.Add(notify.LevelError, "helm: no client", a.contextFor(focused), "helm")
+		return a, nil
 	}
 
 	a.lastDetailKey = ""
@@ -1624,14 +1632,14 @@ func (a App) handleResourcePickerCommand(input string) (tea.Model, tea.Cmd) {
 		if len(parts) >= 2 {
 			return a.handleGoto(parts[1], "")
 		}
-		cmd := a.statusBar.SetError("usage: goto <resource>")
-		return a, cmd
+		a.notify.Add(notify.LevelError, "usage: goto <resource>", a.contextFor(nil), "goto")
+		return a, nil
 	case "goto-gvr":
 		if len(parts) >= 2 {
 			return a.handleGotoGVR(parts[1])
 		}
-		cmd := a.statusBar.SetError("usage: goto-gvr <group/version/resource>")
-		return a, cmd
+		a.notify.Add(notify.LevelError, "usage: goto-gvr <group/version/resource>", a.contextFor(nil), "goto")
+		return a, nil
 	default:
 		return a.handleGoto(parts[0], "")
 	}
@@ -1719,7 +1727,6 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	}
 
 	// Update status bar
-	a.statusBar.SetError("") // clear immediately, no cmd needed
 	a.statusBar.SetHints(a.currentHints())
 	a = a.syncIndicators()
 
@@ -1879,8 +1886,8 @@ func (a App) handleGroupContextSwitch(ctx string) (tea.Model, tea.Cmd) {
 
 	// Dial off-thread; handleClusterReady completes the switch and populates the
 	// retargeted group when msgs.ClusterReadyMsg arrives.
-	cmd := a.statusBar.SetWarning(fmt.Sprintf("connecting to %s…", ctx))
-	return a, tea.Batch(cmd, asyncConnectCmd(a.mgr, ctx))
+	a.notify.Add(notify.LevelInfo, fmt.Sprintf("connecting to %s…", ctx), ctx, "context")
+	return a, asyncConnectCmd(a.mgr, ctx)
 }
 
 // storeForContext returns the informer store for a given context name without
@@ -1998,8 +2005,8 @@ func (a App) handlePaneContextSwitch(ctxName string) (tea.Model, tea.Cmd) {
 	// (offline until the dial resolves in handleClusterReady).
 	a = a.setStatusBarContext(ctxName)
 
-	cmd := a.statusBar.SetWarning(fmt.Sprintf("connecting to %s…", ctxName))
-	return a, tea.Batch(cmd, asyncConnectCmd(a.mgr, ctxName))
+	a.notify.Add(notify.LevelInfo, fmt.Sprintf("connecting to %s…", ctxName), ctxName, "context")
+	return a, asyncConnectCmd(a.mgr, ctxName)
 }
 
 // paneContexts returns the multiset of contexts currently referenced by some
@@ -2045,8 +2052,8 @@ func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			errMsg = fmt.Sprintf("context %s: %s", msg.Context, msg.Err)
 		}
-		cmd := a.statusBar.SetError(errMsg)
-		return a, cmd
+		a.notify.Add(notify.LevelError, errMsg, msg.Context, "context")
+		return a, nil
 	}
 
 	// Install the dialed client on the Update goroutine. RegisterConnected returns
@@ -2075,17 +2082,11 @@ func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 		a.syncPaneFooters()
-		cmd := a.statusBar.SetError(fmt.Sprintf("context %s: failed to connect", msg.Context))
-		return a, cmd
+		a.notify.Add(notify.LevelError, fmt.Sprintf("context %s: failed to connect", msg.Context), msg.Context, "context")
+		return a, nil
 	}
 
 	var cmds []tea.Cmd
-
-	// Clear the transient "connecting…" warning set by the (group/pane) context
-	// switch. SetError("") below only clears the error slot, not the warning slot,
-	// so without this the "connecting…" banner would linger for its full 5s
-	// timeout after the connect already succeeded.
-	a.statusBar.SetWarning("")
 
 	// Arm discovery + heartbeat only on the cluster's first connect.
 	if newlyConnected && cl.Client() != nil {
@@ -2124,7 +2125,7 @@ func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 		if gvr.Group != "_ktui" && cl.Discovery() != nil && !cl.Discovery().IsEmpty() {
 			if _, known := cl.Discovery().KindForGVR(gvr); !known {
 				split.SetObjects(nil)
-				cmds = append(cmds, a.statusBar.SetWarning(fmt.Sprintf("%s not available on %s", gvr.Resource, msg.Context)))
+				a.notify.Add(notify.LevelWarning, fmt.Sprintf("%s not available on %s", gvr.Resource, msg.Context), msg.Context, "discovery")
 				continue
 			}
 		}
@@ -2144,8 +2145,9 @@ func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 	// on the now-connected context its online color flips to green.
 	a = a.syncStatusBarContext()
 
-	// Clear the transient "connecting…" status now that we are live.
-	a.statusBar.SetError("")
+	// The dial is live: surface a success note (it also supersedes the transient
+	// "connecting…" toast for this context).
+	a.notify.Add(notify.LevelInfo, fmt.Sprintf("connected to %s", msg.Context), msg.Context, "context")
 
 	var dc tea.Cmd
 	a, dc = a.refreshDetailPanel()
@@ -2320,7 +2322,7 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 	}
 	debugClient := a.clientForFocused()
 	if debugClient == nil {
-		a.statusBar.SetError("debug: no k8s client")
+		a.notify.Add(notify.LevelError, "debug: no k8s client", a.contextFor(focused), "debug")
 		return a, nil
 	}
 
@@ -2384,7 +2386,12 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 func (a App) executePendingDebug(dbg *pendingDebugAction) (tea.Model, tea.Cmd) {
 	client := a.clientForFocused()
 	if client == nil {
-		a.statusBar.SetError("debug: no k8s client")
+		// Mirror handleDebug's "debug: no k8s client" error: tag it with the
+		// focused split's context. contextFor(focused) and contextFor(nil) both
+		// resolve to the focused split here, but read it explicitly so the two
+		// duplicate sites match.
+		focused := a.layout.FocusedSplit()
+		a.notify.Add(notify.LevelError, "debug: no k8s client", a.contextFor(focused), "debug")
 		return a, nil
 	}
 	if dbg.nodeMode {
@@ -2396,7 +2403,7 @@ func (a App) executePendingDebug(dbg *pendingDebugAction) (tea.Model, tea.Cmd) {
 func (a App) handleSearchSubmitted(msg msgs.SearchSubmittedMsg) (tea.Model, tea.Cmd) {
 	target := a.searchTarget()
 	if target == nil {
-		a.statusBar.SetError("no active panel to search")
+		a.notify.Add(notify.LevelError, "no active panel to search", a.contextFor(nil), "search")
 		return a, nil
 	}
 	return a.applySearchToTarget(target, msg.Pattern, msg.Mode)
@@ -2416,14 +2423,13 @@ func (a App) handleSearchApply(msg msgs.SearchApplyMsg) (tea.Model, tea.Cmd) {
 }
 
 // applySearchToTarget applies a search/filter to target and handles the shared
-// error-reporting and detail-panel refresh. On compile error it reports to the
-// status bar; on success it clears the status bar and, when the resource list is
-// focused, refreshes the detail panel.
+// error-reporting and detail-panel refresh. On compile error it records a notify
+// message; on success it, when the resource list is focused, refreshes the
+// detail panel.
 func (a App) applySearchToTarget(target ui.Searchable, pattern string, mode msgs.SearchMode) (tea.Model, tea.Cmd) {
 	if err := target.ApplySearch(pattern, mode); err != nil {
-		a.statusBar.SetError("invalid regex: " + err.Error())
+		a.notify.Add(notify.LevelError, "invalid regex: "+err.Error(), a.contextFor(nil), "search")
 	} else {
-		a.statusBar.SetError("")
 		if a.layout.FocusedResources() {
 			var descCmd tea.Cmd
 			a, descCmd = a.refreshDetailPanel()
@@ -2448,10 +2454,6 @@ func (a App) handleSearchChanged(msg msgs.SearchChangedMsg) (tea.Model, tea.Cmd)
 			target.ClearSearch()
 		}
 		a.searchBar.SetError("")
-		// Clear any stale "invalid regex" error left in the status bar by a
-		// previous non-empty (apply/submit) path; that is where regex errors
-		// are reported, so clearing searchBar alone leaves it visible.
-		a.statusBar.SetError("")
 		if a.layout.FocusedResources() {
 			var descCmd tea.Cmd
 			a, descCmd = a.refreshDetailPanel()
@@ -2684,12 +2686,12 @@ func watchPortForwardDone(id string, h msgs.PortForwardHandle) tea.Cmd {
 func (a App) handleRunCommand(run *config.RunConfig) (tea.Model, tea.Cmd) {
 	focused := a.layout.FocusedSplit()
 	if focused == nil || focused.Selected() == nil {
-		a.statusBar.SetError("run: no resource selected")
+		a.notify.Add(notify.LevelError, "run: no resource selected", a.contextFor(nil), "run")
 		return a, nil
 	}
 	expanded, err := a.substituteVars(run.Command)
 	if err != nil {
-		a.statusBar.SetError(err.Error())
+		a.notify.Add(notify.LevelError, err.Error(), a.contextFor(focused), "run")
 		return a, nil
 	}
 	if run.Confirm {

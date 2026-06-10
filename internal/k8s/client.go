@@ -16,17 +16,21 @@ import (
 )
 
 // warningHandler captures K8s API warnings and forwards them to the TUI.
+// context names the cluster context this handler belongs to, so emitted
+// WarningMsgs are tagged with the originating cluster.
 type warningHandler struct {
-	mu   sync.Mutex
-	send func(tea.Msg)
+	mu      sync.Mutex
+	send    func(tea.Msg)
+	context string
 }
 
 func (h *warningHandler) HandleWarningHeader(_ int, _ string, text string) {
 	h.mu.Lock()
 	send := h.send
+	ctx := h.context
 	h.mu.Unlock()
 	if send != nil {
-		send(msgs.WarningMsg{Text: text})
+		send(msgs.WarningMsg{Text: text, Context: ctx})
 	}
 }
 
@@ -89,6 +93,12 @@ func NewClient(kubeconfigPath, contextOverride, namespaceOverride string) (*Clie
 	if contextOverride != "" {
 		currentCtx = contextOverride
 	}
+
+	// Tag the warning handler with the resolved context so warnings it forwards
+	// carry the originating cluster name.
+	wh.mu.Lock()
+	wh.context = currentCtx
+	wh.mu.Unlock()
 
 	namespace := "default"
 	if namespaceOverride != "" {

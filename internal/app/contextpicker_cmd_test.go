@@ -32,7 +32,7 @@ func newContextTestApp(t *testing.T, ctxNames ...string) App {
 	km := config.DefaultKeymap()
 	cfg := config.DefaultConfig()
 	plugin.Reset()
-	return New(mgr, km, cfg, nil, nil, nil, nil, layout.OrientationVertical, startup)
+	return New(mgr, km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, startup)
 }
 
 func TestExecuteCommandContextPicker(t *testing.T) {

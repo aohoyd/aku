@@ -31,6 +31,28 @@ func TestKeyTrieSequenceGP(t *testing.T) {
 	}
 }
 
+func TestKeyTrieSequenceGM(t *testing.T) {
+	trie := DefaultKeyTrie()
+
+	cmd, _, resolved := trie.Press("g")
+	if resolved {
+		t.Fatal("'g' should not resolve immediately")
+	}
+
+	cmd, _, resolved = trie.Press("m")
+	if !resolved || cmd != "goto-aku-messages" {
+		t.Fatalf("expected resolved 'goto-aku-messages', got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
+func TestKeyTrieCtrlXClearNotifications(t *testing.T) {
+	trie := DefaultKeyTrie()
+	cmd, _, resolved := trie.Press("ctrl+x")
+	if !resolved || cmd != "clear-notifications" {
+		t.Fatalf("expected resolved 'clear-notifications', got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
 func TestKeyTrieSingleKeyYamlFocused(t *testing.T) {
 	trie := DefaultKeyTrie()
 	cmd, _, resolved := trie.Press("y")

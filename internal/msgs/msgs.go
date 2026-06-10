@@ -89,9 +89,12 @@ type ErrMsg struct {
 
 func (e ErrMsg) Error() string { return e.Err.Error() }
 
-// WarningMsg carries a Kubernetes API warning for display in the status bar.
+// WarningMsg carries a Kubernetes API warning. Context names the cluster context
+// that produced the warning (empty when unknown), so the notify store can tag
+// the message with its originating cluster.
 type WarningMsg struct {
-	Text string
+	Text    string
+	Context string
 }
 
 // SearchMode controls whether the search bar searches or filters.
@@ -328,11 +331,25 @@ type SearchApplyMsg struct {
 	Mode    SearchMode
 }
 
-// StatusBarClearErrorMsg signals the status bar to hide the error message.
-type StatusBarClearErrorMsg struct{}
+// MessageAddedMsg signals a new message was appended to the notify store.
+// ID identifies the message; Level is the int form of notify.Level (kept as a
+// plain int to keep the msgs package free of a notify import — notify imports
+// msgs, never the reverse).
+type MessageAddedMsg struct {
+	ID    uint64
+	Level int
+}
 
-// StatusBarClearWarningMsg signals the status bar to hide the warning message.
-type StatusBarClearWarningMsg struct{}
+// ToastExpiredMsg is sent by a per-toast tea.Tick once the level's TTL has
+// elapsed. ID identifies the toast; the App drops only the matching ID from the
+// live set, leaving other live toasts and the message history untouched.
+type ToastExpiredMsg struct {
+	ID uint64
+}
+
+// ClearNotificationsMsg is emitted by the clear-notifications command to dismiss
+// all currently-live toasts at once. The message history is untouched.
+type ClearNotificationsMsg struct{}
 
 // StatusBarShowSpinnerMsg signals the status bar to show the spinner after a delay.
 type StatusBarShowSpinnerMsg struct{}

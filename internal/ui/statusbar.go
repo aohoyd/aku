@@ -17,18 +17,14 @@ const maxContextWidth = 24
 
 // StatusBar displays context-sensitive key help at the bottom.
 type StatusBar struct {
-	hints          []config.KeyHint
-	indicator      string
-	errText        string
-	errorVisible   bool
-	warning        string
-	warningVisible bool
-	width          int
-	spinner        spinner.Model
-	online         bool
-	inflight       int
-	showSpinner    bool
-	contextName    string
+	hints       []config.KeyHint
+	indicator   string
+	width       int
+	spinner     spinner.Model
+	online      bool
+	inflight    int
+	showSpinner bool
+	contextName string
 }
 
 func NewStatusBar(width int) StatusBar {
@@ -43,44 +39,6 @@ func (s *StatusBar) SetHints(hints []config.KeyHint) {
 
 func (s *StatusBar) ClearHints() {
 	s.hints = nil
-}
-
-func (s *StatusBar) SetError(err string) tea.Cmd {
-	s.errText = err
-	if err == "" {
-		s.errorVisible = false
-		return nil
-	}
-	s.errorVisible = true
-	return tea.Tick(3*time.Second, func(time.Time) tea.Msg {
-		return msgs.StatusBarClearErrorMsg{}
-	})
-}
-
-// ErrText returns the current error text. Empty when no error is set or
-// after the error has been cleared. Intended for tests that need to assert
-// the message passed to SetError.
-func (s *StatusBar) ErrText() string {
-	return s.errText
-}
-
-// WarningText returns the current warning text. Empty when no warning is
-// set or after the warning has been cleared. Intended for tests that need
-// to assert the message passed to SetWarning.
-func (s *StatusBar) WarningText() string {
-	return s.warning
-}
-
-func (s *StatusBar) SetWarning(w string) tea.Cmd {
-	s.warning = w
-	if w == "" {
-		s.warningVisible = false
-		return nil
-	}
-	s.warningVisible = true
-	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
-		return msgs.StatusBarClearWarningMsg{}
-	})
 }
 
 func (s *StatusBar) SetIndicator(ind string) {
@@ -158,10 +116,6 @@ func (s *StatusBar) Busy() bool {
 
 func (s *StatusBar) Update(msg tea.Msg) tea.Cmd {
 	switch msg.(type) {
-	case msgs.StatusBarClearErrorMsg:
-		s.errorVisible = false
-	case msgs.StatusBarClearWarningMsg:
-		s.warningVisible = false
 	case msgs.StatusBarShowSpinnerMsg:
 		if s.inflight > 0 {
 			s.showSpinner = true
@@ -203,24 +157,6 @@ func (s StatusBar) View() string {
 	line = healthSlot
 	if s.indicator != "" {
 		line += s.indicator
-	}
-
-	// Show error if visible
-	if s.errText != "" && s.errorVisible {
-		if line != "" {
-			line += " "
-		}
-		line += StatusErrorStyle.Render(s.errText)
-		return StatusBarStyle.Width(s.width).Render(line)
-	}
-
-	// Show warning if visible
-	if s.warning != "" && s.warningVisible {
-		if line != "" {
-			line += " "
-		}
-		line += StatusWarningStyle.Render(s.warning)
-		return StatusBarStyle.Width(s.width).Render(line)
 	}
 
 	// Build hints — fill available width, then "? more" if truncated

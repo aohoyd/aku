@@ -71,6 +71,8 @@ func TestAllMsgTypes(t *testing.T) {
 		SetImageRequestedMsg{},
 		LogLineMsg{Line: "test", Gen: 1},
 		LogStreamEndedMsg{Gen: 1},
+		ToastExpiredMsg{ID: 1},
+		ClearNotificationsMsg{},
 	}
 	for i, msg := range messages {
 		if msg == nil {

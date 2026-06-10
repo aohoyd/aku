@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/aohoyd/aku/internal/config"
+	"github.com/aohoyd/aku/internal/msgs"
 )
 
 func TestStatusBarRenderHints(t *testing.T) {
@@ -28,15 +29,6 @@ func TestStatusBarClearHints(t *testing.T) {
 	sb.SetHints([]config.KeyHint{{Key: "q", Help: "quit"}})
 	sb.ClearHints()
 	_ = sb.View() // should not panic
-}
-
-func TestStatusBarError(t *testing.T) {
-	sb := NewStatusBar(80)
-	sb.SetError("something went wrong")
-	view := sb.View()
-	if !strings.Contains(view, "something went wrong") {
-		t.Fatal("status bar should display error")
-	}
 }
 
 func TestStatusBarHintLimit(t *testing.T) {
@@ -183,6 +175,39 @@ func TestStatusBarStartOperationReturnsTick(t *testing.T) {
 	cmd2 := sb.StartOperation()
 	if cmd2 != nil {
 		t.Fatal("second StartOperation should return nil")
+	}
+}
+
+func TestStatusBarViewShowsSpinnerWhenActive(t *testing.T) {
+	sb := NewStatusBar(80)
+	sb.SetContextName("minikube")
+	sb.SetHints([]config.KeyHint{{Key: "q", Help: "quit"}})
+
+	// An operation is in flight and the delayed show-spinner message has arrived,
+	// so the spinner becomes visible alongside the context badge and key hints.
+	sb.StartOperation()
+	sb.Update(msgs.StatusBarShowSpinnerMsg{})
+
+	view := sb.View()
+	if !strings.Contains(view, sb.spinner.View()) {
+		t.Fatal("status bar view should render the spinner while an operation is active")
+	}
+	if !strings.Contains(view, "minikube") {
+		t.Fatal("status bar should still render the context badge with the spinner")
+	}
+	if !strings.Contains(view, "quit") {
+		t.Fatal("status bar should still render key hints with the spinner")
+	}
+}
+
+func TestStatusBarViewHidesSpinnerWhenIdle(t *testing.T) {
+	sb := NewStatusBar(80)
+	sb.SetContextName("minikube")
+	// No StartOperation/show-spinner message: the spinner stays hidden and only
+	// the badge + hints render.
+	view := sb.View()
+	if strings.Contains(view, sb.spinner.View()) {
+		t.Fatal("status bar view should not render the spinner when no operation is active")
 	}
 }
 

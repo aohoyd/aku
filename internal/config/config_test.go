@@ -7,6 +7,16 @@ import (
 	"time"
 )
 
+// Toast level int values, matching notify.Level's iota order. config_test must
+// not import internal/notify (it would create an import cycle), so the tests
+// reference the exported config.ToastLevel* constants directly (in-package,
+// hence unqualified) rather than redefining the magic numbers.
+const (
+	testLevelInfo    = ToastLevelInfo
+	testLevelWarning = ToastLevelWarning
+	testLevelError   = ToastLevelError
+)
+
 func TestChartRefLookup(t *testing.T) {
 	cfg := &Config{
 		Charts: map[string]map[string]string{
@@ -315,6 +325,132 @@ func TestLoadConfigThemeOmitted(t *testing.T) {
 	}
 	if cfg.Theme != "" {
 		t.Fatalf("omitted theme should yield empty string, got %q", cfg.Theme)
+	}
+}
+
+func TestNotifyDefaults(t *testing.T) {
+	c := &Config{}
+	if got := c.NotifyBufferSize(); got != 1000 {
+		t.Fatalf("default NotifyBufferSize should be 1000, got %d", got)
+	}
+	if got := c.NotifyMaxVisible(); got != 5 {
+		t.Fatalf("default NotifyMaxVisible should be 5, got %d", got)
+	}
+	if got := c.ToastTTL(testLevelInfo); got != 3*time.Second {
+		t.Fatalf("default info TTL should be 3s, got %v", got)
+	}
+	if got := c.ToastTTL(testLevelWarning); got != 5*time.Second {
+		t.Fatalf("default warning TTL should be 5s, got %v", got)
+	}
+	if got := c.ToastTTL(testLevelError); got != 8*time.Second {
+		t.Fatalf("default error TTL should be 8s, got %v", got)
+	}
+}
+
+func TestNotifyOverrides(t *testing.T) {
+	c := &Config{}
+	c.Notifications.BufferSize = 50
+	c.Notifications.MaxVisible = 2
+	c.Notifications.TimeoutInfo = 1
+	c.Notifications.TimeoutWarning = 2
+	c.Notifications.TimeoutError = 4
+	if got := c.NotifyBufferSize(); got != 50 {
+		t.Fatalf("custom NotifyBufferSize should be 50, got %d", got)
+	}
+	if got := c.NotifyMaxVisible(); got != 2 {
+		t.Fatalf("custom NotifyMaxVisible should be 2, got %d", got)
+	}
+	if got := c.ToastTTL(testLevelInfo); got != 1*time.Second {
+		t.Fatalf("custom info TTL should be 1s, got %v", got)
+	}
+	if got := c.ToastTTL(testLevelWarning); got != 2*time.Second {
+		t.Fatalf("custom warning TTL should be 2s, got %v", got)
+	}
+	if got := c.ToastTTL(testLevelError); got != 4*time.Second {
+		t.Fatalf("custom error TTL should be 4s, got %v", got)
+	}
+}
+
+func TestNotifyNonPositiveBufferAndVisible(t *testing.T) {
+	c := &Config{}
+	c.Notifications.BufferSize = -5
+	c.Notifications.MaxVisible = -1
+	if got := c.NotifyBufferSize(); got != 1000 {
+		t.Fatalf("negative NotifyBufferSize should fall back to 1000, got %d", got)
+	}
+	if got := c.NotifyMaxVisible(); got != 5 {
+		t.Fatalf("negative NotifyMaxVisible should fall back to 5, got %d", got)
+	}
+}
+
+// TestToastTTLSticky documents the sticky semantics: a NEGATIVE timeout (e.g.
+// -1) yields a zero Duration, which notify.Store.Live treats as never
+// auto-hiding. A configured 0 is indistinguishable from unset (omitempty) and so
+// maps to the per-level default, not sticky.
+func TestToastTTLSticky(t *testing.T) {
+	c := &Config{}
+	c.Notifications.TimeoutError = -1
+	if got := c.ToastTTL(testLevelError); got != 0 {
+		t.Fatalf("TimeoutError=-1 should yield 0 (sticky), got %v", got)
+	}
+
+	// A zero (== unset under omitempty) falls back to the default, not sticky.
+	c.Notifications.TimeoutError = 0
+	if got := c.ToastTTL(testLevelError); got != 8*time.Second {
+		t.Fatalf("TimeoutError=0 should fall back to default 8s, got %v", got)
+	}
+}
+
+func TestLoadConfigWithNotifications(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte("notifications:\n  buffer_size: 250\n  max_visible: 3\n  timeout_info: 2\n  timeout_warning: 6\n  timeout_error: -1\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.NotifyBufferSize(); got != 250 {
+		t.Fatalf("loaded NotifyBufferSize = %d, want 250", got)
+	}
+	if got := cfg.NotifyMaxVisible(); got != 3 {
+		t.Fatalf("loaded NotifyMaxVisible = %d, want 3", got)
+	}
+	if got := cfg.ToastTTL(testLevelInfo); got != 2*time.Second {
+		t.Fatalf("loaded info TTL = %v, want 2s", got)
+	}
+	if got := cfg.ToastTTL(testLevelWarning); got != 6*time.Second {
+		t.Fatalf("loaded warning TTL = %v, want 6s", got)
+	}
+	if got := cfg.ToastTTL(testLevelError); got != 0 {
+		t.Fatalf("loaded error TTL = %v, want 0 (sticky)", got)
+	}
+}
+
+func TestLoadConfigNotificationsOmittedUsesDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	data := []byte("mouse:\n  enabled: true\n")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.NotifyBufferSize(); got != 1000 {
+		t.Fatalf("omitted NotifyBufferSize should default to 1000, got %d", got)
+	}
+	if got := cfg.NotifyMaxVisible(); got != 5 {
+		t.Fatalf("omitted NotifyMaxVisible should default to 5, got %d", got)
+	}
+	if got := cfg.ToastTTL(testLevelInfo); got != 3*time.Second {
+		t.Fatalf("omitted info TTL should default to 3s, got %v", got)
+	}
+	if got := cfg.ToastTTL(testLevelError); got != 8*time.Second {
+		t.Fatalf("omitted error TTL should default to 8s, got %v", got)
 	}
 }
 
