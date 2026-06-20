@@ -573,6 +573,44 @@ func TestMidnightCommanderGolden(t *testing.T) {
 	}
 }
 
+func TestKakuDarkGolden(t *testing.T) {
+	path := filepath.Join("..", "..", "themes", "kaku-dark.yaml")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("shipped theme file missing at %s: %v", path, err)
+	}
+
+	defer snapshotColors()()
+
+	if err := Load(path); err != nil {
+		t.Fatalf("Load(%s): %v", path, err)
+	}
+
+	checks := []struct {
+		name string
+		got  Color
+		want Color
+	}{
+		{"Background", Background, "#15141B"},
+		{"Accent", Accent, "#8E6AD9"},
+		{"Highlight", Highlight, "#DAAE76"},
+		{"Foreground", Foreground, "#D5D4D6"},
+		// Representative coverage across every theme section.
+		{"Muted", Muted, "#6D6D6D"},
+		{"TextOnAccent", TextOnAccent, "#15141B"},
+		{"Error", Error, "#D85D5D"},
+		{"Selection", Selection, "#DAAE76"},
+		{"StatusRunning", StatusRunning, "#58D8AD"},
+		{"SyntaxKey", SyntaxKey, "#68AFDA"},
+		{"SearchMatch", SearchMatch, "#DAAE76"},
+		{"LogIP", LogIP, "#90C9E6"},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestLoadPartialOverrideLog(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "theme.yaml")

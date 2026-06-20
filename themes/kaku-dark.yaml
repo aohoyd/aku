@@ -1,0 +1,45 @@
+# Kaku Dark theme for aku.
+# Based on the Kaku terminal's dark palette (github.com/tw93/Kaku):
+# deep #15141B canvas, purple cursor accent, sand-orange highlights.
+# Install:
+#   mkdir -p ~/.config/aku/themes/
+#   cp themes/kaku-dark.yaml ~/.config/aku/themes/
+# then set
+#   theme: kaku-dark
+# in ~/.config/aku/config.yaml.
+ui:
+  background: "#15141B"      # Kaku canvas
+  foreground: "#D5D4D6"      # dimmed white body text
+  accent: "#8E6AD9"          # purple — focused border, selection bg (Kaku cursor)
+  muted: "#6D6D6D"           # gray — unfocused border, help text
+  highlight: "#DAAE76"       # sand orange — titles, keys, table header, cursor
+  text_on_accent: "#15141B"  # dark text on purple, matches Kaku cursor_fg
+  error: "#D85D5D"
+  warning: "#DAAE76"
+  subtle: "#3D375E"          # faded selection purple — markers, connectors
+  prompt: "#6D6D6D"
+  selection: "#DAAE76"       # multi-select marker
+  context_online: "#58D8AD"
+  context_offline: "#D85D5D"
+status:
+  running: "#58D8AD"
+  succeeded: "#6D6D6D"
+  pending: "#DAAE76"
+  failed: "#D85D5D"
+syntax:
+  key: "#68AFDA"
+  string: "#58D8AD"
+  number: "#D383DA"
+  bool: "#8E6AD9"
+  null: "#6D6D6D"
+  marker: "#3D375E"
+  value: "#D5D4D6"
+search:
+  match: "#DAAE76"
+  selected: "#8E6AD9"
+  fg: "#15141B"
+log:
+  timestamp: "#DAAE76"
+  time: "#68AFDA"
+  timezone: "#6D6D6D"
+  ip: "#90C9E6"
