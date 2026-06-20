@@ -22,8 +22,10 @@ type Model struct {
 	Help   help.Model
 
 	// RowStyleFunc is an optional callback that returns a style override for a given row index.
-	// When set, if it returns non-nil for a row, that style is used instead of the default.
-	// For cursor rows (isCursor=true), it takes priority over styles.Selected.
+	// When set and it returns non-nil for a row, that style is used instead of the default.
+	// For the cursor row (isCursor=true): returning nil lets the default
+	// styles.Selected apply (selection wins), while returning a non-nil style
+	// overrides even the cursor highlight. See renderRow for the exact behavior.
 	RowStyleFunc func(index int, isCursor bool) *lipgloss.Style
 
 	cols   []Column
@@ -580,11 +582,17 @@ func (m *Model) renderRow(r int) string {
 		}
 	}
 
-	// Apply selection/row style AFTER clipping so background covers padding
+	// Apply selection/row style AFTER clipping so background covers padding.
+	// A whole-row override (health tint / mark) applies a single foreground over
+	// the entire row, so per-cell color SGRs must be removed first — otherwise an
+	// inner cell color would override the tint mid-row. We strip cell styling but
+	// preserve reverse-video toggles (SGR 7/27) so an active search-match highlight
+	// stays visible on tinted rows; reverse video swaps fg/bg and reads correctly
+	// over any tint.
 	if r == m.cursor {
 		if m.RowStyleFunc != nil {
 			if override := m.RowStyleFunc(r, true); override != nil {
-				return override.Render(row)
+				return override.Render(stripStyleKeepReverse(row))
 			}
 		}
 		return m.styles.Selected.Render(row)
@@ -592,11 +600,91 @@ func (m *Model) renderRow(r int) string {
 
 	if m.RowStyleFunc != nil {
 		if override := m.RowStyleFunc(r, false); override != nil {
-			return override.Render(row)
+			return override.Render(stripStyleKeepReverse(row))
 		}
 	}
 
 	return row
+}
+
+// stripStyleKeepReverse removes ANSI styling from s but preserves reverse-video
+// toggles (SGR 7 "\x1b[7m" and SGR 27 "\x1b[27m"). This lets a whole-row tint
+// span uniformly while keeping reverse-video search-match highlights visible.
+func stripStyleKeepReverse(s string) string {
+	if !strings.Contains(s, "\x1b") {
+		return s
+	}
+	const (
+		revOn  = "\x1b[7m"
+		revOff = "\x1b[27m"
+	)
+	// Splice the reverse-video markers back into the fully-stripped text by
+	// tracking their positions in visual (stripped) space.
+	type marker struct {
+		visualPos int
+		seq       string
+	}
+	var markers []marker
+	stripped := ansi.Strip(s)
+
+	// vi counts non-escape BYTES of s. ansi.Strip removes only escape
+	// sequences and preserves every non-escape byte in order, so vi equals the
+	// byte offset of the next character into stripped — correct for multi-byte
+	// UTF-8 because we never split a rune (markers land between whole sequences).
+	//
+	// Only CSI SGR sequences ever reach a rendered table cell here: cell colors
+	// come from lipgloss (CSI SGR) and search highlights emit \x1b[7m/\x1b[27m.
+	// No OSC/DCS sequences are produced, so the simple CSI-style skip below is
+	// sufficient; reusing the full ansi parser would add no correctness.
+	oi, vi := 0, 0
+	for oi < len(s) {
+		if s[oi] == '\x1b' && strings.HasPrefix(s[oi:], revOn) {
+			markers = append(markers, marker{vi, revOn})
+			oi += len(revOn)
+			continue
+		}
+		if s[oi] == '\x1b' && strings.HasPrefix(s[oi:], revOff) {
+			markers = append(markers, marker{vi, revOff})
+			oi += len(revOff)
+			continue
+		}
+		if s[oi] == '\x1b' {
+			// Skip any other escape sequence without advancing visual position.
+			oi++
+			for oi < len(s) && !isANSITerminator(s[oi]) {
+				oi++
+			}
+			if oi < len(s) {
+				oi++
+			}
+			continue
+		}
+		oi++
+		vi++
+	}
+
+	if len(markers) == 0 {
+		return stripped
+	}
+
+	var sb strings.Builder
+	sb.Grow(len(stripped) + len(markers)*len(revOff))
+	last := 0
+	for _, mk := range markers {
+		if mk.visualPos > len(stripped) {
+			mk.visualPos = len(stripped)
+		}
+		sb.WriteString(stripped[last:mk.visualPos])
+		sb.WriteString(mk.seq)
+		last = mk.visualPos
+	}
+	sb.WriteString(stripped[last:])
+	return sb.String()
+}
+
+// isANSITerminator reports whether b is the final byte of an ANSI escape sequence.
+func isANSITerminator(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')
 }
 
 func clamp(v, low, high int) int {

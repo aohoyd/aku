@@ -15,6 +15,30 @@ func renderStatus(phase string, notFullyReady bool) string {
 	return plugin.RenderStatus(phase)
 }
 
+// RowHealth classifies the pod's overall state for whole-row tinting:
+// transitional/coming-up phases are Warning (yellow), broken phases — and a
+// Running pod whose containers are not all ready — are Error (red), and
+// finished or fully-ready pods are Healthy (no tint).
+func (p *Plugin) RowHealth(obj *unstructured.Unstructured) plugin.Health {
+	phase := extractPodPhase(obj)
+	switch {
+	case phase == "Succeeded" || phase == "Completed":
+		return plugin.Healthy
+	case plugin.IsFailedPhase(phase):
+		return plugin.Error
+	case plugin.IsPendingPhase(phase):
+		return plugin.Warning
+	case phase == "Running":
+		ready, total := readyCount(obj)
+		if total > 0 && ready < total {
+			return plugin.Error
+		}
+		return plugin.Healthy
+	default:
+		return plugin.Healthy
+	}
+}
+
 // readyCount returns (ready, total) container counts from the pod object.
 func readyCount(obj *unstructured.Unstructured) (int, int) {
 	containers, _, _ := unstructured.NestedSlice(obj.Object, "spec", "containers")

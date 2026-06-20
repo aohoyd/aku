@@ -58,6 +58,15 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	return []string{name, ready, age}
 }
 
+// RowHealth tints the row yellow when fewer replicas are ready than desired and
+// never red: a StatefulSet has no clean error signal, so a failing pod turns red
+// on its own pod row instead.
+func (p *Plugin) RowHealth(obj *unstructured.Unstructured) plugin.Health {
+	ready := int32(workload.GetInt64(obj, "status", "readyReplicas"))
+	desired := int32(workload.GetInt64(obj, "spec", "replicas"))
+	return plugin.WorkloadHealth(ready, desired)
+}
+
 func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 	return plugin.MarshalYAML(obj)
 }

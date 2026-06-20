@@ -362,6 +362,60 @@ func TestDeploymentDrillDownUsesInjectedCluster(t *testing.T) {
 	}
 }
 
+func TestDeploymentRowHealth(t *testing.T) {
+	availableFalse := []any{
+		map[string]any{"type": "Available", "status": "False"},
+	}
+	progressDeadline := []any{
+		map[string]any{"type": "Progressing", "status": "False", "reason": "ProgressDeadlineExceeded"},
+	}
+
+	tests := []struct {
+		name       string
+		desired    int64
+		ready      int64
+		conditions []any
+		noStatus   bool
+		want       plugin.Health
+	}{
+		{name: "all ready", desired: 3, ready: 3, want: plugin.Healthy},
+		{name: "partial ready", desired: 3, ready: 1, want: plugin.Warning},
+		{name: "available false overrides ready", desired: 3, ready: 3, conditions: availableFalse, want: plugin.Error},
+		{name: "available false while unready", desired: 3, ready: 1, conditions: availableFalse, want: plugin.Error},
+		{name: "progress deadline exceeded", desired: 3, ready: 1, conditions: progressDeadline, want: plugin.Error},
+		{name: "scaled to zero", desired: 0, ready: 0, want: plugin.Healthy},
+		{name: "missing status with desired", desired: 2, noStatus: true, want: plugin.Warning},
+		{name: "missing status scaled to zero", desired: 0, noStatus: true, want: plugin.Healthy},
+	}
+
+	p := New().(plugin.HealthReporter)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := makeHealthDeployment(tt.desired, tt.ready, tt.conditions, tt.noStatus)
+			if got := p.RowHealth(obj); got != tt.want {
+				t.Fatalf("RowHealth = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func makeHealthDeployment(desired, ready int64, conditions []any, noStatus bool) *unstructured.Unstructured {
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{"name": "d", "namespace": "default"},
+			"spec":     map[string]any{"replicas": desired},
+		},
+	}
+	if !noStatus {
+		status := map[string]any{"readyReplicas": ready}
+		if conditions != nil {
+			status["conditions"] = conditions
+		}
+		obj.Object["status"] = status
+	}
+	return obj
+}
+
 func makeDeployment(name string, replicas, updated, available int64) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{

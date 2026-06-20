@@ -767,24 +767,42 @@ func (r *ResourceList) SelectedObjects() []*unstructured.Unstructured {
 // rebindRowStyle rebuilds the RowStyleFunc closure with current selected/displayObjects state.
 // Must be called whenever selected or displayObjects changes.
 func (r *ResourceList) rebindRowStyle() {
-	if len(r.selected) == 0 {
+	selected := r.selected
+	display := r.displayObjects
+	reporter, _ := r.plugin.(plugin.HealthReporter)
+	// Fast path: with nothing selected and no health to report, the closure can
+	// only ever return nil, so skip installing it and avoid a per-row call.
+	if len(selected) == 0 && reporter == nil {
 		r.table.RowStyleFunc = nil
 		return
 	}
-	selected := r.selected
-	display := r.displayObjects
 	r.table.RowStyleFunc = func(index int, isCursor bool) *lipgloss.Style {
 		if index < 0 || index >= len(display) {
 			return nil
 		}
-		uid := display[index].GetUID()
-		if _, ok := selected[uid]; !ok {
+		// Marks win over selection and health.
+		if _, ok := selected[display[index].GetUID()]; ok {
+			if isCursor {
+				return &TableMarkedSelectedStyle
+			}
+			return &TableMarkedStyle
+		}
+		// Selection (cursor) wins over health; nil lets the table apply Selected.
+		if isCursor {
 			return nil
 		}
-		if isCursor {
-			return &TableMarkedSelectedStyle
+		// Health tint for non-cursor, unmarked rows.
+		if reporter == nil {
+			return nil
 		}
-		return &TableMarkedStyle
+		switch reporter.RowHealth(display[index]) {
+		case plugin.Warning:
+			return &TableHealthWarnStyle
+		case plugin.Error:
+			return &TableHealthErrorStyle
+		default:
+			return nil
+		}
 	}
 }
 
@@ -961,8 +979,16 @@ func (r *ResourceList) applyVisibleHighlights() {
 
 	for i := start; i < end && i < len(r.displayObjects) && i < len(rows); i++ {
 		row := r.effectiveRow(r.displayObjects[i])
+		// Rows the table will tint with a whole-row override (mark / health) have
+		// their per-cell color stripped at render time, which would also erase a
+		// themed-color match marker. Use reverse-video for those rows so the match
+		// stays visible on the tint; reverse-video survives the strip.
+		reverse := i == cursor
+		if !reverse && r.table.RowStyleFunc != nil && r.table.RowStyleFunc(i, false) != nil {
+			reverse = true
+		}
 		for j, cell := range row {
-			if i == cursor {
+			if reverse {
 				row[j] = HighlightMatches(cell, re)
 			} else {
 				row[j] = HighlightMatchesColor(cell, re)

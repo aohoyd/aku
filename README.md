@@ -258,9 +258,20 @@ syntax:
 
 The example above is partial — it shows a representative subset of keys. The full set of settable keys (all `ui`, `status`, `syntax`, `search`, and `log` fields) is enumerated in the theme source (`internal/theme/theme.go`); any key you omit keeps its default.
 
+The `status.failed` and `status.pending` colors also drive k9s-style whole-row health tinting across pods, containers, deployments, statefulsets, daemonsets, and replicasets. What tints red (`status.failed`) versus yellow (`status.pending`) depends on the resource kind:
+
+- **Pods** classify by pod phase: failure phases (`Failed`, `OOMKilled`, `Terminating`, and prefixes like `Init:*`, `Signal:*`, `ExitCode:*`, plus `CrashLoopBackOff`/`ImagePullBackOff`) tint red; transitional phases (`Pending`, `ContainerCreating`) tint yellow.
+- **Containers** classify by *container state*, not pod phase: a waiting container with a known failure reason (`ErrImagePull`, `ImagePullBackOff`, `CrashLoopBackOff`, `CreateContainerError`, `CreateContainerConfigError`, `InvalidImageName`, `RunContainerError`), a terminated container with a non-zero exit code, or a running-but-not-ready container tints red; any other waiting state (e.g. `ContainerCreating`) tints yellow.
+- **Deployments** tint red on an explicit failure condition — `Available=False` *or* a `Progressing` condition with reason `ProgressDeadlineExceeded` — and otherwise yellow while ready replicas are below desired.
+- **StatefulSets, DaemonSets, ReplicaSets** only ever tint yellow (ready < desired) and never red. Among workloads, only Deployments can go red.
+
+Healthy, fully-ready rows stay default-colored. Precedence is **marks > cursor/selection > health**: a marked row keeps its mark style and a marked cursor row uses a combined mark+cursor style, an unmarked cursor row keeps its selection style, and the health tint applies only to unmarked, non-cursor rows.
+
 `ui.background` and `ui.foreground` set the global terminal background and foreground. Both are unset by default; they're used by full-canvas themes (like Midnight Commander) that paint the whole screen rather than relying on your terminal's own colors.
 
 To install the bundled Midnight Commander theme, create the themes directory and copy `themes/midnight-commander.yaml` from the repo into it (`mkdir -p ~/.config/aku/themes/ && cp themes/midnight-commander.yaml ~/.config/aku/themes/`), then set `theme: midnight-commander` in `config.yaml`. It gives aku a classic blue MC-style canvas.
+
+To install the bundled Kaku Dark theme, copy `themes/kaku-dark.yaml` the same way (`mkdir -p ~/.config/aku/themes/ && cp themes/kaku-dark.yaml ~/.config/aku/themes/`), then set `theme: kaku-dark` in `config.yaml`. It paints a deep `#15141B` canvas with a purple cursor accent and sand-orange highlights, modeled on the [Kaku terminal](https://github.com/tw93/Kaku).
 
 ## Embedded terminals
 

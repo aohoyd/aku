@@ -46,6 +46,11 @@ var (
 	TableMarkedStyle         = lipgloss.NewStyle().Foreground(theme.Selection).Bold(true)
 	TableMarkedSelectedStyle = lipgloss.NewStyle().Background(theme.Accent).Foreground(theme.Selection).Bold(true)
 
+	// TableHealthWarnStyle tints a whole transitional/coming-up row yellow.
+	TableHealthWarnStyle = lipgloss.NewStyle().Foreground(theme.StatusPending)
+	// TableHealthErrorStyle tints a whole broken row red.
+	TableHealthErrorStyle = lipgloss.NewStyle().Foreground(theme.StatusFailed)
+
 	// Detail panel
 	DetailHeaderStyle = lipgloss.NewStyle().Bold(true).Padding(0, 1)
 

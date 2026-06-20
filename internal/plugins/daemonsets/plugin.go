@@ -65,6 +65,15 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	}
 }
 
+// RowHealth tints the row yellow when fewer pods are ready than desired and
+// never red: a DaemonSet has no clean error signal, so a failing pod turns red
+// on its own pod row instead.
+func (p *Plugin) RowHealth(obj *unstructured.Unstructured) plugin.Health {
+	ready := int32(workload.GetInt64(obj, "status", "numberReady"))
+	desired := int32(workload.GetInt64(obj, "status", "desiredNumberScheduled"))
+	return plugin.WorkloadHealth(ready, desired)
+}
+
 func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 	return plugin.MarshalYAML(obj)
 }

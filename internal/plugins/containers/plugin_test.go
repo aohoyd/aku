@@ -104,6 +104,157 @@ func TestPluginRowMissingStatus(t *testing.T) {
 	}
 }
 
+func TestPluginRowHealth(t *testing.T) {
+	p := New().(*Plugin)
+
+	statusObj := func(status map[string]any) *unstructured.Unstructured {
+		o := map[string]any{
+			"metadata": map[string]any{"name": "c"},
+			"_type":    "regular",
+			"_spec":    map[string]any{"name": "c", "image": "nginx"},
+		}
+		if status != nil {
+			o["_status"] = status
+		}
+		return &unstructured.Unstructured{Object: o}
+	}
+
+	tests := []struct {
+		name   string
+		status map[string]any
+		want   plugin.Health
+	}{
+		{
+			name: "running and ready",
+			status: map[string]any{
+				"ready": true,
+				"state": map[string]any{"running": map[string]any{"startedAt": "2026-02-24T10:01:00Z"}},
+			},
+			want: plugin.Healthy,
+		},
+		{
+			name: "running but not ready",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"running": map[string]any{}},
+			},
+			want: plugin.Error,
+		},
+		{
+			name: "waiting CrashLoopBackOff",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}},
+			},
+			want: plugin.Error,
+		},
+		{
+			name: "waiting ImagePullBackOff",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"waiting": map[string]any{"reason": "ImagePullBackOff"}},
+			},
+			want: plugin.Error,
+		},
+		{
+			name: "waiting ErrImagePull",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"waiting": map[string]any{"reason": "ErrImagePull"}},
+			},
+			want: plugin.Error,
+		},
+		{
+			name: "waiting CreateContainerError",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"waiting": map[string]any{"reason": "CreateContainerError"}},
+			},
+			want: plugin.Error,
+		},
+		{
+			name: "waiting CreateContainerConfigError",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"waiting": map[string]any{"reason": "CreateContainerConfigError"}},
+			},
+			want: plugin.Error,
+		},
+		{
+			name: "waiting InvalidImageName",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"waiting": map[string]any{"reason": "InvalidImageName"}},
+			},
+			want: plugin.Error,
+		},
+		{
+			name: "waiting RunContainerError",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"waiting": map[string]any{"reason": "RunContainerError"}},
+			},
+			want: plugin.Error,
+		},
+		{
+			name: "waiting empty reason",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"waiting": map[string]any{}},
+			},
+			want: plugin.Warning,
+		},
+		{
+			name: "waiting ContainerCreating",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"waiting": map[string]any{"reason": "ContainerCreating"}},
+			},
+			want: plugin.Warning,
+		},
+		{
+			name: "terminated exit 0",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"terminated": map[string]any{"reason": "Completed", "exitCode": int64(0)}},
+			},
+			want: plugin.Healthy,
+		},
+		{
+			name: "terminated non-zero exit",
+			status: map[string]any{
+				"ready": false,
+				"state": map[string]any{"terminated": map[string]any{"reason": "Error", "exitCode": int64(1)}},
+			},
+			want: plugin.Error,
+		},
+		{
+			name:   "missing status",
+			status: nil,
+			want:   plugin.Healthy,
+		},
+		{
+			name:   "empty status",
+			status: map[string]any{},
+			want:   plugin.Healthy,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := p.RowHealth(statusObj(tc.status)); got != tc.want {
+				t.Fatalf("RowHealth = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPluginImplementsHealthReporter(t *testing.T) {
+	if _, ok := New().(plugin.HealthReporter); !ok {
+		t.Fatal("Plugin should implement HealthReporter")
+	}
+}
+
 func TestPluginYAML(t *testing.T) {
 	p := New()
 	obj := &unstructured.Unstructured{

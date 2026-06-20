@@ -131,6 +131,59 @@ func TestPluginRowPartial(t *testing.T) {
 	}
 }
 
+func TestPluginRowHealth(t *testing.T) {
+	p := New()
+	tests := []struct {
+		name   string
+		status map[string]any
+		want   plugin.Health
+	}{
+		{
+			name: "all ready",
+			status: map[string]any{
+				"desiredNumberScheduled": int64(3),
+				"numberReady":            int64(3),
+			},
+			want: plugin.Healthy,
+		},
+		{
+			name: "short of ready",
+			status: map[string]any{
+				"desiredNumberScheduled": int64(3),
+				"numberReady":            int64(1),
+			},
+			want: plugin.Warning,
+		},
+		{
+			name: "no nodes scheduled",
+			status: map[string]any{
+				"desiredNumberScheduled": int64(0),
+				"numberReady":            int64(0),
+			},
+			want: plugin.Healthy,
+		},
+		{
+			// desiredNumberScheduled absent -> 0 -> Healthy.
+			name:   "missing status",
+			status: nil,
+			want:   plugin.Healthy,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := &unstructured.Unstructured{Object: map[string]any{
+				"metadata": map[string]any{"name": "ds", "namespace": "default"},
+			}}
+			if tt.status != nil {
+				obj.Object["status"] = tt.status
+			}
+			if got := p.(plugin.HealthReporter).RowHealth(obj); got != tt.want {
+				t.Fatalf("RowHealth() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPluginDescribeDocument(t *testing.T) {
 	p := New()
 	obj := &unstructured.Unstructured{

@@ -25,31 +25,45 @@ func StyledFg(text string, c color.Color) string {
 	return s.String() + text + "\x1b[39m"
 }
 
-// RenderStatus returns the phase string with foreground color that is
-// compatible with the table selection highlight.
-func RenderStatus(phase string) string {
+// IsFailedPhase reports whether phase belongs to the red ("broken") set used by
+// both cell coloring and row tinting.
+func IsFailedPhase(phase string) bool {
 	switch phase {
-	case "Running":
-		return StyledFg(phase, FgRunning)
-	case "Succeeded", "Completed":
-		return StyledFg(phase, FgSucceeded)
-	case "Pending", "Waiting", "ContainerCreating":
-		return StyledFg(phase, FgPending)
 	case "Failed", "CrashLoopBackOff", "Error",
 		"ImagePullBackOff", "ErrImagePull",
 		"CreateContainerError", "CreateContainerConfigError",
 		"InvalidImageName", "RunContainerError",
 		"OOMKilled", "Terminating":
+		return true
+	}
+	return strings.HasPrefix(phase, "Init:") ||
+		strings.HasPrefix(phase, "Signal:") ||
+		strings.HasPrefix(phase, "ExitCode:")
+}
+
+// IsPendingPhase reports whether phase belongs to the yellow ("transitional")
+// set used by both cell coloring and row tinting.
+func IsPendingPhase(phase string) bool {
+	switch phase {
+	case "Pending", "Waiting", "ContainerCreating", "NotReady":
+		return true
+	}
+	return false
+}
+
+// RenderStatus returns the phase string with foreground color that is
+// compatible with the table selection highlight.
+func RenderStatus(phase string) string {
+	switch {
+	case phase == "Running":
+		return StyledFg(phase, FgRunning)
+	case phase == "Succeeded", phase == "Completed":
+		return StyledFg(phase, FgSucceeded)
+	case IsPendingPhase(phase):
+		return StyledFg(phase, FgPending)
+	case IsFailedPhase(phase):
 		return StyledFg(phase, FgFailed)
 	default:
-		if strings.HasPrefix(phase, "Init:") ||
-			strings.HasPrefix(phase, "Signal:") ||
-			strings.HasPrefix(phase, "ExitCode:") {
-			return StyledFg(phase, FgFailed)
-		}
-		if phase == "NotReady" {
-			return StyledFg(phase, FgPending)
-		}
 		return phase
 	}
 }

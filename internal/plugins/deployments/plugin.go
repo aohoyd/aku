@@ -58,6 +58,45 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	return []string{name, ready, upToDate, available, age}
 }
 
+// RowHealth reports the health of a Deployment row for table tinting. It
+// returns Error on an explicit failure signal (Available=False or Progressing
+// with reason ProgressDeadlineExceeded), otherwise it falls back to the
+// shared replica-shortfall rule (ready < desired is a transitional Warning).
+func (p *Plugin) RowHealth(obj *unstructured.Unstructured) plugin.Health {
+	if deploymentFailing(obj) {
+		return plugin.Error
+	}
+	desired := int32(workload.GetInt64(obj, "spec", "replicas"))
+	ready := int32(workload.GetInt64(obj, "status", "readyReplicas"))
+	return plugin.WorkloadHealth(ready, desired)
+}
+
+// deploymentFailing reports whether status.conditions[] carries an explicit
+// failure signal: Available=False or Progressing with the
+// ProgressDeadlineExceeded reason. It never panics on missing fields.
+func deploymentFailing(obj *unstructured.Unstructured) bool {
+	conditions, found, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	if err != nil || !found {
+		return false
+	}
+	for _, c := range conditions {
+		cond, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		condType, _ := cond["type"].(string)
+		condStatus, _ := cond["status"].(string)
+		condReason, _ := cond["reason"].(string)
+		if condType == "Available" && condStatus == "False" {
+			return true
+		}
+		if condType == "Progressing" && condReason == "ProgressDeadlineExceeded" {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 	return plugin.MarshalYAML(obj)
 }

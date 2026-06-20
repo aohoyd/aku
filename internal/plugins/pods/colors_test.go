@@ -114,6 +114,176 @@ func TestReadyCountPartialReady(t *testing.T) {
 	}
 }
 
+func TestPluginRowHealth(t *testing.T) {
+	pod := func(phase string, ready, total int) *unstructured.Unstructured {
+		containers := make([]any, total)
+		for i := range containers {
+			containers[i] = map[string]any{"name": "c"}
+		}
+		statuses := make([]any, total)
+		for i := range statuses {
+			statuses[i] = map[string]any{"name": "c", "ready": i < ready}
+		}
+		return &unstructured.Unstructured{
+			Object: map[string]any{
+				"spec": map[string]any{"containers": containers},
+				"status": map[string]any{
+					"phase":             phase,
+					"containerStatuses": statuses,
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name string
+		obj  *unstructured.Unstructured
+		want plugin.Health
+	}{
+		{"running all ready", pod("Running", 2, 2), plugin.Healthy},
+		{"running partial ready", pod("Running", 1, 2), plugin.Error},
+		// status.phase delivered directly as a failure string (no container
+		// status overrides it) → Error.
+		{"phase failed direct", pod("Failed", 0, 1), plugin.Error},
+		{
+			// Container terminated with reason OOMKilled makes computePodStatus
+			// surface "OOMKilled" as the phase → Error.
+			name: "oom killed",
+			obj: &unstructured.Unstructured{
+				Object: map[string]any{
+					"spec": map[string]any{"containers": []any{map[string]any{"name": "c"}}},
+					"status": map[string]any{
+						"phase": "Running",
+						"containerStatuses": []any{
+							map[string]any{
+								"name":  "c",
+								"ready": false,
+								"state": map[string]any{"terminated": map[string]any{"reason": "OOMKilled", "exitCode": int64(137)}},
+							},
+						},
+					},
+				},
+			},
+			want: plugin.Error,
+		},
+		{
+			// A pod with a deletionTimestamp computes phase "Terminating" → Error.
+			name: "terminating",
+			obj: &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{"deletionTimestamp": "2026-06-20T10:00:00Z"},
+					"spec":     map[string]any{"containers": []any{map[string]any{"name": "c"}}},
+					"status": map[string]any{
+						"phase":             "Running",
+						"containerStatuses": []any{map[string]any{"name": "c", "ready": true}},
+					},
+				},
+			},
+			want: plugin.Error,
+		},
+		// Running pod with zero containers: total == 0 so the ready<total branch
+		// cannot fire; the current code returns Healthy. Lock that branch.
+		{"running zero containers", pod("Running", 0, 0), plugin.Healthy},
+		{
+			name: "crash loop back off",
+			obj: &unstructured.Unstructured{
+				Object: map[string]any{
+					"spec": map[string]any{"containers": []any{map[string]any{"name": "c"}}},
+					"status": map[string]any{
+						"phase": "Running",
+						"containerStatuses": []any{
+							map[string]any{
+								"name":  "c",
+								"ready": false,
+								"state": map[string]any{"waiting": map[string]any{"reason": "CrashLoopBackOff"}},
+							},
+						},
+					},
+				},
+			},
+			want: plugin.Error,
+		},
+		{
+			name: "image pull back off",
+			obj: &unstructured.Unstructured{
+				Object: map[string]any{
+					"spec": map[string]any{"containers": []any{map[string]any{"name": "c"}}},
+					"status": map[string]any{
+						"phase": "Pending",
+						"containerStatuses": []any{
+							map[string]any{
+								"name":  "c",
+								"ready": false,
+								"state": map[string]any{"waiting": map[string]any{"reason": "ImagePullBackOff"}},
+							},
+						},
+					},
+				},
+			},
+			want: plugin.Error,
+		},
+		{"pending", pod("Pending", 0, 1), plugin.Warning},
+		{
+			name: "container creating",
+			obj: &unstructured.Unstructured{
+				Object: map[string]any{
+					"spec": map[string]any{"containers": []any{map[string]any{"name": "c"}}},
+					"status": map[string]any{
+						"phase": "Pending",
+						"containerStatuses": []any{
+							map[string]any{
+								"name":  "c",
+								"ready": false,
+								"state": map[string]any{"waiting": map[string]any{"reason": "ContainerCreating"}},
+							},
+						},
+					},
+				},
+			},
+			want: plugin.Warning,
+		},
+		{"succeeded", pod("Succeeded", 0, 1), plugin.Healthy},
+		{
+			name: "completed",
+			obj: &unstructured.Unstructured{
+				Object: map[string]any{
+					"spec": map[string]any{"containers": []any{map[string]any{"name": "c"}}},
+					"status": map[string]any{
+						"phase": "Failed",
+						"containerStatuses": []any{
+							map[string]any{
+								"name":  "c",
+								"ready": false,
+								"state": map[string]any{"terminated": map[string]any{"reason": "Completed", "exitCode": int64(0)}},
+							},
+						},
+					},
+				},
+			},
+			want: plugin.Healthy,
+		},
+		{
+			name: "missing status does not panic",
+			obj: &unstructured.Unstructured{
+				Object: map[string]any{
+					"spec": map[string]any{"containers": []any{map[string]any{"name": "c"}}},
+				},
+			},
+			want: plugin.Healthy, // extractPodPhase returns "Unknown" -> default Healthy
+		},
+	}
+
+	p := New().(*Plugin)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.RowHealth(tt.obj)
+			if got != tt.want {
+				t.Fatalf("RowHealth() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestReadyCountNoStatus(t *testing.T) {
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{

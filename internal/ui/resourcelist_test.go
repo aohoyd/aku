@@ -1534,3 +1534,290 @@ func TestResourceListBorderlessViewNoBorder(t *testing.T) {
 		t.Fatalf("borderless ResourceList header must not show the exit-zoom hint; got:\n%s", ansi.Strip(out))
 	}
 }
+
+// --- Health row-tint tests ---
+
+// healthTestPlugin is a testPlugin that also implements plugin.HealthReporter,
+// reporting per-object health from a UID-keyed map.
+type healthTestPlugin struct {
+	testPlugin
+	health map[types.UID]plugin.Health
+}
+
+func (p *healthTestPlugin) RowHealth(obj *unstructured.Unstructured) plugin.Health {
+	return p.health[obj.GetUID()]
+}
+
+func TestRebindRowStyleHealthNonCursor(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-warn":    plugin.Warning,
+		"uid-err":     plugin.Error,
+		"uid-healthy": plugin.Healthy,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	// Names chosen so the default NAME-ascending sort yields:
+	//   row 0 = pod-a-warn, row 1 = pod-b-err, row 2 = pod-c-healthy.
+	objs := []*unstructured.Unstructured{
+		makeUIDObj("pod-a-warn", "uid-warn"),
+		makeUIDObj("pod-b-err", "uid-err"),
+		makeUIDObj("pod-c-healthy", "uid-healthy"),
+	}
+	rl.SetObjects(objs)
+
+	if got := rl.table.RowStyleFunc(0, false); got != &TableHealthWarnStyle {
+		t.Fatalf("warning non-cursor row: expected &TableHealthWarnStyle, got %v", got)
+	}
+	if got := rl.table.RowStyleFunc(1, false); got != &TableHealthErrorStyle {
+		t.Fatalf("error non-cursor row: expected &TableHealthErrorStyle, got %v", got)
+	}
+	if got := rl.table.RowStyleFunc(2, false); got != nil {
+		t.Fatalf("healthy non-cursor row: expected nil, got %v", got)
+	}
+}
+
+func TestRebindRowStyleCursorSuppressesHealth(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-err": plugin.Error,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	objs := []*unstructured.Unstructured{makeUIDObj("pod-err", "uid-err")}
+	rl.SetObjects(objs)
+
+	// Cursor row must return nil even though the object is unhealthy, so the
+	// table applies its Selected style (selection wins over health).
+	if got := rl.table.RowStyleFunc(0, true); got != nil {
+		t.Fatalf("cursor row over unhealthy object: expected nil, got %v", got)
+	}
+}
+
+func TestRebindRowStyleMarkWinsOverHealth(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-err": plugin.Error,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	objs := []*unstructured.Unstructured{makeUIDObj("pod-err", "uid-err")}
+	rl.SetObjects(objs)
+
+	// Mark the row. ToggleSelect rebinds the RowStyleFunc itself.
+	rl.ToggleSelect()
+
+	// Marked + non-cursor → mark style (not health).
+	if got := rl.table.RowStyleFunc(0, false); got != &TableMarkedStyle {
+		t.Fatalf("marked non-cursor row: expected &TableMarkedStyle, got %v", got)
+	}
+	// Marked + cursor → marked-selected style (not health, not plain selection).
+	if got := rl.table.RowStyleFunc(0, true); got != &TableMarkedSelectedStyle {
+		t.Fatalf("marked cursor row: expected &TableMarkedSelectedStyle, got %v", got)
+	}
+}
+
+func TestRebindRowStyleNoHealthReporter(t *testing.T) {
+	// testPlugin does not implement plugin.HealthReporter.
+	rl := NewResourceList(&testPlugin{}, 80, 15)
+	objs := []*unstructured.Unstructured{makeUIDObj("pod-a", "uid-a")}
+	rl.SetObjects(objs)
+
+	// Fast path: with no HealthReporter and no selection the closure can only
+	// ever return nil, so it is not installed at all.
+	if rl.table.RowStyleFunc != nil {
+		t.Fatalf("no HealthReporter and no selection: expected nil RowStyleFunc, got non-nil")
+	}
+}
+
+func TestRebindRowStyleOutOfRange(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-err": plugin.Error,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	objs := []*unstructured.Unstructured{makeUIDObj("pod-err", "uid-err")}
+	rl.SetObjects(objs)
+
+	if got := rl.table.RowStyleFunc(-1, false); got != nil {
+		t.Fatalf("index -1: expected nil, got %v", got)
+	}
+	if got := rl.table.RowStyleFunc(5, false); got != nil {
+		t.Fatalf("out-of-range index: expected nil, got %v", got)
+	}
+}
+
+// coloredHealthPlugin is a HealthReporter whose Row emits a status cell with an
+// embedded foreground color SGR, so the strip path is exercised end-to-end.
+type coloredHealthPlugin struct {
+	testPlugin
+	health map[types.UID]plugin.Health
+}
+
+func (p *coloredHealthPlugin) RowHealth(obj *unstructured.Unstructured) plugin.Health {
+	return p.health[obj.GetUID()]
+}
+
+func (p *coloredHealthPlugin) Row(obj *unstructured.Unstructured) []string {
+	// Status cell carries a red foreground + fg-only reset, like RenderStatus.
+	return []string{obj.GetName(), "\x1b[31mERR\x1b[39m"}
+}
+
+// TestHealthTintStripsInnerANSIEndToEnd drives the real wiring: SetObjects calls
+// rebindRowStyle, and the rendered table runs renderRow, which must apply the
+// health override foreground across the unhealthy row AND strip the inner
+// per-cell color SGR so the tint is not cut short mid-row.
+func TestHealthTintStripsInnerANSIEndToEnd(t *testing.T) {
+	hp := &coloredHealthPlugin{health: map[types.UID]plugin.Health{
+		"uid-err": plugin.Error,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	// Two rows: cursor lands on row 0 by default, so row 1 (the unhealthy one)
+	// takes the non-cursor health-override branch.
+	objs := []*unstructured.Unstructured{
+		makeUIDObj("pod-a-healthy", "uid-healthy"),
+		makeUIDObj("pod-b-err", "uid-err"),
+	}
+	rl.SetObjects(objs)
+
+	// The RowStyleFunc must return the error health style for the unhealthy row.
+	if got := rl.table.RowStyleFunc(1, false); got != &TableHealthErrorStyle {
+		t.Fatalf("unhealthy non-cursor row: expected &TableHealthErrorStyle, got %v", got)
+	}
+
+	out := rl.table.View()
+
+	// The override SGR (error foreground) must appear in the rendered output.
+	overridePrefix := func() string {
+		rendered := TableHealthErrorStyle.Render("X")
+		return rendered[:strings.Index(rendered, "X")]
+	}()
+	if overridePrefix == "" {
+		t.Fatalf("test setup: TableHealthErrorStyle produced no SGR prefix")
+	}
+	if !strings.Contains(out, overridePrefix) {
+		t.Fatalf("expected health override SGR %q in rendered table, got:\n%q", overridePrefix, out)
+	}
+
+	// Locate the unhealthy row specifically by its unique NAME, not by the
+	// override prefix alone — the prefix could otherwise match a header, border,
+	// or padding line and pass vacuously. The same line must carry the health
+	// override SGR AND have its inner per-cell color (\x1b[31m) stripped.
+	var tinted string
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.Contains(ansi.Strip(line), "pod-b-err") {
+			tinted = line
+			break
+		}
+	}
+	if tinted == "" {
+		t.Fatalf("could not find the unhealthy row (containing 'pod-b-err') in output:\n%q", out)
+	}
+	if !strings.Contains(tinted, overridePrefix) {
+		t.Fatalf("unhealthy row must carry the health override SGR %q, got %q", overridePrefix, tinted)
+	}
+	if strings.Contains(tinted, "\x1b[31m") {
+		t.Fatalf("inner per-cell color SGR should be stripped on the tinted row, got %q", tinted)
+	}
+}
+
+// TestRebindRowStyleKeepsHealthAfterDeselect guards the nil fast-path boundary:
+// the closure may only be dropped when reporter == nil. With a HealthReporter
+// present, selecting then deselecting the last marked item must leave a NON-nil
+// RowStyleFunc that still returns health styles — the empty-selection state must
+// not be mistaken for "nothing to style".
+func TestRebindRowStyleKeepsHealthAfterDeselect(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-err": plugin.Error,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	objs := []*unstructured.Unstructured{makeUIDObj("pod-err", "uid-err")}
+	rl.SetObjects(objs)
+
+	// Mark the only row, then deselect it (back to empty selection).
+	rl.ToggleSelect()
+	if !rl.HasSelection() {
+		t.Fatal("expected selection after ToggleSelect")
+	}
+	rl.ToggleSelect()
+	if rl.HasSelection() {
+		t.Fatal("expected no selection after second ToggleSelect")
+	}
+
+	// Even with an empty selection, the reporter is present, so the closure must
+	// survive and keep reporting health for non-cursor rows.
+	if rl.table.RowStyleFunc == nil {
+		t.Fatal("RowStyleFunc must stay non-nil while a HealthReporter is present")
+	}
+	if got := rl.table.RowStyleFunc(0, false); got != &TableHealthErrorStyle {
+		t.Fatalf("unhealthy non-cursor row after deselect: expected &TableHealthErrorStyle, got %v", got)
+	}
+
+	// ClearSelection takes the same empty-selection path and must also preserve it.
+	rl.ToggleSelect()
+	rl.ClearSelection()
+	if rl.table.RowStyleFunc == nil {
+		t.Fatal("RowStyleFunc must stay non-nil after ClearSelection with a HealthReporter")
+	}
+	if got := rl.table.RowStyleFunc(0, false); got != &TableHealthErrorStyle {
+		t.Fatalf("unhealthy non-cursor row after ClearSelection: expected &TableHealthErrorStyle, got %v", got)
+	}
+}
+
+// TestSearchHighlightUsesReverseOnTintedRows covers the search-highlight +
+// health-tint interaction: tinted rows (mark/health) have their per-cell color
+// stripped at render time, which would also erase a themed-color match marker.
+// applyVisibleHighlights must switch those rows to reverse-video so the match
+// survives stripStyleKeepReverse. The cursor row also uses reverse-video.
+func TestSearchHighlightUsesReverseOnTintedRows(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-warn": plugin.Warning,
+		"uid-err":  plugin.Error,
+	}}
+	rl := NewResourceList(hp, 80, 20) // tall viewport: full-list window, no scrolling
+	// Default NAME-ascending sort: row 0 = match-a-cursor (healthy, the cursor),
+	// row 1 = match-b-warn, row 2 = match-c-err.
+	objs := []*unstructured.Unstructured{
+		makeUIDObj("match-a-cursor", "uid-healthy"),
+		makeUIDObj("match-b-warn", "uid-warn"),
+		makeUIDObj("match-c-err", "uid-err"),
+	}
+	rl.SetObjects(objs)
+
+	if err := rl.ApplySearch("match", msgs.SearchModeSearch); err != nil {
+		t.Fatalf("ApplySearch should not error: %v", err)
+	}
+	if cursor := rl.table.Cursor(); cursor != 0 {
+		t.Fatalf("expected cursor on row 0, got %d", cursor)
+	}
+
+	rows := rl.table.Rows()
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+
+	// Cursor row uses reverse-video.
+	if !rowCursorHighlighted(rows[0]) {
+		t.Fatalf("cursor row should use reverse-video variant; got %q", rows[0])
+	}
+	// Tinted (warning/error) rows must use reverse-video, not the themed-color
+	// variant, so the match survives the whole-row strip at render time.
+	for i := 1; i < len(rows); i++ {
+		if !rowCursorHighlighted(rows[i]) {
+			t.Fatalf("tinted row %d should use reverse-video variant; got %q", i, rows[i])
+		}
+		if rowMatchHighlighted(rows[i]) {
+			t.Fatalf("tinted row %d should not use themed-color variant; got %q", i, rows[i])
+		}
+	}
+
+	// End-to-end: the rendered tinted row must still carry the reverse-video
+	// marker after renderRow applies the health override and strips cell color.
+	out := rl.table.View()
+	var tinted string
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.Contains(ansi.Strip(line), "match-c-err") {
+			tinted = line
+			break
+		}
+	}
+	if tinted == "" {
+		t.Fatalf("could not find the error-tinted row in output:\n%q", out)
+	}
+	if !strings.Contains(tinted, highlightOn) {
+		t.Fatalf("rendered tinted row must retain the reverse-video match marker %q, got %q", highlightOn, tinted)
+	}
+}

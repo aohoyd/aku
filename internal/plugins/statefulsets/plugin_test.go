@@ -114,6 +114,56 @@ func TestPluginRowPartial(t *testing.T) {
 	}
 }
 
+func TestPluginRowHealth(t *testing.T) {
+	p := New()
+	tests := []struct {
+		name   string
+		status map[string]any
+		spec   map[string]any
+		want   plugin.Health
+	}{
+		{
+			name:   "all ready",
+			spec:   map[string]any{"replicas": int64(3)},
+			status: map[string]any{"readyReplicas": int64(3)},
+			want:   plugin.Healthy,
+		},
+		{
+			name:   "short of replicas",
+			spec:   map[string]any{"replicas": int64(3)},
+			status: map[string]any{"readyReplicas": int64(1)},
+			want:   plugin.Warning,
+		},
+		{
+			name:   "scaled to zero",
+			spec:   map[string]any{"replicas": int64(0)},
+			status: map[string]any{"readyReplicas": int64(0)},
+			want:   plugin.Healthy,
+		},
+		{
+			name: "missing status with desired",
+			spec: map[string]any{"replicas": int64(2)},
+			want: plugin.Warning,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := &unstructured.Unstructured{Object: map[string]any{
+				"metadata": map[string]any{"name": "sts", "namespace": "default"},
+			}}
+			if tt.spec != nil {
+				obj.Object["spec"] = tt.spec
+			}
+			if tt.status != nil {
+				obj.Object["status"] = tt.status
+			}
+			if got := p.(plugin.HealthReporter).RowHealth(obj); got != tt.want {
+				t.Fatalf("RowHealth() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPluginDescribeDocument(t *testing.T) {
 	p := New()
 	obj := &unstructured.Unstructured{

@@ -2,7 +2,9 @@ package table
 
 import (
 	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"charm.land/lipgloss/v2"
 )
@@ -794,6 +796,123 @@ func TestVisibleRangeShorterThanViewport(t *testing.T) {
 	}
 }
 
+// TestRowStyleFuncStripsInnerANSI verifies that when a whole-row foreground
+// override is applied, any embedded per-cell SGR (including a \x1b[39m
+// foreground-only reset) is stripped from the row first, so the override's
+// foreground tint spans the entire row instead of being cut short mid-row.
+func TestRowStyleFuncStripsInnerANSI(t *testing.T) {
+	const innerReset = "\x1b[39m"
+	cellValue := "\x1b[31mERR\x1b[39m"
+
+	overrideStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
+	m := New(
+		WithColumns([]Column{{Title: "Status", Width: 20}}),
+		WithRows([]Row{
+			{"row-00"},
+			{cellValue},
+		}),
+		WithHeight(10),
+	)
+	// Cursor on row 0 so row 1 exercises the NON-cursor override branch.
+	m.SetCursor(0)
+	m.RowStyleFunc = func(index int, isCursor bool) *lipgloss.Style {
+		if index == 1 {
+			return &overrideStyle
+		}
+		return nil
+	}
+
+	out := m.renderRow(1)
+
+	if strings.Contains(out, innerReset) {
+		t.Fatalf("expected inner foreground reset %q to be stripped, got %q", innerReset, out)
+	}
+	// The override's foreground SGR must be present (the row is tinted).
+	want := overrideStyle.Render("ERR")
+	prefix := want[:strings.Index(want, "ERR")] // leading SGR of the override
+	if prefix == "" {
+		t.Fatalf("test setup: override produced no SGR prefix: %q", want)
+	}
+	if !strings.Contains(out, prefix) {
+		t.Fatalf("expected override SGR prefix %q in output, got %q", prefix, out)
+	}
+}
+
+// TestRowStyleFuncStripsInnerANSIOnCursorRow is the cursor-branch counterpart of
+// TestRowStyleFuncStripsInnerANSI: the cursor is ON the row under test and the
+// RowStyleFunc returns a non-nil override for the cursor row. That override must
+// win over the default Selected style and the inner per-cell color SGRs must be
+// stripped (via stripStyleKeepReverse) so the override tint spans the whole row.
+func TestRowStyleFuncStripsInnerANSIOnCursorRow(t *testing.T) {
+	const innerReset = "\x1b[39m"
+	cellValue := "\x1b[31mERR\x1b[39m"
+
+	overrideStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // yellow
+	m := New(
+		WithColumns([]Column{{Title: "Status", Width: 20}}),
+		WithRows([]Row{
+			{"row-00"},
+			{cellValue},
+		}),
+		WithHeight(10),
+	)
+	// Cursor ON row 1 so renderRow takes the r == m.cursor override branch.
+	m.SetCursor(1)
+	m.RowStyleFunc = func(index int, isCursor bool) *lipgloss.Style {
+		if index == 1 && isCursor {
+			return &overrideStyle
+		}
+		return nil
+	}
+
+	out := m.renderRow(1)
+
+	if strings.Contains(out, innerReset) {
+		t.Fatalf("expected inner foreground reset %q to be stripped on cursor row, got %q", innerReset, out)
+	}
+	if strings.Contains(out, "\x1b[31m") {
+		t.Fatalf("expected inner foreground color SGR to be stripped on cursor row, got %q", out)
+	}
+	// The override's foreground SGR must be present (the cursor row is tinted by
+	// the override, not by the default Selected style).
+	want := overrideStyle.Render("ERR")
+	prefix := want[:strings.Index(want, "ERR")] // leading SGR of the override
+	if prefix == "" {
+		t.Fatalf("test setup: override produced no SGR prefix: %q", want)
+	}
+	if !strings.Contains(out, prefix) {
+		t.Fatalf("expected override SGR prefix %q in cursor-row output, got %q", prefix, out)
+	}
+}
+
+// TestRowStyleFuncNilPreservesInnerANSI is the control: with no override for a
+// row, the embedded per-cell ANSI (the colored status cell) is preserved so
+// healthy rows keep their colored status cell.
+func TestRowStyleFuncNilPreservesInnerANSI(t *testing.T) {
+	const innerReset = "\x1b[39m"
+	cellValue := "\x1b[31mERR\x1b[39m"
+
+	m := New(
+		WithColumns([]Column{{Title: "Status", Width: 20}}),
+		WithRows([]Row{
+			{"row-00"},
+			{cellValue},
+		}),
+		WithHeight(10),
+	)
+	m.SetCursor(0)
+	// No RowStyleFunc => non-override return path keeps embedded ANSI.
+
+	out := m.renderRow(1)
+
+	if !strings.Contains(out, innerReset) {
+		t.Fatalf("expected embedded ANSI %q to be preserved without override, got %q", innerReset, out)
+	}
+	if !strings.Contains(out, "\x1b[31m") {
+		t.Fatalf("expected embedded foreground SGR to be preserved, got %q", out)
+	}
+}
+
 func makeRows(n int) []Row {
 	rows := make([]Row, n)
 	for i := range n {
@@ -826,5 +945,110 @@ func TestRenderRowWithMoreCellsThanColumns(t *testing.T) {
 	out := m.View()
 	if len(out) == 0 {
 		t.Fatal("expected non-empty render output")
+	}
+}
+
+func TestStripStyleKeepReverse(t *testing.T) {
+	const (
+		revOn  = "\x1b[7m"
+		revOff = "\x1b[27m"
+	)
+	// A cell with a foreground color and a reverse-video search match inside it.
+	in := "\x1b[38;2;80;250;123mRun" + revOn + "ning" + revOff + "\x1b[39m pod"
+	got := stripStyleKeepReverse(in)
+
+	// Color SGRs must be gone; reverse-video markers must remain, around "ning".
+	if strings.Contains(got, "\x1b[38;2;80;250;123m") || strings.Contains(got, "\x1b[39m") {
+		t.Fatalf("color SGRs should be stripped, got %q", got)
+	}
+	want := "Run" + revOn + "ning" + revOff + " pod"
+	if got != want {
+		t.Fatalf("stripStyleKeepReverse = %q, want %q", got, want)
+	}
+}
+
+func TestStripStyleKeepReverseNoEscape(t *testing.T) {
+	if got := stripStyleKeepReverse("plain row"); got != "plain row" {
+		t.Fatalf("plain text should pass through unchanged, got %q", got)
+	}
+}
+
+// TestStripStyleKeepReverseMultiByteUTF8 guards against the multi-byte UTF-8 bug
+// where the visual-position counter is mistaken for a rune index: a reverse
+// marker placed after non-ASCII content must land on a valid byte boundary so
+// the output stays valid UTF-8 and the marker wraps the right run.
+func TestStripStyleKeepReverseMultiByteUTF8(t *testing.T) {
+	const (
+		revOn  = "\x1b[7m"
+		revOff = "\x1b[27m"
+	)
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "accented latin before marker",
+			// "café-pod" with a colored prefix; the search match wraps "pod".
+			in:   "\x1b[38;2;80;250;123mcafé-" + revOn + "pod" + revOff + "\x1b[39m",
+			want: "café-" + revOn + "pod" + revOff,
+		},
+		{
+			name: "cjk before and inside marker",
+			// 名前 = two 3-byte runes; marker wraps the second rune.
+			in:   "\x1b[31m名" + revOn + "前" + revOff + "\x1b[39m",
+			want: "名" + revOn + "前" + revOff,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripStyleKeepReverse(tc.in)
+			if !utf8.ValidString(got) {
+				t.Fatalf("output is not valid UTF-8: %q", got)
+			}
+			if got != tc.want {
+				t.Fatalf("stripStyleKeepReverse = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStripStyleKeepReverseEdgeCases covers multiple disjoint reverse spans, an
+// unmatched revOn, and a marker at the end-of-string boundary.
+func TestStripStyleKeepReverseEdgeCases(t *testing.T) {
+	const (
+		revOn  = "\x1b[7m"
+		revOff = "\x1b[27m"
+		color  = "\x1b[31m"
+		colOff = "\x1b[39m"
+	)
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "two disjoint spans",
+			in:   color + revOn + "ab" + revOff + "cd" + revOn + "ef" + revOff + colOff,
+			want: revOn + "ab" + revOff + "cd" + revOn + "ef" + revOff,
+		},
+		{
+			name: "revOn without matching revOff",
+			in:   color + "ab" + revOn + "cd" + colOff,
+			want: "ab" + revOn + "cd",
+		},
+		{
+			name: "marker at end-of-string boundary",
+			// revOn appears after all visible text (visualPos == len(stripped)).
+			in:   color + "abc" + colOff + revOn,
+			want: "abc" + revOn,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stripStyleKeepReverse(tc.in); got != tc.want {
+				t.Fatalf("stripStyleKeepReverse = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

@@ -56,6 +56,65 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	return []string{name, ctype, image, plugin.RenderStatus(status), ready, restarts}
 }
 
+// RowHealth classifies a container row for whole-row tinting.
+//
+//   - running + ready    → Healthy
+//   - running + not ready → Error
+//   - terminated exit 0   → Healthy; non-zero exit → Error
+//   - waiting with a known failure reason → Error; otherwise → Warning
+//   - missing/unknown state → Healthy (don't tint what we can't classify)
+func (p *Plugin) RowHealth(obj *unstructured.Unstructured) plugin.Health {
+	statusMap, _ := obj.Object["_status"].(map[string]any)
+	if statusMap == nil {
+		return plugin.Healthy
+	}
+	ready, _, _ := unstructured.NestedBool(statusMap, "ready")
+
+	if _, found, _ := unstructured.NestedMap(statusMap, "state", "running"); found {
+		if ready {
+			return plugin.Healthy
+		}
+		return plugin.Error
+	}
+
+	if terminated, found, _ := unstructured.NestedMap(statusMap, "state", "terminated"); found {
+		exitCode, _, _ := unstructured.NestedInt64(terminated, "exitCode")
+		if exitCode == 0 {
+			return plugin.Healthy
+		}
+		return plugin.Error
+	}
+
+	if waiting, found, _ := unstructured.NestedMap(statusMap, "state", "waiting"); found {
+		reason, _ := waiting["reason"].(string)
+		if waitingFailureReasons[reason] {
+			return plugin.Error
+		}
+		return plugin.Warning
+	}
+
+	return plugin.Healthy
+}
+
+// waitingFailureReasons are container waiting-state reasons (from
+// status.state.waiting.reason) that indicate a broken container (red) rather
+// than a transitional one. These are container-level waiting reasons, distinct
+// from the pod-level phase strings classified by plugin.IsFailedPhase — that
+// predicate's set also includes pod phases (Failed, OOMKilled, Terminating,
+// Init:*/Signal:*/ExitCode: prefixes) that never appear as a container waiting
+// reason. A focused local set is used here so a transitional waiting state
+// (e.g. ContainerCreating, or an empty reason) correctly maps to Warning
+// instead of being misclassified.
+var waitingFailureReasons = map[string]bool{
+	"CrashLoopBackOff":           true,
+	"ImagePullBackOff":           true,
+	"ErrImagePull":               true,
+	"CreateContainerError":       true,
+	"CreateContainerConfigError": true,
+	"InvalidImageName":           true,
+	"RunContainerError":          true,
+}
+
 func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
 	spec, _ := obj.Object["_spec"].(map[string]any)
 	if spec == nil {
