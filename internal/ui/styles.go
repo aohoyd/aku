@@ -38,9 +38,8 @@ var (
 					Bold(true)
 
 	// Table
-	TableHeaderStyle      = lipgloss.NewStyle().Bold(true).Foreground(theme.Highlight).Padding(0, 1)
-	TableSelectedStyle    = lipgloss.NewStyle().Background(theme.Accent).Foreground(theme.TextOnAccent).Bold(true)
-	TableSelectedDimStyle = lipgloss.NewStyle()
+	TableHeaderStyle   = lipgloss.NewStyle().Bold(true).Foreground(theme.Highlight).Padding(0, 1)
+	TableSelectedStyle = lipgloss.NewStyle().Background(theme.Accent).Foreground(theme.TextOnAccent).Bold(true)
 
 	// Table multi-select
 	TableMarkedStyle         = lipgloss.NewStyle().Foreground(theme.Selection).Bold(true)
@@ -50,6 +49,11 @@ var (
 	TableHealthWarnStyle = lipgloss.NewStyle().Foreground(theme.StatusPending)
 	// TableHealthErrorStyle tints a whole broken row red.
 	TableHealthErrorStyle = lipgloss.NewStyle().Foreground(theme.StatusFailed)
+
+	// TableHealthErrorCursorStyle fills the cursor row of a broken resource red with dark text.
+	TableHealthErrorCursorStyle = lipgloss.NewStyle().Background(theme.StatusFailed).Foreground(theme.TextOnStatus).Bold(true)
+	// TableHealthWarnCursorStyle fills the cursor row of a transitional resource yellow with dark text.
+	TableHealthWarnCursorStyle = lipgloss.NewStyle().Background(theme.StatusPending).Foreground(theme.TextOnStatus).Bold(true)
 
 	// Detail panel
 	DetailHeaderStyle = lipgloss.NewStyle().Bold(true).Padding(0, 1)

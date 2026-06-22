@@ -479,6 +479,27 @@ func TestMouseClickOnSplitFocusesAndSelectsRow(t *testing.T) {
 	if got := app.layout.SplitAt(0).Cursor(); got != wantRow {
 		t.Fatalf("expected split 0 cursor at row %d, got %d", wantRow, got)
 	}
+
+	// Cursor invariant: exactly one selection-active resource split, and it is the
+	// focused one. After the redundant FocusResources call was removed from the
+	// click path (FocusSplitAt self-reconciles), this must still hold.
+	active := -1
+	count := 0
+	for i := 0; i < app.layout.SplitCount(); i++ {
+		if s := app.layout.SplitAt(i); s != nil && s.SelectionActive() {
+			if active != -1 {
+				t.Fatalf("two selection-active splits: %d and %d", active, i)
+			}
+			active = i
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one selection-active split, got %d", count)
+	}
+	if active != app.layout.FocusIndex() {
+		t.Fatalf("selection-active split %d != focused split %d", active, app.layout.FocusIndex())
+	}
 }
 
 // TestMouseClickOnDifferentSplitSwitchesFocus verifies clicking split 1 while
@@ -599,6 +620,82 @@ func TestMouseClickOnDetailFlipsFocusTarget(t *testing.T) {
 	}
 	if got := app.layout.SplitAt(0).Cursor(); got != cursorBefore {
 		t.Fatalf("expected split 0 cursor unchanged on detail click; before=%d after=%d", cursorBefore, got)
+	}
+}
+
+// TestMouseClickOnSplitWhileDetailFocused verifies that clicking a resource
+// split while the detail panel holds input focus releases detail focus back to
+// resources, focuses the clicked split, and leaves exactly one selection-active
+// resource split (the focused one).
+func TestMouseClickOnSplitWhileDetailFocused(t *testing.T) {
+	app := makeWheelApp(t)
+
+	// Show the right panel and hand input focus to the detail panel.
+	app.layout.ShowRightPanel()
+	app = sendWindowSize(app, 120, 40)
+	app.layout.FocusSplitAt(0)
+	app.layout.FocusDetails()
+	if !app.layout.FocusedDetails() {
+		t.Fatal("precondition: details should be focused after FocusDetails")
+	}
+
+	// Locate a body row inside split 0.
+	rect0, ok := app.layout.PaneAt(5, 0)
+	if !ok || rect0.SplitIdx != 0 {
+		t.Fatalf("expected split 0 at y=0, got ok=%v idx=%d", ok, rect0.SplitIdx)
+	}
+	var targetY, wantRow int
+	found := false
+	for y := rect0.Y; y < rect0.Y+rect0.H; y++ {
+		split := app.layout.SplitAt(0)
+		if split == nil {
+			t.Fatal("split 0 is nil")
+		}
+		if row := split.RowAtY(y - rect0.Y); row == 3 {
+			targetY = y
+			wantRow = row
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("could not locate y coordinate corresponding to row 3 in split 0")
+	}
+
+	model, _ := app.update(tea.MouseClickMsg{X: 5, Y: targetY, Button: tea.MouseLeft})
+	app = model.(App)
+
+	if !app.layout.FocusedResources() {
+		t.Fatal("click on split should release detail focus back to resources")
+	}
+	if app.layout.FocusedDetails() {
+		t.Fatal("click on split should release detail focus")
+	}
+	if app.layout.FocusIndex() != 0 {
+		t.Fatalf("expected focus on split 0 after click, got %d", app.layout.FocusIndex())
+	}
+	if got := app.layout.SplitAt(0).Cursor(); got != wantRow {
+		t.Fatalf("expected split 0 cursor at row %d, got %d", wantRow, got)
+	}
+
+	// Cursor invariant: exactly one selection-active resource split, and it is the
+	// focused one.
+	active := -1
+	count := 0
+	for i := 0; i < app.layout.SplitCount(); i++ {
+		if s := app.layout.SplitAt(i); s != nil && s.SelectionActive() {
+			if active != -1 {
+				t.Fatalf("two selection-active splits: %d and %d", active, i)
+			}
+			active = i
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one selection-active split, got %d", count)
+	}
+	if active != app.layout.FocusIndex() {
+		t.Fatalf("selection-active split %d != focused split %d", active, app.layout.FocusIndex())
 	}
 }
 

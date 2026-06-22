@@ -29,6 +29,7 @@ var (
 	Muted        Color = "#727169" // FujiGrey — unfocused borders, help text, status bar
 	Highlight    Color = "#C8C093" // OldWhite — titles, keys, cursor, table header
 	TextOnAccent Color = "#1F1F28" // SumiInk0 — text on accent backgrounds
+	TextOnStatus Color = "#1F1F28" // SumiInk0 — dark text on red/yellow status backgrounds
 	Error        Color = "#E82424" // SamuraiRed — error messages
 	Warning      Color = "#FF9E3B" // RoninYellow — warning messages
 	Subtle       Color = "#54546D" // SumiInk4 — indicators, YAML markers
@@ -178,6 +179,7 @@ func Load(path string) error {
 		setIf(&Muted, f.UI.Muted)
 		setIf(&Highlight, f.UI.Highlight)
 		setIf(&TextOnAccent, f.UI.TextOnAccent)
+		setIf(&TextOnStatus, f.UI.TextOnStatus)
 		setIf(&Error, f.UI.Error)
 		setIf(&Warning, f.UI.Warning)
 		setIf(&Subtle, f.UI.Subtle)
@@ -236,6 +238,7 @@ type uiColors struct {
 	Muted        *string `yaml:"muted"`
 	Highlight    *string `yaml:"highlight"`
 	TextOnAccent *string `yaml:"text_on_accent"`
+	TextOnStatus *string `yaml:"text_on_status"`
 	Error        *string `yaml:"error"`
 	Warning      *string `yaml:"warning"`
 	Subtle       *string `yaml:"subtle"`

@@ -41,6 +41,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Multi-select resources for bulk delete and rollout restart
 - Helm values editing, rollback to any revision, and chart reference updates
 - Save log buffer to file (and optionally open in `$EDITOR`)
+- Copy resource name/YAML or open any pane's buffer in your editor (`c` chord)
 
 **Notifications**
 - noice.nvim-style toast overlay for aku's own info/warning/error messages — floats top-right (newest on top), never steals focus, auto-hides per level, with a `+N more…` line past a configurable cap (`ctrl+x` clears live toasts)
@@ -244,6 +245,7 @@ ui:
   muted: "#6B7280"
   error: "#EF4444"
   warning: "#F59E0B"
+  # text_on_status: "#1F1F28"  # dark text on red/yellow status-colored cursor rows
 
 status:
   running: "#10B981"
@@ -265,7 +267,7 @@ The `status.failed` and `status.pending` colors also drive k9s-style whole-row h
 - **Deployments** tint red on an explicit failure condition — `Available=False` *or* a `Progressing` condition with reason `ProgressDeadlineExceeded` — and otherwise yellow while ready replicas are below desired.
 - **StatefulSets, DaemonSets, ReplicaSets** only ever tint yellow (ready < desired) and never red. Among workloads, only Deployments can go red.
 
-Healthy, fully-ready rows stay default-colored. Precedence is **marks > cursor/selection > health**: a marked row keeps its mark style and a marked cursor row uses a combined mark+cursor style, an unmarked cursor row keeps its selection style, and the health tint applies only to unmarked, non-cursor rows.
+Healthy, fully-ready rows stay default-colored. **Marks always win**: a marked row keeps its mark style and a marked cursor row uses a combined mark+cursor style. For unmarked rows the rule depends on whether the row is under the cursor and whether the pane's selection is active — that is, whether the pane's list *or* its detail panel is focused. Non-cursor unready/transitional rows get the foreground health tint (red/yellow). The unmarked cursor row depends on that selection state: while the pane's selection is active (its list or detail panel is focused) an unready/transitional cursor row is *filled* with the status color (red/yellow) and rendered with dark text (`ui.text_on_status`) — health overrides the plain selection style for that one row so the k9s-style signal stays visible under the cursor, including while you scroll the detail panel — while a healthy cursor row keeps the plain selection style; in an **inactive** pane (another pane is active — a full blur, not merely a dimmed border) the cursor row is rendered exactly like a normal row — the health tint (red/yellow) if it's unready, plain if it's healthy — with no cursor highlight.
 
 `ui.background` and `ui.foreground` set the global terminal background and foreground. Both are unset by default; they're used by full-canvas themes (like Midnight Commander) that paint the whole screen rather than relying on your terminal's own colors.
 
@@ -393,6 +395,16 @@ The contexts list is itself a resource view, with columns **NAME, CLUSTER, SERVE
 | `/` | Search (regex) |
 | `\|` / `Ctrl+/` | Filter (regex) |
 
+### Copy & Open
+
+The `c` chord copies or opens whatever the focused pane is showing. Copies attempt the native OS clipboard (best-effort) and always emit an OSC52 escape sequence, so `cc`/`cy` reach your *local* clipboard even over SSH (on an OSC52-capable terminal). Each action shows a confirmation toast.
+
+| Keys | Action |
+|------|--------|
+| `c c` | Copy current — the selected resource name(s) when the list is focused (multiple marked rows are newline-joined), the buffer text in a YAML/describe panel, or the buffered log lines in a logs panel |
+| `c y` | Copy YAML — the selected resource(s)' live YAML (multiple marked rows joined by `---`), regardless of which pane is focused |
+| `c o` | Open in the editor (`$KUBE_EDITOR`, then `$EDITOR`, then `vi`) — resource list: the selected resource(s)' YAML via a temp file (multiple marked rows joined by `---`, like `c y`); YAML/describe panel: the buffer; logs: saves to the same destination as `Ctrl+s`, opens it, and copies the saved path to the clipboard |
+
 ### Resource List
 
 | Key | Action |
@@ -425,7 +437,7 @@ The contexts list is itself a resource view, with columns **NAME, CLUSTER, SERVE
 |-----|--------|
 | `a` | Toggle autoscroll |
 | `s` | Toggle syntax highlighting |
-| `c` | Select container |
+| `C` | Select container |
 | `t` | Time range |
 | `Enter` | Insert marker |
 | `Ctrl+s` | Save log buffer to file |

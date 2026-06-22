@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/aohoyd/aku/internal/clipboard"
 	"github.com/aohoyd/aku/internal/cluster"
 	"github.com/aohoyd/aku/internal/config"
 	"github.com/aohoyd/aku/internal/helm"
@@ -18,7 +20,9 @@ import (
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/notify"
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugins/containers"
 	"github.com/aohoyd/aku/internal/plugins/helmreleases"
+	akupods "github.com/aohoyd/aku/internal/plugins/pods"
 	"github.com/aohoyd/aku/internal/plugins/portforwards"
 	"github.com/aohoyd/aku/internal/portforward"
 	"github.com/aohoyd/aku/internal/render"
@@ -57,6 +61,16 @@ func (m *mockPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) 
 func (m *mockPlugin) Describe(_ context.Context, _ *unstructured.Unstructured) (render.Content, error) {
 	s := "Name: test-pod\nNamespace: default\n"
 	return render.Content{Raw: s, Display: s}, nil
+}
+
+// errYAMLPlugin is a mockPlugin whose YAML() always fails, used to drive the
+// render-error paths of copy-yaml and open-current's resources branch.
+type errYAMLPlugin struct {
+	mockPlugin
+}
+
+func (m *errYAMLPlugin) YAML(_ *unstructured.Unstructured) (render.Content, error) {
+	return render.Content{}, fmt.Errorf("boom")
 }
 
 // newTestManager returns a Manager with no clusters created. mgr.Get(ctx)
@@ -1657,6 +1671,20 @@ func (m *mockDrillablePlugin) DrillDown(_ plugin.Cluster, obj *unstructured.Unst
 	return m.childPlugin, m.children
 }
 
+// mockStoreDrillablePlugin is a DrillDowner whose children are read live from a
+// store at DrillDown time, so a refresh re-running DrillDown observes whatever
+// is currently cached. Used to exercise the child-GVR refresh clause.
+type mockStoreDrillablePlugin struct {
+	mockPlugin
+	childPlugin plugin.ResourcePlugin
+	store       *k8s.Store
+	podsGVR     schema.GroupVersionResource
+}
+
+func (m *mockStoreDrillablePlugin) DrillDown(_ plugin.Cluster, _ *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	return m.childPlugin, m.store.List(m.podsGVR, "default")
+}
+
 func TestEnterDetailDrillDown(t *testing.T) {
 	a := newTestApp()
 	childPlugin := &mockPlugin{
@@ -2264,6 +2292,244 @@ func TestReloadAllWithDrillDown(t *testing.T) {
 	}
 	if focused.Plugin().Name() != "pods" {
 		t.Fatalf("expected root plugin 'pods', got %q", focused.Plugin().Name())
+	}
+}
+
+// podWithReady builds a pod unstructured carrying a single container whose
+// containerStatus.ready is set to the given value. UID and name are fixed so the
+// store lookup in refreshDrillDownSplit can resolve the parent by UID.
+func podWithReady(ready bool) *unstructured.Unstructured {
+	pod := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata": map[string]any{
+			"name":      "pod-1",
+			"namespace": "default",
+			"uid":       "pod-uid-1",
+		},
+		"spec": map[string]any{
+			"containers": []any{
+				map[string]any{"name": "nginx", "image": "nginx:1"},
+			},
+		},
+		"status": map[string]any{
+			"containerStatuses": []any{
+				map[string]any{"name": "nginx", "ready": ready},
+			},
+		},
+	}}
+	return pod
+}
+
+// childReady reads the synthetic container child's _status.ready flag, returning
+// (value, true) when present.
+func childReady(child *unstructured.Unstructured) (bool, bool) {
+	if child == nil {
+		return false, false
+	}
+	v, ok, _ := unstructured.NestedBool(child.Object, "_status", "ready")
+	return v, ok
+}
+
+// TestRefreshDrillDownSplitsParentGVRMatch is the core regression test for the
+// container-readiness bug: while drilled into a pod's containers view, a pod
+// update (v1/pods) must re-extract children so the new ready state shows WITHOUT
+// popping the nav stack. The child plugin's GVR is the synthetic
+// _ktui/v1/containers sentinel, which never matches v1/pods — so the refresh
+// only happens via the parent-GVR match clause added to refreshDrillDownSplits.
+func TestRefreshDrillDownSplitsParentGVRMatch(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := akupods.New()
+	containersPlugin := containers.New()
+	plugin.Register(podsPlugin)
+	plugin.Register(containersPlugin)
+
+	podsGVR := podsPlugin.GVR() // v1/pods
+
+	// Store starts with the pod NOT ready.
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+	notReadyPod := podWithReady(false)
+	store.CacheUpsert(podsGVR, "default", notReadyPod)
+
+	// Build the pane: pods list, then drill into the containers view. PushNav
+	// snapshots the CURRENT plugin (pods) as the parent before switching to the
+	// containers child plugin.
+	app.layout.AddSplit(podsPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{notReadyPod})
+	children := containers.ExtractContainers(notReadyPod)
+	focused.PushNav(containersPlugin, children, "pod-1", "pod-uid-1", "v1", "Pod")
+
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down")
+	}
+	if r, ok := childReady(focused.Selected()); !ok || r {
+		t.Fatalf("precondition: expected child ready=false, got ready=%v ok=%v", r, ok)
+	}
+
+	// The pod becomes ready. Update the store, then deliver the v1/pods update.
+	store.CacheUpsert(podsGVR, "default", podWithReady(true))
+
+	model, _ := app.update(k8s.ResourceUpdatedMsg{GVR: podsGVR, Namespace: "default"})
+	app = model.(App)
+
+	focused = app.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to remain in drill-down after update (no pop)")
+	}
+	if focused.Plugin().Name() != "containers" {
+		t.Fatalf("expected to stay on containers view, got %q", focused.Plugin().Name())
+	}
+	r, ok := childReady(focused.Selected())
+	if !ok {
+		t.Fatal("expected child to carry _status.ready after refresh")
+	}
+	if !r {
+		t.Fatal("expected child to be re-extracted with ready=true after v1/pods update")
+	}
+}
+
+// TestRefreshDrillDownSplitsChildGVRMatch is the regression guard for the
+// existing child-GVR clause: when the drilled-in child plugin's GVR DOES match
+// the update (a parent->pods drill-down where the child IS the real pods
+// plugin), the split must still refresh via the original child-GVR match.
+func TestRefreshDrillDownSplitsChildGVRMatch(t *testing.T) {
+	app := newTestApp()
+
+	deployPlugin := &mockPlugin{
+		name: "deployments",
+		gvr:  schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
+	}
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+	// The parent (deployment) GVR must differ from the update GVR (v1/pods) so the
+	// refresh below can ONLY be attributed to the child-GVR clause, never the
+	// parent-GVR clause.
+	if deployPlugin.gvr == podsGVR {
+		t.Fatalf("test setup invalid: parent GVR %v must differ from update GVR %v", deployPlugin.gvr, podsGVR)
+	}
+
+	store := k8s.NewStore(nil, "", nil)
+
+	podA := &unstructured.Unstructured{}
+	podA.SetName("pod-a")
+	podA.SetNamespace("default")
+	podA.SetUID("pod-a-uid")
+
+	// childPlugin's DrillDown re-reads the deployment's children from the store
+	// as pods, so we can observe the refresh re-running.
+	childPlugin := &mockPlugin{name: "pods", gvr: podsGVR}
+	drillable := &mockStoreDrillablePlugin{
+		mockPlugin:  mockPlugin{name: "deployments", gvr: deployPlugin.gvr},
+		childPlugin: childPlugin,
+		store:       store,
+		podsGVR:     podsGVR,
+	}
+	plugin.Register(childPlugin)
+
+	app = withGlobalStore(app, store)
+
+	// Parent deployment lives in the store so refreshDrillDownSplit can resolve
+	// it by UID.
+	dep := &unstructured.Unstructured{}
+	dep.SetName("dep-1")
+	dep.SetNamespace("default")
+	dep.SetUID("dep-uid-1")
+	store.CacheUpsert(deployPlugin.gvr, "default", dep)
+
+	app.layout.AddSplit(drillable, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{dep})
+	// Drill down: child plugin is the real pods plugin (GVR v1/pods).
+	focused.PushNav(childPlugin, []*unstructured.Unstructured{}, "dep-1", "dep-uid-1", "apps/v1", "Deployment")
+
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down")
+	}
+	if focused.Len() != 0 {
+		t.Fatalf("precondition: expected 0 children, got %d", focused.Len())
+	}
+
+	// pod-a now exists in the store; the deployment's DrillDown returns it.
+	store.CacheUpsert(podsGVR, "default", podA)
+
+	// Deliver a v1/pods update — matches the CHILD plugin GVR (the existing clause).
+	model, _ := app.update(k8s.ResourceUpdatedMsg{GVR: podsGVR, Namespace: "default"})
+	app = model.(App)
+
+	focused = app.layout.FocusedSplit()
+	if focused.Len() != 1 {
+		t.Fatalf("expected child-GVR update to refresh children to 1, got %d", focused.Len())
+	}
+	if got := focused.Selected(); got == nil || got.GetName() != "pod-a" {
+		t.Fatalf("expected refreshed child 'pod-a', got %v", got)
+	}
+}
+
+// TestRefreshDrillDownSplitsUnrelatedGVRNoMatch locks the AND semantics of the
+// match guard in refreshDrillDownSplits:
+//
+//	if split.Plugin().GVR() != updatedGVR && snap.Plugin.GVR() != updatedGVR { continue }
+//
+// An update for a GVR matching NEITHER the drilled-in child plugin's GVR
+// (_ktui/v1/containers) NOR the parent snapshot's GVR (v1/pods) must NOT refresh
+// the split. If the guard were ever loosened to `||`, the unrelated update would
+// re-extract and this test would catch it.
+func TestRefreshDrillDownSplitsUnrelatedGVRNoMatch(t *testing.T) {
+	app := newTestApp()
+
+	podsPlugin := akupods.New()
+	containersPlugin := containers.New()
+	plugin.Register(podsPlugin)
+	plugin.Register(containersPlugin)
+
+	podsGVR := podsPlugin.GVR() // v1/pods
+
+	// Store starts with the pod NOT ready.
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+	notReadyPod := podWithReady(false)
+	store.CacheUpsert(podsGVR, "default", notReadyPod)
+
+	// Build the pane: pods list, then drill into the containers view.
+	app.layout.AddSplit(podsPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{notReadyPod})
+	children := containers.ExtractContainers(notReadyPod)
+	focused.PushNav(containersPlugin, children, "pod-1", "pod-uid-1", "v1", "Pod")
+
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down")
+	}
+	if r, ok := childReady(focused.Selected()); !ok || r {
+		t.Fatalf("precondition: expected child ready=false, got ready=%v ok=%v", r, ok)
+	}
+
+	// The pod becomes ready in the store, but we deliver an UNRELATED GVR update
+	// (v1/services) that matches neither the child plugin nor the parent snapshot.
+	store.CacheUpsert(podsGVR, "default", podWithReady(true))
+	unrelatedGVR := schema.GroupVersionResource{Version: "v1", Resource: "services"}
+	if unrelatedGVR == podsGVR || unrelatedGVR == containersPlugin.GVR() {
+		t.Fatalf("test setup invalid: unrelated GVR %v collides with child/parent", unrelatedGVR)
+	}
+
+	model, _ := app.update(k8s.ResourceUpdatedMsg{GVR: unrelatedGVR, Namespace: "default"})
+	app = model.(App)
+
+	focused = app.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to remain in drill-down after unrelated update")
+	}
+	// The child must NOT have been re-extracted: its stale ready=false is preserved
+	// because the unrelated GVR did not satisfy the match guard.
+	r, ok := childReady(focused.Selected())
+	if !ok {
+		t.Fatal("expected child to still carry _status.ready")
+	}
+	if r {
+		t.Fatal("unrelated GVR update must NOT refresh the split; expected stale ready=false")
 	}
 }
 
@@ -7030,5 +7296,694 @@ func TestExtractContainerImagesContainersPlugin(t *testing.T) {
 				t.Errorf("expected Init %v, got %v", tc.wantInit, c.Init)
 			}
 		})
+	}
+}
+
+// clipboardPayload runs a clipboard.Copy cmd and returns the exact payload
+// carried by the OSC52 tea.SetClipboard message. clipboard.Copy batches a
+// best-effort native WriteAll (which returns a nil msg, harmless in tests) with
+// tea.SetClipboard, so running the cmd yields a tea.BatchMsg (a slice of
+// sub-cmds). Rather than returning the first non-nil sub-message — which would
+// silently pick the wrong value if Copy ever batched a non-nil preamble before
+// the clipboard write — we walk every sub-cmd (recursively) and return only the
+// message that represents the OSC52 payload.
+//
+// tea.SetClipboard's message type (setClipboardMsg) is an unexported `string`
+// type in bubbletea, so we cannot type-assert it. We identify it structurally:
+// it is the lone batch message whose dynamic kind is reflect.String. This
+// couples the helper to that bubbletea internal, hence the explicit kind check
+// (and a Fatal if zero or multiple string-kind messages appear, which would
+// signal the coupling broke).
+func clipboardPayload(t *testing.T, cmd tea.Cmd) string {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("expected a non-nil clipboard cmd")
+	}
+	payloads := collectStringPayloads(cmd)
+	switch len(payloads) {
+	case 0:
+		t.Fatal("clipboard batch carried no OSC52 (string-kind) payload message")
+	case 1:
+		// ok
+	default:
+		t.Fatalf("clipboard batch carried %d string-kind messages, expected exactly one OSC52 payload: %v", len(payloads), payloads)
+	}
+	return payloads[0]
+}
+
+// collectStringPayloads runs cmd and walks the (possibly nested) tea.Batch tree,
+// returning the string form of every message whose dynamic kind is
+// reflect.String — i.e. the OSC52 setClipboardMsg(s). Non-string preamble
+// messages and nil messages are ignored.
+func collectStringPayloads(cmd tea.Cmd) []string {
+	if cmd == nil {
+		return nil
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		var out []string
+		for _, sub := range msg {
+			out = append(out, collectStringPayloads(sub)...)
+		}
+		return out
+	case nil:
+		return nil
+	default:
+		if reflect.ValueOf(msg).Kind() == reflect.String {
+			return []string{fmt.Sprintf("%v", msg)}
+		}
+		return nil
+	}
+}
+
+// batchCarriesPayload runs cmd and reports whether any message in the (possibly
+// nested) tea.Batch tree contains want in its string form. open-current's logs
+// branch nests clipboard.Copy (itself a batch) inside an outer batch, so a
+// recursive walk is needed to reach the OSC52 SetClipboard payload.
+func batchCarriesPayload(cmd tea.Cmd, want string) bool {
+	if cmd == nil {
+		return false
+	}
+	switch msg := cmd().(type) {
+	case tea.BatchMsg:
+		for _, sub := range msg {
+			if batchCarriesPayload(sub, want) {
+				return true
+			}
+		}
+		return false
+	case nil:
+		return false
+	default:
+		return strings.Contains(fmt.Sprintf("%v", msg), want)
+	}
+}
+
+// newCopyApp builds an App with a focused pods split holding the given objects
+// (cursor on the first row).
+func newCopyApp(t *testing.T, objs ...*unstructured.Unstructured) App {
+	t.Helper()
+	a := newTestApp()
+	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	plugin.Register(p)
+	a.layout.AddSplit(p, "default", "")
+	a.layout.FocusedSplit().SetObjects(objs)
+	return a
+}
+
+func TestCopyCurrent_ResourcesSingleCursorRow(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+
+	model, cmd := a.executeCommand("copy-current")
+	got := model.(App)
+
+	if payload := clipboardPayload(t, cmd); payload != "pod-1" {
+		t.Fatalf("clipboard payload should be exactly the resource name, got %q", payload)
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelInfo {
+		t.Fatalf("expected 1 info toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+func TestCopyCurrent_ResourcesMultipleMarkedRows(t *testing.T) {
+	// ToggleSelect keys marks by UID, so the rows must carry UIDs.
+	p1, p2, p3 := makePodObj("pod-1", "default"), makePodObj("pod-2", "default"), makePodObj("pod-3", "default")
+	p1.SetUID("uid-1")
+	p2.SetUID("uid-2")
+	p3.SetUID("uid-3")
+	a := newCopyApp(t, p1, p2, p3)
+
+	// Mark the first two rows.
+	a.layout.FocusedSplit().ToggleSelect()
+	a.layout.FocusedSplit().CursorDown()
+	a.layout.FocusedSplit().ToggleSelect()
+
+	model, cmd := a.executeCommand("copy-current")
+	_ = model.(App)
+
+	payload := clipboardPayload(t, cmd)
+	if !strings.Contains(payload, "pod-1\npod-2") {
+		t.Fatalf("marked rows should be newline-joined, got %q", payload)
+	}
+	if strings.Contains(payload, "pod-3") {
+		t.Fatalf("unmarked row must not be copied, got %q", payload)
+	}
+}
+
+func TestCopyCurrent_NoSelectionNoCmd(t *testing.T) {
+	a := newCopyApp(t) // empty split: no cursor row, no marks
+
+	model, cmd := a.executeCommand("copy-current")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd when there is nothing to copy")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+func TestCopyCurrent_DetailBufferCopiesRawContent(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.RightPanel().SetMode(msgs.DetailYAML)
+	a.layout.FocusDetails()
+
+	sentinel := "SENTINEL-YAML-BUFFER"
+	a.layout.RightPanel().SetContent(render.Content{Raw: sentinel, Display: sentinel}, true)
+
+	model, cmd := a.executeCommand("copy-current")
+	_ = model.(App)
+
+	if payload := clipboardPayload(t, cmd); !strings.Contains(payload, sentinel) {
+		t.Fatalf("detail-pane copy should carry RawContent, got %q", payload)
+	}
+}
+
+func TestCopyCurrent_DetailBufferEmptyNoCmd(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.RightPanel().SetMode(msgs.DetailYAML)
+	a.layout.FocusDetails()
+	// RawContent is empty (no SetContent call).
+
+	model, cmd := a.executeCommand("copy-current")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd when the detail buffer is empty")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+func TestCopyCurrent_LogsBufferCopiesJoinedLines(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.SetLogMode(true)
+	a.layout.FocusDetails()
+	lv := a.layout.LogView()
+	lv.AppendLine("line-1")
+	lv.AppendLine("line-2")
+	lv.SetNamespace("ns")
+	lv.SetPodName("pod")
+	lv.SetActiveContainer("ctr")
+
+	model, cmd := a.executeCommand("copy-current")
+	_ = model.(App)
+
+	if payload := clipboardPayload(t, cmd); !strings.Contains(payload, "line-1\nline-2") {
+		t.Fatalf("logs copy should newline-join the buffered lines, got %q", payload)
+	}
+}
+
+// mockPlugin.YAML returns this fixed document for any object (see its definition
+// at the top of this file); copy-yaml tests assert against its trimmed form.
+const mockYAMLRaw = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test-pod\n"
+
+func TestCopyYAML_SingleCursorRow(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+
+	model, cmd := a.executeCommand("copy-yaml")
+	got := model.(App)
+
+	payload := clipboardPayload(t, cmd)
+	if want := clipboard.JoinYAML([]string{mockYAMLRaw}); payload != want {
+		t.Fatalf("copy-yaml single row payload = %q, want %q", payload, want)
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelInfo {
+		t.Fatalf("expected 1 info toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+func TestCopyYAML_MultipleMarkedRows(t *testing.T) {
+	// ToggleSelect keys marks by UID, so the rows must carry UIDs.
+	p1, p2, p3 := makePodObj("pod-1", "default"), makePodObj("pod-2", "default"), makePodObj("pod-3", "default")
+	p1.SetUID("uid-1")
+	p2.SetUID("uid-2")
+	p3.SetUID("uid-3")
+	a := newCopyApp(t, p1, p2, p3)
+
+	// Mark the first two rows.
+	a.layout.FocusedSplit().ToggleSelect()
+	a.layout.FocusedSplit().CursorDown()
+	a.layout.FocusedSplit().ToggleSelect()
+
+	model, cmd := a.executeCommand("copy-yaml")
+	_ = model.(App)
+
+	payload := clipboardPayload(t, cmd)
+	if want := clipboard.JoinYAML([]string{mockYAMLRaw, mockYAMLRaw}); payload != want {
+		t.Fatalf("copy-yaml marked rows payload = %q, want %q", payload, want)
+	}
+	if !strings.Contains(payload, "\n---\n") {
+		t.Fatalf("multiple docs should be joined by the YAML separator, got %q", payload)
+	}
+}
+
+func TestCopyYAML_NoSelectionNoCmd(t *testing.T) {
+	a := newCopyApp(t) // empty split: no cursor row, no marks
+
+	model, cmd := a.executeCommand("copy-yaml")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd when there is nothing to copy")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+// findNewTempFile returns the path of the single aku-*<suffix> temp file in
+// os.TempDir that was not present in the before snapshot. open-current writes
+// resource YAML / detail buffers to OS temp files (os.CreateTemp), so tests read
+// them back to assert the written content. The returned file is registered for
+// cleanup. Fails the test unless exactly one new matching file is found.
+func findNewTempFile(t *testing.T, before map[string]bool, suffix string) string {
+	t.Helper()
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		t.Fatalf("ReadDir TempDir: %v", err)
+	}
+	var found string
+	for _, e := range entries {
+		name := e.Name()
+		if before[name] || !strings.HasPrefix(name, "aku-") || !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		path := filepath.Join(os.TempDir(), name)
+		// Register cleanup the moment a match is found so the leftover temp file
+		// is removed even if a later assertion in this helper (or the caller)
+		// fails before we return.
+		t.Cleanup(func() { os.Remove(path) })
+		if found != "" {
+			t.Fatalf("found multiple new temp files: %q and %q", found, name)
+		}
+		found = path
+	}
+	if found == "" {
+		t.Fatalf("no new aku-*%s temp file created in %s", suffix, os.TempDir())
+	}
+	return found
+}
+
+// tempDirSnapshot records the current entry names in os.TempDir so a subsequent
+// findNewTempFile call can isolate the file open-current just created.
+func tempDirSnapshot(t *testing.T) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		t.Fatalf("ReadDir TempDir: %v", err)
+	}
+	snap := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		snap[e.Name()] = true
+	}
+	return snap
+}
+
+func TestOpenCurrent_ResourcesSingleCursorRow(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	before := tempDirSnapshot(t)
+
+	model, cmd := a.executeCommand("open-current")
+	got := model.(App)
+
+	if cmd == nil {
+		t.Fatal("expected a non-nil tea.Exec cmd to suspend the TUI")
+	}
+	path := findNewTempFile(t, before, ".yaml")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if want := clipboard.JoinYAML([]string{mockYAMLRaw}); string(content) != want {
+		t.Fatalf("temp file content = %q, want %q", string(content), want)
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelInfo {
+		t.Fatalf("expected 1 info toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+func TestOpenCurrent_ResourcesMultipleMarkedRows(t *testing.T) {
+	p1, p2, p3 := makePodObj("pod-1", "default"), makePodObj("pod-2", "default"), makePodObj("pod-3", "default")
+	p1.SetUID("uid-1")
+	p2.SetUID("uid-2")
+	p3.SetUID("uid-3")
+	a := newCopyApp(t, p1, p2, p3)
+
+	a.layout.FocusedSplit().ToggleSelect()
+	a.layout.FocusedSplit().CursorDown()
+	a.layout.FocusedSplit().ToggleSelect()
+
+	before := tempDirSnapshot(t)
+	model, cmd := a.executeCommand("open-current")
+	_ = model.(App)
+
+	if cmd == nil {
+		t.Fatal("expected a non-nil tea.Exec cmd")
+	}
+	path := findNewTempFile(t, before, ".yaml")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if want := clipboard.JoinYAML([]string{mockYAMLRaw, mockYAMLRaw}); string(content) != want {
+		t.Fatalf("temp file content = %q, want %q", string(content), want)
+	}
+	if !strings.Contains(string(content), "\n---\n") {
+		t.Fatalf("multiple docs should be joined by the YAML separator, got %q", string(content))
+	}
+}
+
+func TestOpenCurrent_NoSelectionNoCmd(t *testing.T) {
+	a := newCopyApp(t) // empty split: no cursor row, no marks
+
+	model, cmd := a.executeCommand("open-current")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd when there is nothing to open")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+func TestOpenCurrent_DetailBufferWritesRawContent(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.RightPanel().SetMode(msgs.DetailYAML)
+	a.layout.FocusDetails()
+
+	sentinel := "SENTINEL-DETAIL-OPEN"
+	a.layout.RightPanel().SetContent(render.Content{Raw: sentinel, Display: sentinel}, true)
+
+	before := tempDirSnapshot(t)
+	model, cmd := a.executeCommand("open-current")
+	_ = model.(App)
+
+	if cmd == nil {
+		t.Fatal("expected a non-nil tea.Exec cmd")
+	}
+	path := findNewTempFile(t, before, ".yaml")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(content) != sentinel {
+		t.Fatalf("temp file content = %q, want %q", string(content), sentinel)
+	}
+}
+
+func TestOpenCurrent_DetailBufferEmptyNoCmd(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.RightPanel().SetMode(msgs.DetailYAML)
+	a.layout.FocusDetails()
+	// RawContent empty (no SetContent call).
+
+	model, cmd := a.executeCommand("open-current")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd when the detail buffer is empty")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+func TestOpenCurrent_LogsSavesOpensAndCopiesPath(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.SetLogMode(true)
+	a = withGlobalClient(a, &k8s.Client{Context: "stg"})
+	a.layout.FocusDetails()
+	lv := a.layout.LogView()
+	lv.AppendLine("hello")
+	lv.AppendLine("world")
+	lv.SetNamespace("ns")
+	lv.SetPodName("pod")
+	lv.SetActiveContainer("ctr")
+
+	model, cmd := a.executeCommand("open-current")
+	got := model.(App)
+
+	if cmd == nil {
+		t.Fatal("expected a non-nil batch cmd (open + clipboard copy)")
+	}
+
+	// The saved log file must exist on disk with the buffered lines.
+	clusterDir := filepath.Join(base, "aku", "logs", "stg")
+	entries, err := os.ReadDir(clusterDir)
+	if err != nil {
+		t.Fatalf("ReadDir %s: %v", clusterDir, err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 saved log file, got %d", len(entries))
+	}
+	savedPath := filepath.Join(clusterDir, entries[0].Name())
+	saved, err := os.ReadFile(savedPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(saved) != "hello\nworld\n" {
+		t.Errorf("saved log content = %q, want %q", string(saved), "hello\nworld\n")
+	}
+
+	// The returned cmd is a tea.Batch of logs.OpenCmd and clipboard.Copy(path);
+	// the latter is itself a batch (native write + OSC52), so walk the batch tree
+	// looking for the SetClipboard message carrying the saved file path.
+	if !batchCarriesPayload(cmd, savedPath) {
+		t.Fatalf("expected one batched cmd to copy the saved path %q to the clipboard", savedPath)
+	}
+
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelInfo {
+		t.Fatalf("expected 1 info toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+func TestOpenCurrent_LogsNoLinesNoCmd(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.SetLogMode(true)
+	a.layout.FocusDetails()
+	// LogView has no lines -> saveLogBuffer ok=false; it emits its own error toast.
+
+	model, cmd := a.executeCommand("open-current")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd on the no-lines error path")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast from saveLogBuffer, got %d (%+v)", len(notes), notes)
+	}
+}
+
+// TestCopyCurrent_LogsNoLinesNoCmd is the copy-current parallel of
+// TestOpenCurrent_LogsNoLinesNoCmd: in logs context with an empty buffer,
+// copy-current is a no-op that emits an error toast and returns a nil cmd.
+func TestCopyCurrent_LogsNoLinesNoCmd(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.SetLogMode(true)
+	a.layout.FocusDetails()
+	// LogView has no lines -> currentLogContext ok=false.
+
+	model, cmd := a.executeCommand("copy-current")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd on the no-lines error path")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+// TestCopyCurrent_LogsMissingMetadataNoCmd covers handleCopyCurrent's !ok guard
+// distinctly from the empty-lines case: the LogView holds lines but is missing
+// metadata (empty pod name / namespace), so currentLogContext returns ok=false
+// even though len(lines) > 0. copy-current must still be a no-op that emits an
+// error toast and returns a nil cmd.
+func TestCopyCurrent_LogsMissingMetadataNoCmd(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.SetLogMode(true)
+	a.layout.FocusDetails()
+	lv := a.layout.LogView()
+	lv.AppendLine("line-1") // non-empty buffer...
+	// ...but no pod/namespace/container set -> currentLogContext ok=false.
+
+	model, cmd := a.executeCommand("copy-current")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd when log context metadata is missing")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+// newErrYAMLApp builds an App with a focused split whose plugin's YAML() always
+// fails, holding a single cursor row, to drive the YAML-render error paths.
+func newErrYAMLApp(t *testing.T) App {
+	t.Helper()
+	a := newTestApp()
+	p := &errYAMLPlugin{mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}}
+	plugin.Register(p)
+	a.layout.AddSplit(p, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{makePodObj("pod-1", "default")})
+	return a
+}
+
+// TestSelectedResourceYAML_RenderErrorReturnsNotOk covers the shared helper's
+// render-error path directly: a failing YAML() yields ok=false and an error
+// toast, with no docs returned.
+func TestSelectedResourceYAML_RenderErrorReturnsNotOk(t *testing.T) {
+	a := newErrYAMLApp(t)
+
+	docs, ok := a.selectedResourceYAML("copy-yaml", "Nothing to copy", "Copy YAML failed")
+	if ok {
+		t.Fatal("expected ok=false on render error")
+	}
+	if docs != nil {
+		t.Fatalf("expected nil docs on render error, got %v", docs)
+	}
+	notes := a.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast, got %d (%+v)", len(notes), notes)
+	}
+}
+
+// TestOpenCurrent_ResourcesRenderErrorNoCmd asserts open-current's resources
+// branch surfaces a YAML-render failure as an error toast with a nil cmd (no
+// temp file opened).
+func TestOpenCurrent_ResourcesRenderErrorNoCmd(t *testing.T) {
+	a := newErrYAMLApp(t)
+
+	model, cmd := a.executeCommand("open-current")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd when YAML rendering fails")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast on render failure, got %d (%+v)", len(notes), notes)
+	}
+}
+
+// TestCopyYAML_RenderErrorNoCmd asserts copy-yaml surfaces a YAML-render failure
+// as an error toast with a nil cmd (nothing copied), mirroring
+// TestOpenCurrent_ResourcesRenderErrorNoCmd for the copy path.
+func TestCopyYAML_RenderErrorNoCmd(t *testing.T) {
+	a := newErrYAMLApp(t)
+
+	model, cmd := a.executeCommand("copy-yaml")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatal("expected nil cmd when YAML rendering fails")
+	}
+	notes := got.notify.List()
+	if len(notes) != 1 || notes[0].Level != notify.LevelError {
+		t.Fatalf("expected 1 error toast on render failure, got %d (%+v)", len(notes), notes)
+	}
+}
+
+// TestCopyCurrent_DescribeBufferCopiesRawContent covers copy-current in describe
+// mode: it copies the detail panel's RawContent verbatim.
+func TestCopyCurrent_DescribeBufferCopiesRawContent(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.RightPanel().SetMode(msgs.DetailDescribe)
+	a.layout.FocusDetails()
+
+	sentinel := "SENTINEL-DESCRIBE-BUFFER"
+	a.layout.RightPanel().SetContent(render.Content{Raw: sentinel, Display: sentinel}, true)
+
+	model, cmd := a.executeCommand("copy-current")
+	_ = model.(App)
+
+	if payload := clipboardPayload(t, cmd); !strings.Contains(payload, sentinel) {
+		t.Fatalf("describe-pane copy should carry RawContent, got %q", payload)
+	}
+}
+
+// TestOpenCurrent_DescribeBufferWritesTxt covers open-current in describe mode:
+// the buffer is written to a .txt temp file (describe is plain text, not YAML).
+func TestOpenCurrent_DescribeBufferWritesTxt(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.RightPanel().SetMode(msgs.DetailDescribe)
+	a.layout.FocusDetails()
+
+	sentinel := "SENTINEL-DESCRIBE-OPEN"
+	a.layout.RightPanel().SetContent(render.Content{Raw: sentinel, Display: sentinel}, true)
+
+	before := tempDirSnapshot(t)
+	model, cmd := a.executeCommand("open-current")
+	_ = model.(App)
+
+	if cmd == nil {
+		t.Fatal("expected a non-nil tea.Exec cmd")
+	}
+	path := findNewTempFile(t, before, ".txt")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(content) != sentinel {
+		t.Fatalf("temp file content = %q, want %q", string(content), sentinel)
+	}
+}
+
+// TestOpenCurrent_DetailsBufferWritesYaml covers open-current in details mode
+// (Helm values): the buffer is YAML, so it must be written to a .yaml temp file.
+func TestOpenCurrent_DetailsBufferWritesYaml(t *testing.T) {
+	a := newCopyApp(t, makePodObj("pod-1", "default"))
+	a.layout.ShowRightPanel()
+	a.layout.RightPanel().SetMode(msgs.DetailValues)
+	a.layout.FocusDetails()
+
+	sentinel := "key: value\n"
+	a.layout.RightPanel().SetContent(render.Content{Raw: sentinel, Display: sentinel}, true)
+
+	before := tempDirSnapshot(t)
+	model, cmd := a.executeCommand("open-current")
+	_ = model.(App)
+
+	if cmd == nil {
+		t.Fatal("expected a non-nil tea.Exec cmd")
+	}
+	path := findNewTempFile(t, before, ".yaml")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(content) != sentinel {
+		t.Fatalf("temp file content = %q, want %q", string(content), sentinel)
 	}
 }

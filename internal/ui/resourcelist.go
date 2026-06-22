@@ -22,17 +22,19 @@ const maxBadgeContext = 20
 
 // ResourceList wraps bubbles/table with plugin-driven columns.
 type ResourceList struct {
-	plugin             plugin.ResourcePlugin
-	table              table.Model
-	styles             table.Styles
-	allObjects         []*unstructured.Unstructured
-	displayObjects     []*unstructured.Unstructured
-	filterState        SearchState
-	searchState        SearchState
-	sortState          SortState
-	namespace          string
-	context            string // kube-context this pane is scoped to ("" until app/layer sets it)
-	focused            bool
+	plugin         plugin.ResourcePlugin
+	table          table.Model
+	allObjects     []*unstructured.Unstructured
+	displayObjects []*unstructured.Unstructured
+	filterState    SearchState
+	searchState    SearchState
+	sortState      SortState
+	namespace      string
+	context        string // kube-context this pane is scoped to ("" until app/layer sets it)
+	focused        bool
+	// selectionActive (true under Focus and under BlurBorder — the detail-focused
+	// state) lives solely on table.Model; applyFocus mirrors it there and
+	// SelectionActive() reads it back, so there is no second copy to drift.
 	borderless         bool
 	width              int
 	height             int
@@ -75,11 +77,13 @@ func NewResourceList(p plugin.ResourcePlugin, width, height int) ResourceList {
 	s.Selected = TableSelectedStyle
 	t.SetStyles(s)
 	t.SetContentWidth(contentWidth)
+	// A new pane is focused with an active selection; push that into the table so
+	// the cursor renders without waiting for the first focus transition.
+	t.SetSelectionActive(true)
 
 	return ResourceList{
 		plugin:       p,
 		table:        t,
-		styles:       s,
 		sortState:    sortState,
 		focused:      true,
 		width:        width,
@@ -441,45 +445,56 @@ func (r *ResourceList) SetBorderless(b bool) {
 	r.SetSize(r.width, r.height)
 }
 
-// Focus marks this list as focused.
-func (r *ResourceList) Focus() {
-	r.focused = true
-	r.table.Focus()
-	r.styles.Selected = TableSelectedStyle
-	r.table.SetStyles(r.styles)
-	r.EnsureCursorVisible()
+// applyFocus is the single setter of the two orthogonal focus bits: `border`
+// drives border color + keyboard input (r.focused → table.Focus/Blur), and
+// `selection` drives the cursor highlight (pushed into table.Model's live
+// selectionActive flag, the single source of truth read by renderRow). It
+// re-renders; the RowStyleFunc closure reads `active` live, so no per-focus
+// rebind is needed.
+func (r *ResourceList) applyFocus(border, selection bool) {
+	r.focused = border
+	if border {
+		r.table.Focus()
+	} else {
+		r.table.Blur()
+	}
+	r.table.SetSelectionActive(selection)
+	// Snap the viewport to the cursor only on border-taking transitions
+	// (Focus); Blur/BlurBorder leave the viewport untouched, so the
+	// border-only gate here is intentional, not a missing branch.
+	if border {
+		r.table.EnsureCursorVisible()
+	}
 }
+
+// Focus marks this list as focused with an active selection.
+func (r *ResourceList) Focus() { r.applyFocus(true, true) }
 
 // EnsureCursorVisible adjusts cursor location.
 func (r *ResourceList) EnsureCursorVisible() {
 	r.table.EnsureCursorVisible()
 }
 
-// Blur marks this list as unfocused.
-func (r *ResourceList) Blur() {
-	r.focused = false
-	r.table.Blur()
-	r.styles.Selected = TableSelectedDimStyle
-	r.table.SetStyles(r.styles)
-}
+// Blur marks this list as unfocused, clearing the active selection so the cursor
+// row renders identically to its neighbors.
+func (r *ResourceList) Blur() { r.applyFocus(false, false) }
 
-// BlurBorder dims only the border, keeping the selected row style.
-// Used when focus moves to the detail panel so the active selection remains visible.
-func (r *ResourceList) BlurBorder() {
-	r.focused = false
-}
-
-// FocusBorder restores the focused border without changing the selected row style.
-// Pairs with BlurBorder when returning from detail-scroll mode.
-func (r *ResourceList) FocusBorder() {
-	r.focused = true
-	r.table.EnsureCursorVisible()
-}
+// BlurBorder dims only the border, keeping the active selection so the cursor
+// stays visible. Used when focus moves to the detail panel.
+func (r *ResourceList) BlurBorder() { r.applyFocus(false, true) }
 
 // Focused returns whether this list has focus.
 func (r *ResourceList) Focused() bool {
 	return r.focused
 }
+
+// SelectionActive reports the selection state mirrored into table.Model by
+// applyFocus: true under Focus and BlurBorder, false only under
+// Blur. When active the selected row keeps its cursor-style fill (accent for
+// healthy rows, health-colored fill for warning/error rows). This is distinct
+// from Focused(), which reports only border focus: under BlurBorder
+// SelectionActive() is true while Focused() is false.
+func (r *ResourceList) SelectionActive() bool { return r.table.SelectionActive() }
 
 // PushNav saves current state and switches to a drill-down child view.
 func (r *ResourceList) PushNav(childPlugin plugin.ResourcePlugin, children []*unstructured.Unstructured, parentName string, parentUID string, parentAPIVersion string, parentKind string) {
@@ -764,34 +779,53 @@ func (r *ResourceList) SelectedObjects() []*unstructured.Unstructured {
 	return result
 }
 
-// rebindRowStyle rebuilds the RowStyleFunc closure with current selected/displayObjects state.
-// Must be called whenever selected or displayObjects changes.
+// rebindRowStyle rebuilds the RowStyleFunc closure over the current `selected`
+// and `displayObjects`. Must be called whenever those (data / marks / display)
+// change. Focus / selection-active changes do NOT require a rebind: the closure
+// is parameterized on the live `active` argument that renderRow passes in, so
+// applyFocus deliberately does not call this.
 func (r *ResourceList) rebindRowStyle() {
 	selected := r.selected
 	display := r.displayObjects
 	reporter, _ := r.plugin.(plugin.HealthReporter)
-	// Fast path: with nothing selected and no health to report, the closure can
-	// only ever return nil, so skip installing it and avoid a per-row call.
+	// Fast path: when nothing is selected AND reporter == nil, the closure can only
+	// ever return nil, so we skip installing it to avoid a per-row call.
+	// The fast path may ignore `active` only because BOTH conditions hold together:
+	// `len(selected) == 0` makes the marks branch (which reads `active` directly) a
+	// no-op, and `reporter == nil` makes the active-cursor health branch (which also
+	// reads `active`) a no-op. With every `active`-reading branch dead, selection-
+	// active state cannot affect the result. Do NOT skip on `reporter == nil && !active`
+	// alone: with marks present that would drop the marked-cursor style in active panes.
 	if len(selected) == 0 && reporter == nil {
 		r.table.RowStyleFunc = nil
 		return
 	}
-	r.table.RowStyleFunc = func(index int, isCursor bool) *lipgloss.Style {
+	r.table.RowStyleFunc = func(index int, isCursor, active bool) *lipgloss.Style {
 		if index < 0 || index >= len(display) {
 			return nil
 		}
-		// Marks win over selection and health.
+		// Marks win over selection and health. The cursor variant only applies in
+		// an active pane; an inactive pane shows the plain mark (no cursor highlight).
 		if _, ok := selected[display[index].GetUID()]; ok {
-			if isCursor {
+			if isCursor && active {
 				return &TableMarkedSelectedStyle
 			}
 			return &TableMarkedStyle
 		}
-		// Selection (cursor) wins over health; nil lets the table apply Selected.
-		if isCursor {
-			return nil
+		// Cursor row in the ACTIVE pane (list or detail focus): k9s-style status fill.
+		if isCursor && active && reporter != nil {
+			switch reporter.RowHealth(display[index]) {
+			case plugin.Warning:
+				return &TableHealthWarnCursorStyle
+			case plugin.Error:
+				return &TableHealthErrorCursorStyle
+			default:
+				return nil // healthy → table applies Selected
+			}
 		}
-		// Health tint for non-cursor, unmarked rows.
+		// Unmarked non-cursor row, OR unmarked cursor row in an INACTIVE pane: standard
+		// health tint (renders the cursor row identically to a normal row — no cursor
+		// highlight). Marked rows returned earlier.
 		if reporter == nil {
 			return nil
 		}
@@ -984,7 +1018,12 @@ func (r *ResourceList) applyVisibleHighlights() {
 		// themed-color match marker. Use reverse-video for those rows so the match
 		// stays visible on the tint; reverse-video survives the strip.
 		reverse := i == cursor
-		if !reverse && r.table.RowStyleFunc != nil && r.table.RowStyleFunc(i, false) != nil {
+		// The probe asks "would this non-cursor row get a whole-row tint?". Every
+		// branch in the closure that reads `active` (the marked-cursor and
+		// active-cursor-health branches) is guarded by isCursor; this probe passes
+		// isCursor=false, so none of them fire and the `active` arg is dead. Pass a
+		// constant false to make that independence explicit.
+		if !reverse && r.table.RowStyleFunc != nil && r.table.RowStyleFunc(i, false, false) != nil {
 			reverse = true
 		}
 		for j, cell := range row {

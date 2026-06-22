@@ -35,6 +35,20 @@ func TestDetailViewClearContent(t *testing.T) {
 	}
 }
 
+func TestDetailViewRawContent(t *testing.T) {
+	dv := NewDetailView(40, 10)
+	dv.SetMode(msgs.DetailYAML)
+	raw := "apiVersion: v1\nkind: Pod"
+	dv.SetContent(render.Content{Raw: raw, Display: raw}, true)
+	if got := dv.RawContent(); got != raw {
+		t.Fatalf("RawContent() = %q, want %q", got, raw)
+	}
+	dv.ClearContent()
+	if got := dv.RawContent(); got != "" {
+		t.Fatalf("RawContent() after ClearContent = %q, want empty", got)
+	}
+}
+
 func TestDetailViewMode(t *testing.T) {
 	dv := NewDetailView(40, 10)
 	dv.SetMode(msgs.DetailDescribe)

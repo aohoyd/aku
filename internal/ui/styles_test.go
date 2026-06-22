@@ -39,3 +39,24 @@ func TestTableHealthStyles(t *testing.T) {
 		}
 	}
 }
+
+func TestTableHealthCursorStyles(t *testing.T) {
+	if bg := TableHealthErrorCursorStyle.GetBackground(); bg != theme.StatusFailed {
+		t.Errorf("TableHealthErrorCursorStyle background = %v, want %v", bg, theme.StatusFailed)
+	}
+	if fg := TableHealthErrorCursorStyle.GetForeground(); fg != theme.TextOnStatus {
+		t.Errorf("TableHealthErrorCursorStyle foreground = %v, want %v", fg, theme.TextOnStatus)
+	}
+	if !TableHealthErrorCursorStyle.GetBold() {
+		t.Error("TableHealthErrorCursorStyle is not bold, want bold")
+	}
+	if bg := TableHealthWarnCursorStyle.GetBackground(); bg != theme.StatusPending {
+		t.Errorf("TableHealthWarnCursorStyle background = %v, want %v", bg, theme.StatusPending)
+	}
+	if fg := TableHealthWarnCursorStyle.GetForeground(); fg != theme.TextOnStatus {
+		t.Errorf("TableHealthWarnCursorStyle foreground = %v, want %v", fg, theme.TextOnStatus)
+	}
+	if !TableHealthWarnCursorStyle.GetBold() {
+		t.Error("TableHealthWarnCursorStyle is not bold, want bold")
+	}
+}

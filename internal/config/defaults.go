@@ -46,6 +46,11 @@ func DefaultBindings() []Binding {
 			{Key: "P", Help: "pvc", Command: "split-pvc"},
 			{Key: "X", Help: "contexts", Command: "split-contexts"},
 		}},
+		{Key: "c", Help: "copy", Visible: true, Keys: []Binding{
+			{Key: "c", Help: "copy", Command: "copy-current"},
+			{Key: "y", Help: "copy yaml", Command: "copy-yaml"},
+			{Key: "o", Help: "open", Command: "open-current"},
+		}},
 		{Key: "ctrl+x", Help: "clear msgs", Command: "clear-notifications"},
 		{Key: "ctrl+d", Help: "delete", Command: "delete", Visible: true},
 		{Key: "ctrl+f", Help: "page down", Command: "page-down"},
@@ -115,7 +120,7 @@ func DefaultBindings() []Binding {
 		// ── Log pager controls ──
 		{Key: "a", Help: "autoscroll", Command: "toggle-autoscroll", Scope: "logs", Visible: true},
 		{Key: "s", Help: "syntax", Command: "toggle-log-syntax", Scope: "logs", Visible: true},
-		{Key: "c", Help: "container", Command: "select-container", Scope: "logs", Visible: true},
+		{Key: "C", Help: "container", Command: "select-container", Scope: "logs", Visible: true},
 		{Key: "t", Help: "time range", Command: "select-time-range", Scope: "logs", Visible: true},
 		{Key: "enter", Help: "mark", Command: "log-insert-marker", Scope: "logs"},
 		{Key: "ctrl+s", Help: "save logs", Command: "save-logs", Scope: "logs", Visible: true},

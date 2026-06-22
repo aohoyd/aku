@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/aohoyd/aku/internal/clipboard"
 	"github.com/aohoyd/aku/internal/cluster"
 	"github.com/aohoyd/aku/internal/config"
 	"github.com/aohoyd/aku/internal/helm"
@@ -858,7 +859,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if !a.layout.IsLogMode() {
 			return a, nil
 		}
-		path, lineCount, ok := a.saveLogBuffer()
+		path, lineCount, ok := a.saveLogBuffer("save-logs")
 		if !ok {
 			return a, nil
 		}
@@ -869,7 +870,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if !a.layout.IsLogMode() {
 			return a, nil
 		}
-		path, _, ok := a.saveLogBuffer()
+		path, _, ok := a.saveLogBuffer("save-and-open-logs")
 		if !ok {
 			return a, nil
 		}
@@ -976,6 +977,12 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 		return a, nil
+	case command == "copy-current":
+		return a.handleCopyCurrent()
+	case command == "copy-yaml":
+		return a.handleCopyYAML()
+	case command == "open-current":
+		return a.handleOpenCurrent()
 	case command == "reload-all":
 		return a.reloadAll()
 	case command == "refresh-detail":
@@ -993,6 +1000,197 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 
 	a.notify.Add(notify.LevelError, fmt.Sprintf("unknown command: %s", command), a.contextFor(nil), "command")
 	return a, nil
+}
+
+// handleCopyCurrent implements the "cc" command: copy the focused pane's
+// current content to the clipboard. The source depends on the focused context:
+//   - resources: the marked rows' names (falling back to the cursor row), joined
+//     by newlines.
+//   - yaml/describe (detail panel): the panel's raw buffer.
+//   - logs: the buffered log lines, joined by newlines.
+//
+// Nothing-to-copy paths emit an error toast and return a nil cmd. Success emits
+// an info toast and returns clipboard.Copy's tea.Cmd (OSC52 + native fallback).
+func (a App) handleCopyCurrent() (tea.Model, tea.Cmd) {
+	componentType, _ := a.currentContext()
+	switch componentType {
+	case "yaml", "describe", "details":
+		panel := a.layout.RightPanel()
+		if panel == nil {
+			a.notify.Add(notify.LevelError, "Nothing to copy", a.contextFor(nil), "copy-current")
+			return a, nil
+		}
+		text := panel.RawContent()
+		if text == "" {
+			a.notify.Add(notify.LevelError, "Nothing to copy", a.contextFor(nil), "copy-current")
+			return a, nil
+		}
+		a.notify.Add(notify.LevelInfo, "Copied buffer", a.contextFor(nil), "copy-current")
+		return a, clipboard.Copy(text)
+
+	case "logs":
+		_, _, _, _, lines, ok := a.currentLogContext()
+		if !ok || len(lines) == 0 {
+			a.notify.Add(notify.LevelError, "Nothing to copy", a.contextFor(nil), "copy-current")
+			return a, nil
+		}
+		a.notify.Add(notify.LevelInfo, fmt.Sprintf("Copied %d log line(s)", len(lines)), a.contextFor(nil), "copy-current")
+		return a, clipboard.Copy(strings.Join(lines, "\n"))
+
+	default:
+		focused, selected, _ := a.focusedSelection()
+		if focused == nil {
+			a.notify.Add(notify.LevelError, "Nothing to copy", a.contextFor(nil), "copy-current")
+			return a, nil
+		}
+		objs := focused.SelectedObjects()
+		if len(objs) == 0 {
+			if selected == nil {
+				a.notify.Add(notify.LevelError, "Nothing to copy", a.contextFor(focused), "copy-current")
+				return a, nil
+			}
+			objs = []*unstructured.Unstructured{selected}
+		}
+		a.notify.Add(notify.LevelInfo, fmt.Sprintf("Copied %d name(s)", len(objs)), a.contextFor(focused), "copy-current")
+		return a, clipboard.Copy(clipboard.JoinNames(objs))
+	}
+}
+
+// selectedResourceYAML gathers the focused pane's resource selection (marked
+// rows, falling back to the cursor row) and renders each object's YAML via the
+// plugin, returning the raw docs. It is the shared core of copy-yaml and
+// open-current's resources branch. On any no-op (no focused pane / nothing
+// selected) or render error it emits an error toast — tagged with tag, worded
+// with the given nothing/renderFail messages — and returns ok=false. Callers
+// join the docs (clipboard.JoinYAML) for the clipboard or a temp file.
+func (a App) selectedResourceYAML(tag, nothingMsg, renderFail string) (docs []string, ok bool) {
+	focused, selected, _ := a.focusedSelection()
+	if focused == nil {
+		a.notify.Add(notify.LevelError, nothingMsg, a.contextFor(nil), tag)
+		return nil, false
+	}
+	objs := focused.SelectedObjects()
+	if len(objs) == 0 {
+		if selected == nil {
+			a.notify.Add(notify.LevelError, nothingMsg, a.contextFor(focused), tag)
+			return nil, false
+		}
+		objs = []*unstructured.Unstructured{selected}
+	}
+	docs = make([]string, 0, len(objs))
+	for _, obj := range objs {
+		content, err := focused.Plugin().YAML(obj)
+		if err != nil {
+			a.notify.Add(notify.LevelError, fmt.Sprintf("%s: %s", renderFail, err), a.contextFor(focused), tag)
+			return nil, false
+		}
+		docs = append(docs, content.Raw)
+	}
+	return docs, true
+}
+
+// handleCopyYAML implements the "cy" command: copy the selected resource(s)'
+// rendered YAML to the clipboard. Unlike copy-current it is "resource only" —
+// it always operates on the focused pane's resource selection regardless of
+// which pane is focused. The marked rows are used when present, falling back to
+// the cursor row. Each resource's YAML is rendered via the plugin and the docs
+// are joined with "\n---\n".
+//
+// Nothing-to-copy paths emit an error toast and return a nil cmd. A render error
+// emits an error toast and returns a nil cmd (no partial copy). Success emits an
+// info toast and returns clipboard.Copy's tea.Cmd (OSC52 + native fallback).
+func (a App) handleCopyYAML() (tea.Model, tea.Cmd) {
+	docs, ok := a.selectedResourceYAML("copy-yaml", "Nothing to copy", "Copy YAML failed")
+	if !ok {
+		return a, nil
+	}
+	text := clipboard.JoinYAML(docs)
+	a.notify.Add(notify.LevelInfo, fmt.Sprintf("Copied YAML (%d resource(s))", len(docs)), a.contextFor(a.layout.FocusedSplit()), "copy-yaml")
+	return a, clipboard.Copy(text)
+}
+
+// openInEditorTemp writes content to a new OS temp file (in os.TempDir) with the
+// given filename suffix (e.g. ".yaml" or ".txt"), closes it, and returns a
+// tea.Cmd that opens the file in the resolved editor via logs.OpenCmd. The temp file is left
+// on disk after the editor exits (matching logs.OpenCmd's "file kept" semantics).
+func openInEditorTemp(content, suffix string) (tea.Cmd, error) {
+	f, err := os.CreateTemp("", "aku-*"+suffix)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return nil, err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(f.Name())
+		return nil, err
+	}
+	return logs.OpenCmd(f.Name()), nil
+}
+
+// handleOpenCurrent implements the "co" command: open the focused pane's current
+// content in $EDITOR. The source depends on the focused context:
+//   - resources: the selected resource(s)' rendered YAML (marked rows, falling
+//     back to the cursor row) written to an OS temp .yaml file.
+//   - yaml/describe (detail panel): the panel's raw buffer written to an OS temp
+//     file (.yaml in yaml/details mode, .txt for describe).
+//   - logs: the log buffer saved to its real destination via saveLogBuffer; the
+//     file is opened AND its path is copied to the clipboard.
+//
+// Nothing-to-open paths emit an error/no-op toast and return a nil cmd. Temp
+// write and YAML render errors emit an error toast and return a nil cmd.
+func (a App) handleOpenCurrent() (tea.Model, tea.Cmd) {
+	componentType, _ := a.currentContext()
+	switch componentType {
+	case "yaml", "describe", "details":
+		panel := a.layout.RightPanel()
+		if panel == nil {
+			a.notify.Add(notify.LevelError, "Nothing to open", a.contextFor(nil), "open-current")
+			return a, nil
+		}
+		text := panel.RawContent()
+		if text == "" {
+			a.notify.Add(notify.LevelError, "Nothing to open", a.contextFor(nil), "open-current")
+			return a, nil
+		}
+		// .yaml for yaml-mode AND details-mode (Helm values are YAML); .txt only
+		// for describe (plain text) — see currentContext() for the mode→type map.
+		suffix := ".txt"
+		if componentType == "yaml" || componentType == "details" {
+			suffix = ".yaml"
+		}
+		cmd, err := openInEditorTemp(text, suffix)
+		if err != nil {
+			a.notify.Add(notify.LevelError, fmt.Sprintf("Open failed: %s", err), a.contextFor(nil), "open-current")
+			return a, nil
+		}
+		a.notify.Add(notify.LevelInfo, "Opening buffer in editor", a.contextFor(nil), "open-current")
+		return a, cmd
+
+	case "logs":
+		path, _, ok := a.saveLogBuffer("open-current")
+		if !ok {
+			return a, nil
+		}
+		a.notify.Add(notify.LevelInfo, "Saved & opened; path copied", a.contextFor(nil), "open-current")
+		return a, tea.Batch(logs.OpenCmd(path), clipboard.Copy(path))
+
+	default:
+		docs, ok := a.selectedResourceYAML("open-current", "Nothing to open", "Open failed")
+		if !ok {
+			return a, nil
+		}
+		focused := a.layout.FocusedSplit()
+		cmd, err := openInEditorTemp(clipboard.JoinYAML(docs), ".yaml")
+		if err != nil {
+			a.notify.Add(notify.LevelError, fmt.Sprintf("Open failed: %s", err), a.contextFor(focused), "open-current")
+			return a, nil
+		}
+		a.notify.Add(notify.LevelInfo, fmt.Sprintf("Opening %d resource(s) in editor", len(docs)), a.contextFor(focused), "open-current")
+		return a, cmd
+	}
 }
 
 // currentLogContext returns the metadata needed to save the current log view's
@@ -1021,23 +1219,28 @@ func (a *App) currentLogContext() (cluster, ns, pod, container string, lines []s
 
 // saveLogBuffer writes the current log buffer to disk and emits the failure
 // notifications (no log lines, BuildPath error, Write error) shared by the
-// "save-logs" and "save-and-open-logs" commands. On success it returns the
-// written path and the number of lines saved with ok=true and emits NO
-// notification, leaving the success action (an info toast vs. opening the file)
-// to the caller. Callers must guard on IsLogMode() before invoking this.
-func (a App) saveLogBuffer() (path string, lineCount int, ok bool) {
+// "save-logs", "save-and-open-logs", and "open-current" (logs branch) commands.
+// Failure toasts are tagged with tag so they attribute to the calling command
+// ("save-logs" or "open-current"). On success it returns the written path and
+// the number of lines saved with ok=true and emits NO notification, leaving the
+// success action (an info toast vs. opening the file) to the caller.
+//
+// Callers must reach this only in log mode. The save-logs/save-and-open-logs
+// callers guard explicitly on IsLogMode(); handleOpenCurrent satisfies it
+// implicitly — it reaches here only in currentContext()'s "logs" case.
+func (a App) saveLogBuffer(tag string) (path string, lineCount int, ok bool) {
 	cluster, ns, pod, container, lines, ctxOk := a.currentLogContext()
 	if !ctxOk {
-		a.notify.Add(notify.LevelError, "No log lines to save", a.contextFor(nil), "save-logs")
+		a.notify.Add(notify.LevelError, "No log lines to save", a.contextFor(nil), tag)
 		return "", 0, false
 	}
 	path, err := logs.BuildPath(cluster, ns, pod, container, time.Now())
 	if err != nil {
-		a.notify.Add(notify.LevelError, fmt.Sprintf("Save failed: %s", err), a.contextFor(nil), "save-logs")
+		a.notify.Add(notify.LevelError, fmt.Sprintf("Save failed: %s", err), a.contextFor(nil), tag)
 		return "", 0, false
 	}
 	if err := logs.Write(path, lines); err != nil {
-		a.notify.Add(notify.LevelError, fmt.Sprintf("Save failed: %s", err), a.contextFor(nil), "save-logs")
+		a.notify.Add(notify.LevelError, fmt.Sprintf("Save failed: %s", err), a.contextFor(nil), tag)
 		return "", 0, false
 	}
 	return path, len(lines), true
@@ -1050,8 +1253,10 @@ func (a App) closeRightPanel() App {
 	a.layout.SetLogMode(false)
 	a.envResolved = false
 	a.lastDetailKey = ""
-	a.layout.FocusResources()
 	a.keyTrie.Reset()
+	// HideRightPanel sets focusTarget=Resources and self-reconciles, so an
+	// explicit FocusResources here would be a redundant reconcile (with
+	// rightVisible still true) immediately superseded.
 	a.layout.HideRightPanel()
 	a = a.syncIndicators()
 	a.statusBar.SetHints(a.currentHints())
@@ -1381,9 +1586,10 @@ func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 	a.keyTrie.Reset()
 	// The new pane is born carrying inheritCtx, so the footer sync below sees
 	// the correct context immediately (no wrong-context flicker).
+	// AddSplit self-reconciles to resources (sets focusTarget=Resources and runs
+	// reconcileFocus on the new pane), so no follow-up FocusResources is needed.
 	a.layout.AddSplit(p, ns, inheritCtx)
 	a.syncPaneFooters()
-	a.layout.FocusResources()
 	newSplit := a.layout.FocusedSplit()
 	// A new split changes the pane count for inheritCtx; refresh the contexts
 	// plugin's PANES column before it (re-)populates.

@@ -19,9 +19,9 @@ import (
 func snapshotColors() func() {
 	type saved struct {
 		// UI
-		accent, muted, highlight, textOnAccent, errc, warning Color
-		subtle, prompt, selection, background, foreground     Color
-		contextOnline, contextOffline                         Color
+		accent, muted, highlight, textOnAccent, textOnStatus, errc, warning Color
+		subtle, prompt, selection, background, foreground                   Color
+		contextOnline, contextOffline                                       Color
 		// Status
 		statusRunning, statusSucceeded, statusPending, statusFailed Color
 		// Syntax
@@ -34,6 +34,7 @@ func snapshotColors() func() {
 	}
 	s := saved{
 		accent: Accent, muted: Muted, highlight: Highlight, textOnAccent: TextOnAccent,
+		textOnStatus: TextOnStatus,
 		errc: Error, warning: Warning, subtle: Subtle, prompt: Prompt, selection: Selection,
 		background: Background, foreground: Foreground,
 		contextOnline: ContextOnline, contextOffline: ContextOffline,
@@ -47,6 +48,7 @@ func snapshotColors() func() {
 	}
 	return func() {
 		Accent, Muted, Highlight, TextOnAccent = s.accent, s.muted, s.highlight, s.textOnAccent
+		TextOnStatus = s.textOnStatus
 		Error, Warning, Subtle, Prompt, Selection = s.errc, s.warning, s.subtle, s.prompt, s.selection
 		Background, Foreground = s.background, s.foreground
 		ContextOnline, ContextOffline = s.contextOnline, s.contextOffline
@@ -57,6 +59,32 @@ func snapshotColors() func() {
 		SearchMatch, SearchSelected, SearchFg = s.searchMatch, s.searchSelected, s.searchFg
 		LogTimestamp, LogTime, LogTimezone, LogIP = s.logTimestamp, s.logTime, s.logTimezone, s.logIP
 	}
+}
+
+// compileTimeDefaults captures the color globals at test-binary startup,
+// before theme.init() resolves the developer's ~/.config/aku theme over them.
+// Go initializes all package-level vars (including those in _test.go files,
+// which compile into this package) before any init() function runs, so these
+// hold the pristine compile-time defaults from theme.go's var blocks regardless
+// of the machine's real theme config. TestKanagawaWaveDefaults asserts against
+// this snapshot so it stays hermetic.
+var compileTimeDefaults = map[string]Color{
+	"Accent": Accent, "Muted": Muted, "Highlight": Highlight,
+	"TextOnAccent": TextOnAccent, "TextOnStatus": TextOnStatus,
+	"Error": Error, "Warning": Warning,
+	"Subtle": Subtle, "Prompt": Prompt, "Selection": Selection,
+	"Background": Background, "Foreground": Foreground,
+	"ContextOnline": ContextOnline, "ContextOffline": ContextOffline,
+	"StatusRunning": StatusRunning, "StatusSucceeded": StatusSucceeded,
+	"StatusPending": StatusPending, "StatusFailed": StatusFailed,
+	"SyntaxKey": SyntaxKey, "SyntaxString": SyntaxString,
+	"SyntaxNumber": SyntaxNumber, "SyntaxBool": SyntaxBool,
+	"SyntaxNull": SyntaxNull, "SyntaxMarker": SyntaxMarker,
+	"SyntaxValue": SyntaxValue,
+	"SearchMatch": SearchMatch, "SearchSelected": SearchSelected,
+	"SearchFg":     SearchFg,
+	"LogTimestamp": LogTimestamp, "LogTime": LogTime,
+	"LogTimezone": LogTimezone, "LogIP": LogIP,
 }
 
 // TestDefaultColors is a fast smoke test asserting the compile-time color
@@ -107,6 +135,54 @@ func TestLoadPartialOverride(t *testing.T) {
 	}
 	if StatusFailed != origFailed {
 		t.Fatal("non-overridden field should keep default")
+	}
+}
+
+func TestLoadTextOnStatusOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "theme.yaml")
+	os.WriteFile(path, []byte("ui:\n  text_on_status: \"#000000\"\n"), 0644)
+
+	defer snapshotColors()()
+	// snapshotColors handles restoration; capture Accent only to assert the
+	// ui-only override leaves the non-overridden field untouched. (We compare to
+	// the live pre-Load value rather than a compile-time default because init()
+	// may have layered the machine's real theme over the globals.)
+	wantAccent := Accent
+
+	if err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if string(TextOnStatus) != "#000000" {
+		t.Fatalf("expected TextOnStatus #000000, got %s", string(TextOnStatus))
+	}
+	if Accent != wantAccent {
+		t.Fatalf("non-overridden Accent should be unchanged %s, got %s", string(wantAccent), string(Accent))
+	}
+}
+
+// TestLoadTextOnStatusRetainedWhenAbsent verifies Load() with NO text_on_status
+// key leaves the default TextOnStatus untouched. We override a DIFFERENT ui key
+// (accent) and assert TextOnStatus equals its live pre-Load value — captured
+// rather than hardcoded because init() may have layered the machine's real theme
+// over the globals.
+func TestLoadTextOnStatusRetainedWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "theme.yaml")
+	os.WriteFile(path, []byte("ui:\n  accent: \"#ABCDEF\"\n"), 0644)
+
+	defer snapshotColors()()
+	wantTextOnStatus := TextOnStatus
+
+	if err := Load(path); err != nil {
+		t.Fatal(err)
+	}
+	if string(Accent) != "#ABCDEF" {
+		t.Fatalf("expected Accent #ABCDEF, got %s", string(Accent))
+	}
+	if TextOnStatus != wantTextOnStatus {
+		t.Fatalf("non-overridden TextOnStatus should keep default %s, got %s",
+			string(wantTextOnStatus), string(TextOnStatus))
 	}
 }
 
@@ -169,6 +245,7 @@ ui:
   muted: "100"
   highlight: "101"
   text_on_accent: "102"
+  text_on_status: "112"
   error: "103"
   warning: "105"
   subtle: "104"
@@ -214,6 +291,9 @@ log:
 	if string(Selection) != "107" {
 		t.Fatalf("expected Selection 107, got %s", string(Selection))
 	}
+	if string(TextOnStatus) != "112" {
+		t.Fatalf("expected TextOnStatus 112, got %s", string(TextOnStatus))
+	}
 	if string(Background) != "110" {
 		t.Fatalf("expected Background 110, got %s", string(Background))
 	}
@@ -247,62 +327,57 @@ log:
 }
 
 func TestKanagawaWaveDefaults(t *testing.T) {
-	// Restore on exit, but do NOT pre-assign the globals: this test verifies the
-	// compile-time defaults from theme.go's var initializers. snapshotColors()
-	// restores any leakage from earlier tests after this one runs; the globals
-	// read here are the package-initializer defaults because we point Load at an
-	// empty config dir (no theme.yaml found) so nothing is layered on top.
-	defer snapshotColors()()
-
-	// Point to an empty config dir so Load(ThemePath()) finds no file and the
-	// globals keep their package-initializer defaults.
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := Load(ThemePath()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Expected values are the defaults documented in theme.go's var blocks.
-	// Changing a default in theme.go without updating this list fails the test.
+	// Values come from compileTimeDefaults, a snapshot captured at test-binary
+	// startup before theme.init() layers the developer's ~/.config/aku theme
+	// over the globals. This keeps the test hermetic — it verifies theme.go's
+	// var-block defaults regardless of the machine's real theme config.
+	// Expected values are the defaults documented in theme.go's var blocks;
+	// changing a default in theme.go without updating this list fails the test.
 	checks := []struct {
 		name string
-		got  Color
 		want Color
 	}{
-		{"Accent", Accent, "#957FB8"},
-		{"Muted", Muted, "#727169"},
-		{"Highlight", Highlight, "#C8C093"},
-		{"TextOnAccent", TextOnAccent, "#1F1F28"},
-		{"Error", Error, "#E82424"},
-		{"Warning", Warning, "#FF9E3B"},
-		{"Subtle", Subtle, "#54546D"},
-		{"Prompt", Prompt, "#727169"},
-		{"Selection", Selection, "#FF9E3B"},
-		{"Background", Background, ""},
-		{"Foreground", Foreground, ""},
-		{"ContextOnline", ContextOnline, "#8A9A7B"},
-		{"ContextOffline", ContextOffline, "#C34043"},
-		{"StatusRunning", StatusRunning, "#76946A"},
-		{"StatusSucceeded", StatusSucceeded, "#727169"},
-		{"StatusPending", StatusPending, "#FF9E3B"},
-		{"StatusFailed", StatusFailed, "#E82424"},
-		{"SyntaxKey", SyntaxKey, "#7E9CD8"},
-		{"SyntaxString", SyntaxString, "#98BB6C"},
-		{"SyntaxNumber", SyntaxNumber, "#D27E99"},
-		{"SyntaxBool", SyntaxBool, "#957FB8"},
-		{"SyntaxNull", SyntaxNull, "#727169"},
-		{"SyntaxMarker", SyntaxMarker, "#54546D"},
-		{"SyntaxValue", SyntaxValue, "#DCD7BA"},
-		{"SearchMatch", SearchMatch, "#FF9E3B"},
-		{"SearchSelected", SearchSelected, "#957FB8"},
-		{"SearchFg", SearchFg, "#1F1F28"},
-		{"LogTimestamp", LogTimestamp, "#FFA066"},
-		{"LogTime", LogTime, "#7E9CD8"},
-		{"LogTimezone", LogTimezone, "#727169"},
-		{"LogIP", LogIP, "#7FB4CA"},
+		{"Accent", "#957FB8"},
+		{"Muted", "#727169"},
+		{"Highlight", "#C8C093"},
+		{"TextOnAccent", "#1F1F28"},
+		{"TextOnStatus", "#1F1F28"},
+		{"Error", "#E82424"},
+		{"Warning", "#FF9E3B"},
+		{"Subtle", "#54546D"},
+		{"Prompt", "#727169"},
+		{"Selection", "#FF9E3B"},
+		{"Background", ""},
+		{"Foreground", ""},
+		{"ContextOnline", "#8A9A7B"},
+		{"ContextOffline", "#C34043"},
+		{"StatusRunning", "#76946A"},
+		{"StatusSucceeded", "#727169"},
+		{"StatusPending", "#FF9E3B"},
+		{"StatusFailed", "#E82424"},
+		{"SyntaxKey", "#7E9CD8"},
+		{"SyntaxString", "#98BB6C"},
+		{"SyntaxNumber", "#D27E99"},
+		{"SyntaxBool", "#957FB8"},
+		{"SyntaxNull", "#727169"},
+		{"SyntaxMarker", "#54546D"},
+		{"SyntaxValue", "#DCD7BA"},
+		{"SearchMatch", "#FF9E3B"},
+		{"SearchSelected", "#957FB8"},
+		{"SearchFg", "#1F1F28"},
+		{"LogTimestamp", "#FFA066"},
+		{"LogTime", "#7E9CD8"},
+		{"LogTimezone", "#727169"},
+		{"LogIP", "#7FB4CA"},
 	}
 	for _, c := range checks {
-		if c.got != c.want {
-			t.Errorf("%s = %q, want %q", c.name, c.got, c.want)
+		got, ok := compileTimeDefaults[c.name]
+		if !ok {
+			t.Errorf("%s missing from compileTimeDefaults snapshot", c.name)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s = %q, want %q", c.name, got, c.want)
 		}
 	}
 }

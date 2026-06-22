@@ -1456,8 +1456,9 @@ func (a App) handleMouseClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 		if split != nil {
 			prevCursor = split.Cursor()
 		}
+		// FocusSplitAt self-reconciles to resources (sets focusTarget=Resources
+		// and runs reconcileFocus), so no follow-up FocusResources is needed.
 		a.layout.FocusSplitAt(rect.SplitIdx)
-		a.layout.FocusResources()
 		crossSplit := rect.SplitIdx != prevFocusIdx
 		if split != nil {
 			if r := split.RowAtY(msg.Y - rect.Y); r >= 0 {
@@ -2398,8 +2399,16 @@ func (a App) refreshDrillDownSplits(updatedGVR schema.GroupVersionResource, name
 		if split == nil || !split.InDrillDown() {
 			continue
 		}
-		// Only refresh if the updated GVR matches this split's current child view
-		if split.Plugin().GVR() != updatedGVR {
+		snap, ok := split.ParentSnap()
+		if !ok {
+			continue
+		}
+		// Refresh if the update matches this split's current child view OR its
+		// drill-down parent. Container drill-downs derive children from the parent
+		// pod, whose GVR (v1/pods) differs from the synthetic child GVR — so a
+		// parent-GVR match is what makes them refresh live. GVRs are unique per
+		// resource kind, so the parent-GVR clause cannot match an unrelated update.
+		if split.Plugin().GVR() != updatedGVR && snap.Plugin.GVR() != updatedGVR {
 			continue
 		}
 		// Match exact namespace, or refresh all-namespace drill-downs (namespace="")
@@ -2870,10 +2879,13 @@ func (a App) failTerminalPane(tp *ui.TerminalPane, note string) App {
 func (a App) removeTerminalPane(tp *ui.TerminalPane) App {
 	if a.layout.FocusedPane() != tp {
 		// Focus the pane so CloseCurrentSplit removes the right one. Scan for it by
-		// identity and jump focus directly, avoiding the O(N) Blur/Focus churn of
-		// cycling FocusNext through every split.
+		// identity and jump straight to its index with FocusSplitAt, rather than
+		// stepping FocusNext until focus lands on it.
 		for i := 0; i < a.layout.SplitCount(); i++ {
 			if a.layout.PaneAtIdx(i) == tp {
+				// FocusSplitAt self-reconciles to resources; CloseCurrentSplit
+				// below does the same for the survivor, so no follow-up focus
+				// call is needed on this path.
 				a.layout.FocusSplitAt(i)
 				break
 			}

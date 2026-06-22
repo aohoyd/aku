@@ -141,6 +141,49 @@ func countFocusedSplits(l *Layout) int {
 	return n
 }
 
+// assertExactlyOneActive enforces the reconcile invariant: exactly one cursor
+// across panes. Precisely one *ui.ResourceList split is selection-active, and it
+// is the split at FocusIndex(); every other resource split has its cursor
+// cleared. Terminal panes (SplitAt returns nil) carry no selection, so they are
+// skipped.
+//
+// The detail panel state is asserted via l.FocusedDetails() alone: neither
+// *ui.DetailView nor *ui.LogView exposes a public Focused() accessor (the
+// ui.DetailPanel interface only has Focus()/Blur()), and FocusedDetails()
+// (focusTarget == FocusTargetDetails) is exactly the bit reconcileFocus consumes
+// to decide whether to Focus() or Blur() the active detail panel. So
+// FocusedDetails() is the observable proxy for the detail panel's focus state,
+// which callers check directly alongside this helper.
+//
+// This helper must NOT be called when the focused pane is a terminal pane (or in
+// an all-terminal layout): a terminal pane carries no selection cursor, so the
+// active count would be zero and this helper would spuriously fail. Such cases
+// assert zero selection-active resource splits inline instead.
+func assertExactlyOneActive(t *testing.T, l *Layout) {
+	t.Helper()
+	active := -1
+	count := 0
+	for i := 0; i < l.SplitCount(); i++ {
+		s := l.SplitAt(i)
+		if s == nil {
+			continue // terminal pane: no selection cursor
+		}
+		if s.SelectionActive() {
+			count++
+			active = i
+		}
+	}
+	if count == 0 {
+		t.Fatalf("expected exactly one selection-active split, got 0 (none active)")
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one selection-active split, got %d", count)
+	}
+	if active != l.FocusIndex() {
+		t.Fatalf("active split is at index %d, want focus index %d", active, l.FocusIndex())
+	}
+}
+
 // TestLayoutFocusNextReleasesDetailFocus verifies that when the detail panel
 // holds focus, FocusNext releases it (focusTarget returns to resources, the
 // detail panel is blurred) and exactly one split border ends up focused — so
@@ -155,6 +198,10 @@ func TestLayoutFocusNextReleasesDetailFocus(t *testing.T) {
 	if !l.FocusedDetails() {
 		t.Fatal("precondition: details should be focused after FocusDetails")
 	}
+	// Precondition: the detail-focused starting state must already satisfy the
+	// one-active-split invariant, otherwise a BlurBorder regression here would be
+	// masked by FocusNext's own Focus() call below.
+	assertExactlyOneActive(t, &l)
 
 	l.FocusNext()
 
@@ -167,6 +214,7 @@ func TestLayoutFocusNextReleasesDetailFocus(t *testing.T) {
 	if got := countFocusedSplits(&l); got != 1 {
 		t.Fatalf("expected exactly one focused split border, got %d", got)
 	}
+	assertExactlyOneActive(t, &l)
 }
 
 // TestLayoutFocusPrevReleasesDetailFocus mirrors the FocusNext assertion for
@@ -181,6 +229,10 @@ func TestLayoutFocusPrevReleasesDetailFocus(t *testing.T) {
 	if !l.FocusedDetails() {
 		t.Fatal("precondition: details should be focused after FocusDetails")
 	}
+	// Precondition: the detail-focused starting state must already satisfy the
+	// one-active-split invariant, otherwise a BlurBorder regression here would be
+	// masked by FocusPrev's own Focus() call below.
+	assertExactlyOneActive(t, &l)
 
 	l.FocusPrev()
 
@@ -193,6 +245,7 @@ func TestLayoutFocusPrevReleasesDetailFocus(t *testing.T) {
 	if got := countFocusedSplits(&l); got != 1 {
 		t.Fatalf("expected exactly one focused split border, got %d", got)
 	}
+	assertExactlyOneActive(t, &l)
 }
 
 // TestLayoutFocusCycleStillWorksFromResources is a regression guard: when
@@ -739,6 +792,10 @@ func TestMoveFocusedSplitReleasesDetailFocus(t *testing.T) {
 	if !l.FocusedDetails() {
 		t.Fatal("precondition: details should be focused after FocusDetails")
 	}
+	// Precondition: the detail-focused starting state must already satisfy the
+	// one-active-split invariant, otherwise a BlurBorder regression here would be
+	// masked by MoveFocusedSplit's own Focus() call below.
+	assertExactlyOneActive(t, &l)
 
 	l.MoveFocusedSplit(+1) // pods moves to index 1
 
@@ -758,6 +815,7 @@ func TestMoveFocusedSplitReleasesDetailFocus(t *testing.T) {
 	if got := l.SplitAt(1).Plugin().Name(); got != "pods" {
 		t.Fatalf("expected moved 'pods' pane now at index 1, got %q", got)
 	}
+	assertExactlyOneActive(t, &l)
 }
 
 func TestLayoutZoomSplitToggle(t *testing.T) {
@@ -1950,4 +2008,295 @@ func TestLayoutToggleOrientationRecalcsSizes(t *testing.T) {
 	if s.Width() != 40 || s.Height() != 25 {
 		t.Fatalf("back to vertical: expected 40x25, got %dx%d", s.Width(), s.Height())
 	}
+}
+
+// detailFocusedLayout builds a two-split layout with the right panel visible,
+// focused on split 0, then hands input focus to the detail panel. This is the
+// shared starting state for the reconcile-from-detail tests: split 0 is the
+// active list (keeps its cursor via BlurBorder) while the detail panel owns
+// input.
+func detailFocusedLayout(t *testing.T) Layout {
+	t.Helper()
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1
+	l.ShowRightPanel()
+	l.FocusSplitAt(0)
+	l.FocusDetails()
+	if !l.FocusedDetails() {
+		t.Fatal("precondition: details should be focused after FocusDetails")
+	}
+	// Validate the starting state itself: split 0 keeps its cursor via BlurBorder
+	// (selection-active) while the detail panel owns input. Without this, a
+	// BlurBorder regression that drops the cursor would make every reconcile test
+	// built on this helper vacuously pass.
+	assertExactlyOneActive(t, &l)
+	return l
+}
+
+// TestReconcileFocusNextReleasesDetail asserts FocusNext, driven from a
+// detail-focused state, routes through reconcileFocus: detail focus is released,
+// focus advances to the next split, and exactly one cursor remains (on the newly
+// focused split).
+func TestReconcileFocusNextReleasesDetail(t *testing.T) {
+	l := detailFocusedLayout(t)
+
+	l.FocusNext() // 0 -> 1
+
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected focus index 1 after FocusNext, got %d", l.FocusIndex())
+	}
+	if l.FocusedDetails() {
+		t.Fatal("FocusNext should release detail focus")
+	}
+	if !l.FocusedResources() {
+		t.Fatal("FocusNext should reset focus target to resources")
+	}
+	assertExactlyOneActive(t, &l)
+}
+
+// TestReconcileFocusPrevReleasesDetail mirrors the FocusNext case for FocusPrev.
+func TestReconcileFocusPrevReleasesDetail(t *testing.T) {
+	l := detailFocusedLayout(t)
+
+	l.FocusPrev() // 0 -> 1 (wraps to last)
+
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected focus index 1 after FocusPrev wrap, got %d", l.FocusIndex())
+	}
+	if l.FocusedDetails() {
+		t.Fatal("FocusPrev should release detail focus")
+	}
+	if !l.FocusedResources() {
+		t.Fatal("FocusPrev should reset focus target to resources")
+	}
+	assertExactlyOneActive(t, &l)
+}
+
+// TestReconcileFocusSplitAtReleasesDetail asserts standalone FocusSplitAt (no
+// follow-up FocusResources) releases detail focus and leaves exactly one cursor
+// on the targeted split — covering the removeTerminalPane path.
+func TestReconcileFocusSplitAtReleasesDetail(t *testing.T) {
+	l := detailFocusedLayout(t)
+
+	l.FocusSplitAt(1) // jump to split 1
+
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected focus index 1 after FocusSplitAt, got %d", l.FocusIndex())
+	}
+	if l.FocusedDetails() {
+		t.Fatal("FocusSplitAt should release detail focus")
+	}
+	if !l.FocusedResources() {
+		t.Fatal("FocusSplitAt should reset focus target to resources")
+	}
+	assertExactlyOneActive(t, &l)
+}
+
+// TestReconcileFocusSplitAtSameIndexReleasesDetail asserts that re-focusing the
+// already-focused split (FocusSplitAt at the same index) while the detail panel
+// owns input still releases detail focus: the focused split returns from
+// BlurBorder to Focus, leaving exactly one cursor.
+func TestReconcileFocusSplitAtSameIndexReleasesDetail(t *testing.T) {
+	l := detailFocusedLayout(t) // focus on split 0, detail focused
+
+	l.FocusSplitAt(0) // same index as current focus
+
+	if l.FocusIndex() != 0 {
+		t.Fatalf("expected focus index 0 after FocusSplitAt(0), got %d", l.FocusIndex())
+	}
+	if l.FocusedDetails() {
+		t.Fatal("FocusSplitAt(0) should release detail focus")
+	}
+	if !l.FocusedResources() {
+		t.Fatal("FocusSplitAt(0) should reset focus target to resources")
+	}
+	assertExactlyOneActive(t, &l)
+}
+
+// TestHideRightPanelWhileDetailFocusedReleasesFocus asserts HideRightPanel hands
+// input back to the focused split: with the panel gone, focusTarget must return
+// to resources and the focused split must regain its cursor (no stale detail
+// focus pointing at a hidden panel).
+func TestHideRightPanelWhileDetailFocusedReleasesFocus(t *testing.T) {
+	l := detailFocusedLayout(t) // focus on split 0, detail focused
+
+	l.HideRightPanel()
+
+	if l.FocusedDetails() {
+		t.Fatal("HideRightPanel should release detail focus")
+	}
+	if !l.FocusedResources() {
+		t.Fatal("HideRightPanel should reset focus target to resources")
+	}
+	assertExactlyOneActive(t, &l)
+}
+
+// TestReconcileMoveFocusedSplit asserts MoveFocusedSplit, driven from a
+// detail-focused state, releases detail focus and keeps exactly one cursor on the
+// moved (now-focused) split.
+func TestReconcileMoveFocusedSplit(t *testing.T) {
+	l := detailFocusedLayout(t)
+
+	l.MoveFocusedSplit(+1) // split 0 (pods) moves to index 1
+
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected focus index to follow moved pane to 1, got %d", l.FocusIndex())
+	}
+	if got := l.SplitAt(1).Plugin().Name(); got != "pods" {
+		t.Fatalf("expected moved 'pods' pane now at index 1, got %q", got)
+	}
+	if l.FocusedDetails() {
+		t.Fatal("MoveFocusedSplit should release detail focus")
+	}
+	if !l.FocusedResources() {
+		t.Fatal("MoveFocusedSplit should reset focus target to resources")
+	}
+	assertExactlyOneActive(t, &l)
+}
+
+// TestReconcileAddSplitReleasesDetail asserts AddSplit, driven from a
+// detail-focused state, routes through reconcileFocus: detail focus is released,
+// the new pane is focused, and it is the sole active cursor.
+func TestReconcileAddSplitReleasesDetail(t *testing.T) {
+	l := detailFocusedLayout(t) // focus on split 0, detail focused
+
+	l.AddSplit(svcsPlugin(), "default", "") // inserted at idx 1, becomes focused
+
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected new split focused at idx 1, got %d", l.FocusIndex())
+	}
+	if l.FocusedDetails() {
+		t.Fatal("AddSplit should release detail focus")
+	}
+	if !l.FocusedResources() {
+		t.Fatal("AddSplit should reset focus target to resources")
+	}
+	assertExactlyOneActive(t, &l)
+}
+
+// TestReconcileAddTerminalSplitReleasesDetail asserts AddTerminalSplit, driven
+// from a detail-focused state, routes through reconcileFocus: the new terminal
+// pane is focused, detail focus is released, and since the focused pane is a
+// terminal (carries no selection cursor) no resource split is selection-active.
+func TestReconcileAddTerminalSplitReleasesDetail(t *testing.T) {
+	l := detailFocusedLayout(t) // focus on split 0, detail focused
+
+	tp := ui.NewTerminalPane("term", "ctx-1", 40, 10)
+	tp.SetID("t:reconcile")
+	l.AddTerminalSplit(tp) // inserted at idx 1, becomes focused
+
+	if l.FocusIndex() != 1 {
+		t.Fatalf("expected new terminal focused at idx 1, got %d", l.FocusIndex())
+	}
+	if l.FocusedPane() != tp {
+		t.Fatal("new terminal pane should be the focused pane")
+	}
+	if l.FocusedDetails() {
+		t.Fatal("AddTerminalSplit should release detail focus")
+	}
+	if !l.FocusedResources() {
+		t.Fatal("AddTerminalSplit should reset focus target to resources")
+	}
+	// The focused pane is a terminal → zero resource panes should be active.
+	for i := 0; i < l.SplitCount(); i++ {
+		s := l.SplitAt(i)
+		if s != nil && s.SelectionActive() {
+			t.Fatalf("no resource split should be selection-active when a terminal is focused, but split %d is", i)
+		}
+	}
+}
+
+// TestReconcileCloseSplitReleasesDetail asserts CloseCurrentSplit, driven from a
+// detail-focused state with three splits, routes through reconcileFocus: it
+// returns false (not the last split), releases detail focus, and leaves exactly
+// one active cursor on the surviving focused split.
+func TestReconcileCloseSplitReleasesDetail(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0
+	l.AddSplit(svcsPlugin(), "default", "") // idx 1
+	l.AddSplit(podsPlugin(), "default", "") // idx 2
+	l.ShowRightPanel()
+	l.FocusSplitAt(1) // focus the middle split
+	l.FocusDetails()
+	if !l.FocusedDetails() {
+		t.Fatal("precondition: details should be focused after FocusDetails")
+	}
+
+	if quit := l.CloseCurrentSplit(); quit {
+		t.Fatal("CloseCurrentSplit should return false with splits remaining")
+	}
+
+	if l.SplitCount() != 2 {
+		t.Fatalf("expected 2 splits after close, got %d", l.SplitCount())
+	}
+	if l.FocusedDetails() {
+		t.Fatal("CloseCurrentSplit should release detail focus")
+	}
+	if !l.FocusedResources() {
+		t.Fatal("CloseCurrentSplit should reset focus target to resources")
+	}
+	assertExactlyOneActive(t, &l)
+}
+
+// TestReconcileFocusDetailsOnTerminalNoDoubleBorder asserts that FocusDetails,
+// when the focused pane is a terminal, blurs the terminal (so its border is not
+// stuck highlighted alongside the detail border) and hands focus to the detail
+// panel. Fixes Bug 4.
+func TestReconcileFocusDetailsOnTerminalNoDoubleBorder(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0: resource pane
+	tp := ui.NewTerminalPane("term", "ctx-1", 40, 10)
+	tp.SetID("t:detail")
+	l.AddTerminalSplit(tp) // idx 1, focused
+	l.ShowRightPanel()
+
+	if l.FocusIndex() != 1 || l.FocusedPane() != tp {
+		t.Fatal("precondition: terminal pane should be focused")
+	}
+	// TerminalPane exposes no public Focused() accessor, but its View() renders a
+	// FocusedBorderStyle while focused and UnfocusedBorderStyle while blurred, so
+	// the rendered output is the observable proxy for the border-highlight state.
+	focusedView := tp.View()
+
+	l.FocusDetails()
+
+	if !l.FocusedDetails() {
+		t.Fatal("FocusDetails should focus the detail panel")
+	}
+	if blurredView := tp.View(); blurredView == focusedView {
+		t.Fatal("FocusDetails on a terminal pane should blur the terminal (border must change, no double highlight)")
+	}
+	// No resource split is active (the focused pane is a terminal).
+	for i := 0; i < l.SplitCount(); i++ {
+		s := l.SplitAt(i)
+		if s != nil && s.SelectionActive() {
+			t.Fatalf("no resource split should be active, but split %d is", i)
+		}
+	}
+}
+
+// TestReconcileSingleSplitFocusToggle asserts that with a single resource split
+// and the right panel visible, toggling FocusDetails then FocusResources keeps
+// exactly one cursor: the lone split stays selection-active through both (true in
+// detail mode via BlurBorder, true in resources mode via Focus).
+func TestReconcileSingleSplitFocusToggle(t *testing.T) {
+	l := New(80, 26, 1000, "15m", 900)
+	l.AddSplit(podsPlugin(), "default", "") // idx 0, focused
+	l.ShowRightPanel()
+
+	l.FocusDetails()
+	if !l.FocusedDetails() {
+		t.Fatal("FocusDetails should focus the detail panel")
+	}
+	assertExactlyOneActive(t, &l) // lone split keeps cursor via BlurBorder
+
+	l.FocusResources()
+	if !l.FocusedResources() {
+		t.Fatal("FocusResources should focus resources")
+	}
+	if l.FocusedDetails() {
+		t.Fatal("FocusResources should release detail focus")
+	}
+	assertExactlyOneActive(t, &l) // lone split keeps cursor via Focus
 }

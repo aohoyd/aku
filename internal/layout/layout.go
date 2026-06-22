@@ -103,11 +103,6 @@ func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace, context string) {
 	rl.SetNamespace(namespace)
 	rl.SetContext(context)
 
-	// Blur all existing splits
-	for i := range l.splits {
-		l.splits[i].Blur()
-	}
-
 	// Under zoom the previously-focused pane carries borderless=true; clear it
 	// before inserting so the borderless flag follows the new focus (mirrors
 	// FocusNext/FocusPrev/FocusSplitAt) and never desyncs from splitZoomed.
@@ -124,7 +119,10 @@ func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace, context string) {
 	}
 	l.splits = slices.Insert(l.splits, insertIdx, ui.Pane(&rl))
 	l.focusIdx = insertIdx
-	l.splits[l.focusIdx].Focus()
+	// reconcileFocus blurs every other split and focuses the new one, releasing
+	// any detail focus so the new split is the sole active cursor.
+	l.focusTarget = FocusTargetResources
+	l.reconcileFocus()
 	if l.splitZoomed {
 		l.splits[l.focusIdx].SetBorderless(true)
 	}
@@ -138,9 +136,6 @@ func (l *Layout) AddSplit(p plugin.ResourcePlugin, namespace, context string) {
 // are corrected by recalcSizes; the App pushes the resulting inner size to the
 // session via syncTerminalSizes.
 func (l *Layout) AddTerminalSplit(p ui.Pane) {
-	for i := range l.splits {
-		l.splits[i].Blur()
-	}
 	// Under zoom the previously-focused pane carries borderless=true; clear it
 	// before inserting so the borderless flag follows the new focus (mirrors
 	// FocusNext/FocusPrev/FocusSplitAt) and never desyncs from splitZoomed.
@@ -153,7 +148,10 @@ func (l *Layout) AddTerminalSplit(p ui.Pane) {
 	}
 	l.splits = slices.Insert(l.splits, insertIdx, p)
 	l.focusIdx = insertIdx
-	l.splits[l.focusIdx].Focus()
+	// reconcileFocus blurs every other split and focuses the new one, releasing
+	// any detail focus so the new terminal pane is the sole active pane.
+	l.focusTarget = FocusTargetResources
+	l.reconcileFocus()
 	if l.splitZoomed {
 		l.splits[l.focusIdx].SetBorderless(true)
 	}
@@ -209,14 +207,10 @@ func (l *Layout) CloseCurrentSplit() bool {
 		l.focusIdx = len(l.splits) - 1
 	}
 
-	// Focus the new current split
-	for i := range l.splits {
-		if i == l.focusIdx {
-			l.splits[i].Focus()
-		} else {
-			l.splits[i].Blur()
-		}
-	}
+	// Focus the new current split. reconcileFocus blurs the others and releases
+	// any detail focus so the survivor is the sole active pane (no double border).
+	l.focusTarget = FocusTargetResources
+	l.reconcileFocus()
 	// The removed pane carried the borderless flag while zoomed, but it is now
 	// discarded. If we remain zoomed (a lone pane stays zoomed under the
 	// fullscreen-borderless model), move the borderless flag onto the new
@@ -253,25 +247,57 @@ func (l *Layout) moveBorderlessFlag(from, to int) {
 	l.recalcSizes()
 }
 
+// reconcileFocus is the single source of truth for pane/detail focus-selection
+// state. It is the ONLY place that drives Focus/Blur/BlurBorder selection state
+// across panes and the detail panel, driving each focused ResourceList's
+// table-level selectionActive (via Focus/Blur/BlurBorder → SetSelectionActive).
+// Callers MUST set focusIdx/focusTarget before invoking this. It
+// guarantees at most one active cursor: exactly one when the focused pane is a
+// ResourceList (resources mode: focused split; detail mode: focused list with
+// dimmed border), zero when the focused pane is a terminal (terminals carry no
+// selection).
+func (l *Layout) reconcileFocus() {
+	if len(l.splits) == 0 {
+		return
+	}
+	for i := range l.splits {
+		if i != l.focusIdx {
+			l.splits[i].Blur() // every non-focused pane: no cursor, dim border
+		}
+	}
+	focused := l.splits[l.focusIdx]
+	if l.focusTarget == FocusTargetDetails && l.rightVisible {
+		// Detail panel owns input; the focused list keeps its cursor, dim border.
+		if rl, ok := focused.(*ui.ResourceList); ok {
+			rl.BlurBorder()
+		} else {
+			focused.Blur() // terminal pane: nothing to keep selected
+		}
+		l.ActiveDetailPanel().Focus()
+	} else {
+		focused.Focus()
+		l.ActiveDetailPanel().Blur()
+	}
+}
+
 // FocusNext cycles focus to the next split (wraps around).
 func (l *Layout) FocusNext() {
 	if len(l.splits) == 0 {
 		return
 	}
-	// If the detail panel currently holds focus, release it before moving the
-	// split focus — otherwise both the detail border and the new split border
-	// would highlight at once.
-	if l.focusTarget == FocusTargetDetails {
-		l.ActiveDetailPanel().Blur()
-		l.focusTarget = FocusTargetResources
-	}
+	l.focusTarget = FocusTargetResources
 	oldIdx := l.focusIdx
-	l.splits[l.focusIdx].Blur()
 	l.focusIdx = (l.focusIdx + 1) % len(l.splits)
-	l.splits[l.focusIdx].Focus()
+	// reconcileFocus drives the per-pane Blur/Focus and releases detail focus, so
+	// the detail border and the new split border never highlight at once.
+	l.reconcileFocus()
 	// Zoom follows focus: move the borderless flag to the newly-focused split so
-	// it never desyncs from splitZoomed (no-op when not zoomed).
-	l.moveBorderlessFlag(oldIdx, l.focusIdx)
+	// it never desyncs from splitZoomed (no-op when not zoomed). Skip when the
+	// wrap left focus on the same split (single split) — moving the flag onto
+	// itself would do a redundant clear/set + recalcSizes.
+	if oldIdx != l.focusIdx {
+		l.moveBorderlessFlag(oldIdx, l.focusIdx)
+	}
 }
 
 // FocusPrev cycles focus to the previous split (wraps around).
@@ -279,20 +305,19 @@ func (l *Layout) FocusPrev() {
 	if len(l.splits) == 0 {
 		return
 	}
-	// If the detail panel currently holds focus, release it before moving the
-	// split focus — otherwise both the detail border and the new split border
-	// would highlight at once.
-	if l.focusTarget == FocusTargetDetails {
-		l.ActiveDetailPanel().Blur()
-		l.focusTarget = FocusTargetResources
-	}
+	l.focusTarget = FocusTargetResources
 	oldIdx := l.focusIdx
-	l.splits[l.focusIdx].Blur()
 	l.focusIdx = (l.focusIdx - 1 + len(l.splits)) % len(l.splits)
-	l.splits[l.focusIdx].Focus()
+	// reconcileFocus drives the per-pane Blur/Focus and releases detail focus, so
+	// the detail border and the new split border never highlight at once.
+	l.reconcileFocus()
 	// Zoom follows focus: move the borderless flag to the newly-focused split so
-	// it never desyncs from splitZoomed (no-op when not zoomed).
-	l.moveBorderlessFlag(oldIdx, l.focusIdx)
+	// it never desyncs from splitZoomed (no-op when not zoomed). Skip when the
+	// wrap left focus on the same split (single split) — moving the flag onto
+	// itself would do a redundant clear/set + recalcSizes.
+	if oldIdx != l.focusIdx {
+		l.moveBorderlessFlag(oldIdx, l.focusIdx)
+	}
 }
 
 // FocusSplitAt moves focus to the split at the given index.
@@ -300,10 +325,13 @@ func (l *Layout) FocusSplitAt(idx int) {
 	if idx < 0 || idx >= len(l.splits) {
 		return
 	}
+	l.focusTarget = FocusTargetResources
 	oldIdx := l.focusIdx
-	l.splits[l.focusIdx].Blur()
 	l.focusIdx = idx
-	l.splits[l.focusIdx].Focus()
+	// reconcileFocus drives the per-pane Blur/Focus and releases detail focus so
+	// this standalone path (e.g. removeTerminalPane) needs no follow-up
+	// FocusResources call.
+	l.reconcileFocus()
 	// Zoom follows focus: move the borderless flag to the newly-focused split and
 	// recompute geometry so the new split renders fullscreen (no-op when not
 	// zoomed).
@@ -317,19 +345,12 @@ func (l *Layout) MoveFocusedSplit(delta int) {
 	if target < 0 || target >= len(l.splits) {
 		return
 	}
-	// If the detail panel currently holds focus, release it before reordering —
-	// move-pane operates on resource-list splits, and leaving the detail focused
-	// would highlight both the detail border and the moved split border at once.
-	// Matches the release pattern in FocusNext/FocusPrev.
-	if l.focusTarget == FocusTargetDetails {
-		l.ActiveDetailPanel().Blur()
-		l.focusTarget = FocusTargetResources
-		if rl, ok := l.splits[l.focusIdx].(*ui.ResourceList); ok {
-			rl.FocusBorder()
-		}
-	}
+	l.focusTarget = FocusTargetResources
 	l.splits[l.focusIdx], l.splits[target] = l.splits[target], l.splits[l.focusIdx]
 	l.focusIdx = target
+	// reconcileFocus drives the per-pane Blur/Focus and releases detail focus, so
+	// the detail border and the moved split border never highlight at once.
+	l.reconcileFocus()
 	l.recalcSizes()
 }
 
@@ -378,6 +399,13 @@ func (l *Layout) HideRightPanel() {
 	}
 	l.detailZoomed = false
 	l.rightVisible = false
+	// With the panel gone, detail focus is meaningless: hand input back to the
+	// focused split and reconcile so it regains its cursor/border. Otherwise
+	// focusTarget could stay FocusTargetDetails while rightVisible==false, leaving
+	// FocusedDetails() true with no panel — an inconsistent window until the next
+	// reconcile.
+	l.focusTarget = FocusTargetResources
+	l.reconcileFocus()
 	l.recalcSizes()
 }
 
@@ -429,21 +457,16 @@ func (l *Layout) FocusDetails() {
 		return
 	}
 	l.focusTarget = FocusTargetDetails
-	if rl, ok := l.splits[l.focusIdx].(*ui.ResourceList); ok {
-		rl.BlurBorder()
-	}
-	l.ActiveDetailPanel().Focus()
+	// reconcileFocus dims the focused list's border (or blurs a terminal pane,
+	// fixing the double-border bug) and focuses the active detail panel.
+	l.reconcileFocus()
 }
 
 // FocusResources sets input focus back to the resource list.
 func (l *Layout) FocusResources() {
 	l.focusTarget = FocusTargetResources
-	l.ActiveDetailPanel().Blur()
-	if len(l.splits) > 0 {
-		if rl, ok := l.splits[l.focusIdx].(*ui.ResourceList); ok {
-			rl.FocusBorder()
-		}
-	}
+	// reconcileFocus focuses the active split and blurs the detail panel.
+	l.reconcileFocus()
 }
 
 // ToggleZoomSplit toggles fullscreen-borderless zoom on the focused split.

@@ -81,6 +81,9 @@ func (d DetailView) Loading() bool { return d.loading }
 // LoadErr returns the current load error message, if any.
 func (d DetailView) LoadErr() string { return d.loadErr }
 
+// RawContent returns the raw (unstyled) buffer content currently displayed.
+func (d DetailView) RawContent() string { return d.rawContent }
+
 // NewDetailView creates a new detail view with the given dimensions.
 func NewDetailView(width, height int) DetailView {
 	vp := viewport.New(viewport.WithWidth(width-2), viewport.WithHeight(height-2)) // -2 border

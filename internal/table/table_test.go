@@ -200,7 +200,7 @@ func TestRowStyleFunc(t *testing.T) {
 	)
 	m.SetCursor(2)
 
-	m.RowStyleFunc = func(index int, isCursor bool) *lipgloss.Style {
+	m.RowStyleFunc = func(index int, isCursor, active bool) *lipgloss.Style {
 		if index == 1 {
 			return &markedStyle
 		}
@@ -212,6 +212,99 @@ func TestRowStyleFunc(t *testing.T) {
 	if view == "" {
 		t.Fatal("expected non-empty view")
 	}
+}
+
+// stylePrefix returns the leading SGR escape sequence a style emits before its
+// content, derived from the style object itself (no hardcoded escape codes).
+func stylePrefix(s lipgloss.Style) string {
+	rendered := s.Render("X")
+	i := strings.Index(rendered, "X")
+	if i <= 0 {
+		return ""
+	}
+	return rendered[:i]
+}
+
+// TestSelectionActiveGatesCursor verifies that the cursor highlight in renderRow
+// is gated purely on the live selectionActive flag, for both an override-returning
+// RowStyleFunc (Case A) and a nil RowStyleFunc that relies on styles.Selected
+// (Case B). When selectionActive is false the cursor row must render plain — no
+// override, no Selected style. The cursor row is inspected via renderRow (the same
+// path UpdateViewport feeds View), matching the existing renderRow-level tests.
+func TestSelectionActiveGatesCursor(t *testing.T) {
+	// Case A: an override-returning RowStyleFunc that only fires for the cursor
+	// row when its `active` arg is true.
+	t.Run("override RowStyleFunc", func(t *testing.T) {
+		overrideStyle := lipgloss.NewStyle().Background(lipgloss.Color("#00FF00")).Foreground(lipgloss.Color("#000000"))
+		m := New(
+			WithColumns([]Column{{Title: "Name", Width: 20}}),
+			WithRows(makeRows(3)),
+			WithHeight(10),
+		)
+		m.SetCursor(1)
+		m.RowStyleFunc = func(index int, isCursor, active bool) *lipgloss.Style {
+			if index == 1 && isCursor && active {
+				return &overrideStyle
+			}
+			return nil
+		}
+
+		want := stylePrefix(overrideStyle)
+		if want == "" {
+			t.Fatal("test setup: override style produced no SGR prefix")
+		}
+		// The default Selected style must not leak in either: with the override
+		// returning nil while inactive, the row should render truly plain.
+		selPrefix := stylePrefix(m.styles.Selected)
+		if selPrefix == "" {
+			t.Fatal("test setup: default Selected style produced no SGR prefix")
+		}
+
+		m.SetSelectionActive(true)
+		if got := m.renderRow(1); !strings.Contains(got, want) {
+			t.Fatalf("active cursor: expected override SGR %q in cursor row, got %q", want, got)
+		}
+
+		m.SetSelectionActive(false)
+		if got := m.renderRow(1); strings.Contains(got, want) {
+			t.Fatalf("inactive cursor: override SGR %q must be absent (plain row), got %q", want, got)
+		}
+		if got := m.renderRow(1); strings.Contains(got, selPrefix) {
+			t.Fatalf("inactive cursor: Selected SGR %q must be absent (plain row), got %q", selPrefix, got)
+		}
+	})
+
+	// Case B: no RowStyleFunc; the cursor highlight rides on styles.Selected.
+	t.Run("nil RowStyleFunc relies on styles.Selected", func(t *testing.T) {
+		m := New(
+			WithColumns([]Column{{Title: "Name", Width: 20}}),
+			WithRows(makeRows(3)),
+			WithHeight(10),
+		)
+		m.SetCursor(1)
+		// A distinctive, non-empty Selected style so its SGR is detectable.
+		sel := lipgloss.NewStyle().Background(lipgloss.Color("#FF00FF")).Foreground(lipgloss.Color("#FFFFFF")).Bold(true)
+		m.SetStyles(Styles{
+			Header:   DefaultStyles().Header,
+			Cell:     DefaultStyles().Cell,
+			Selected: sel,
+		})
+
+		want := stylePrefix(sel)
+		if want == "" {
+			t.Fatal("test setup: Selected style produced no SGR prefix")
+		}
+
+		m.SetSelectionActive(true)
+		if got := m.renderRow(1); !strings.Contains(got, want) {
+			t.Fatalf("active cursor: expected Selected SGR %q in cursor row, got %q", want, got)
+		}
+
+		m.SetSelectionActive(false)
+		if got := m.renderRow(1); strings.Contains(got, want) {
+			t.Fatalf("inactive cursor: Selected SGR %q must be absent (plain row), got %q", want, got)
+		}
+	})
 }
 
 func TestRowStyleFuncNil(t *testing.T) {
@@ -815,7 +908,7 @@ func TestRowStyleFuncStripsInnerANSI(t *testing.T) {
 	)
 	// Cursor on row 0 so row 1 exercises the NON-cursor override branch.
 	m.SetCursor(0)
-	m.RowStyleFunc = func(index int, isCursor bool) *lipgloss.Style {
+	m.RowStyleFunc = func(index int, isCursor, active bool) *lipgloss.Style {
 		if index == 1 {
 			return &overrideStyle
 		}
@@ -858,7 +951,7 @@ func TestRowStyleFuncStripsInnerANSIOnCursorRow(t *testing.T) {
 	)
 	// Cursor ON row 1 so renderRow takes the r == m.cursor override branch.
 	m.SetCursor(1)
-	m.RowStyleFunc = func(index int, isCursor bool) *lipgloss.Style {
+	m.RowStyleFunc = func(index int, isCursor, active bool) *lipgloss.Style {
 		if index == 1 && isCursor {
 			return &overrideStyle
 		}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/render"
@@ -130,6 +131,40 @@ func TestResourceListFocusBlur(t *testing.T) {
 	rl.Focus()
 	if !rl.Focused() {
 		t.Fatal("should be focused again")
+	}
+}
+
+// TestResourceListSelectionActiveAccessor exercises the public SelectionActive()
+// accessor across every transition reconcileFocus drives. It covers the
+// Focus()→BlurBorder() path specifically (Focus then BlurBorder with no
+// intervening Blur), which is the actual production path reconcileFocus uses when
+// handing input to the detail panel — distinct from the Blur()→BlurBorder()
+// recovery path.
+func TestResourceListSelectionActiveAccessor(t *testing.T) {
+	rl := NewResourceList(&testPlugin{}, 40, 10)
+	rl.Focus()
+	if !rl.SelectionActive() {
+		t.Fatal("after Focus(), SelectionActive() should be true")
+	}
+	rl.Blur()
+	if rl.SelectionActive() {
+		t.Fatal("after Blur(), SelectionActive() should be false")
+	}
+	// Blur()→BlurBorder() recovery path: BlurBorder restores the active cursor.
+	rl.BlurBorder()
+	if !rl.SelectionActive() {
+		t.Fatal("after Blur→BlurBorder, SelectionActive() should be true")
+	}
+	// Focus()→BlurBorder() production path: detail panel takes input directly from
+	// a focused list, without an intervening Blur. SelectionActive must stay true.
+	rl.Focus()
+	rl.BlurBorder()
+	if !rl.SelectionActive() {
+		t.Fatal("after Focus→BlurBorder, SelectionActive() should be true")
+	}
+	rl.Focus()
+	if !rl.SelectionActive() {
+		t.Fatal("after Focus(), SelectionActive() should be true")
 	}
 }
 
@@ -997,7 +1032,7 @@ func TestParentSnapKindAndAPIVersion(t *testing.T) {
 	}
 }
 
-func TestFocusBorderMakesCursorVisible(t *testing.T) {
+func TestFocusAfterBlurBorderKeepsCursorVisible(t *testing.T) {
 	rl := NewResourceList(&testPlugin{}, 80, 10)
 	objs := make([]*unstructured.Unstructured, 50)
 	for i := range objs {
@@ -1010,10 +1045,10 @@ func TestFocusBorderMakesCursorVisible(t *testing.T) {
 	}
 
 	rl.BlurBorder()
-	rl.FocusBorder()
+	rl.Focus()
 
 	if rl.Cursor() != 25 {
-		t.Fatalf("expected cursor at 25 after BlurBorder/FocusBorder, got %d", rl.Cursor())
+		t.Fatalf("expected cursor at 25 after BlurBorder/Focus, got %d", rl.Cursor())
 	}
 }
 
@@ -1537,6 +1572,335 @@ func TestResourceListBorderlessViewNoBorder(t *testing.T) {
 
 // --- Health row-tint tests ---
 
+// bgSGR returns the background-color SGR body (e.g. "48;2;142;106;217") a style's
+// background color emits, derived from the style itself — no hardcoded escape
+// codes. It returns the inner color parameters (without the leading "\x1b[" or
+// trailing "m") because lipgloss merges foreground+background+bold into a single
+// SGR escape on a styled row, so the background sequence is never standalone.
+// Matching this body as a substring distinguishes a cursor-row background FILL
+// (which sets a background) from a foreground-only health TINT (which sets none).
+func bgSGR(t *testing.T, s lipgloss.Style) string {
+	t.Helper()
+	bg := s.GetBackground()
+	rendered := lipgloss.NewStyle().Background(bg).Render("X")
+	i := strings.Index(rendered, "X")
+	if i <= 0 {
+		t.Fatalf("test setup: style produced no background SGR prefix (rendered %q)", rendered)
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(rendered[:i], "\x1b["), "m")
+	if body == "" {
+		t.Fatalf("test setup: empty background SGR body from %q", rendered[:i])
+	}
+	return body
+}
+
+// lineContaining returns the rendered line whose stripped text contains name, or
+// "" if no such line exists.
+func lineContaining(out, name string) string {
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.Contains(ansi.Strip(line), name) {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestViewCursorFillAcrossHealthWhenFocused encodes bug 1: when the pane is
+// focused (Focus → selectionActive=true), the cursor row carries a background
+// FILL on EVERY health level — accent fill (TableSelectedStyle) on a healthy
+// cursor row and the red error fill (TableHealthErrorCursorStyle) on an unhealthy
+// cursor row. A foreground-only tint is NOT a fill, so we assert the background
+// SGR is present on the cursor line.
+func TestViewCursorFillAcrossHealthWhenFocused(t *testing.T) {
+	accentBG := bgSGR(t, TableSelectedStyle)
+	errorBG := bgSGR(t, TableHealthErrorCursorStyle)
+	warnBG := bgSGR(t, TableHealthWarnCursorStyle)
+
+	// Cursor on the HEALTHY row → accent fill.
+	t.Run("healthy cursor row gets accent fill", func(t *testing.T) {
+		hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+			"uid-healthy": plugin.Healthy,
+			"uid-err":     plugin.Error,
+		}}
+		rl := NewResourceList(hp, 80, 15)
+		// NAME-ascending: row 0 = pod-a-healthy (cursor), row 1 = pod-b-err.
+		rl.SetObjects([]*unstructured.Unstructured{
+			makeUIDObj("pod-a-healthy", "uid-healthy"),
+			makeUIDObj("pod-b-err", "uid-err"),
+		})
+		rl.Focus()
+
+		out := rl.table.View()
+		cursorLine := lineContaining(out, "pod-a-healthy")
+		if cursorLine == "" {
+			t.Fatalf("could not find healthy cursor row in output:\n%q", out)
+		}
+		if !strings.Contains(cursorLine, accentBG) {
+			t.Fatalf("focused healthy cursor row must carry accent background fill %q, got %q", accentBG, cursorLine)
+		}
+	})
+
+	// Cursor on the UNHEALTHY row → red error fill (the bug-1 case).
+	t.Run("unhealthy cursor row gets error fill", func(t *testing.T) {
+		hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+			"uid-healthy": plugin.Healthy,
+			"uid-err":     plugin.Error,
+		}}
+		rl := NewResourceList(hp, 80, 15)
+		// NAME-ascending: row 0 = pod-a-err (cursor), row 1 = pod-b-healthy.
+		rl.SetObjects([]*unstructured.Unstructured{
+			makeUIDObj("pod-a-err", "uid-err"),
+			makeUIDObj("pod-b-healthy", "uid-healthy"),
+		})
+		rl.Focus()
+
+		out := rl.table.View()
+		cursorLine := lineContaining(out, "pod-a-err")
+		if cursorLine == "" {
+			t.Fatalf("could not find unhealthy cursor row in output:\n%q", out)
+		}
+		if !strings.Contains(cursorLine, errorBG) {
+			t.Fatalf("focused unhealthy cursor row must carry error background fill %q, got %q", errorBG, cursorLine)
+		}
+	})
+
+	// Cursor on the WARNING row → yellow warn fill.
+	t.Run("warning cursor row gets warn fill", func(t *testing.T) {
+		hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+			"uid-warn":    plugin.Warning,
+			"uid-healthy": plugin.Healthy,
+		}}
+		rl := NewResourceList(hp, 80, 15)
+		// NAME-ascending: row 0 = pod-a-warn (cursor), row 1 = pod-b-healthy.
+		rl.SetObjects([]*unstructured.Unstructured{
+			makeUIDObj("pod-a-warn", "uid-warn"),
+			makeUIDObj("pod-b-healthy", "uid-healthy"),
+		})
+		rl.Focus()
+
+		out := rl.table.View()
+		cursorLine := lineContaining(out, "pod-a-warn")
+		if cursorLine == "" {
+			t.Fatalf("could not find warning cursor row in output:\n%q", out)
+		}
+		if !strings.Contains(cursorLine, warnBG) {
+			t.Fatalf("focused warning cursor row must carry warn background fill %q, got %q", warnBG, cursorLine)
+		}
+	})
+}
+
+// TestViewNoCursorFillAcrossHealthWhenBlurred encodes bug 2: when the pane is
+// unfocused (Blur → selectionActive=false), NEITHER health level shows a cursor
+// background FILL. The healthy cursor row renders plain (no accent fill); the
+// unhealthy cursor row shows only its foreground tint (TableHealthErrorStyle, no
+// background fill), rendering identically to a non-cursor unhealthy row.
+func TestViewNoCursorFillAcrossHealthWhenBlurred(t *testing.T) {
+	accentBG := bgSGR(t, TableSelectedStyle)
+	errorBG := bgSGR(t, TableHealthErrorCursorStyle)
+	warnBG := bgSGR(t, TableHealthWarnCursorStyle)
+	// The plain tints set a FOREGROUND only; these prefixes should still appear
+	// on the blurred unhealthy cursor row (it is tinted, just not filled).
+	fgPrefix := func(s lipgloss.Style, name string) string {
+		rendered := s.Render("X")
+		i := strings.Index(rendered, "X")
+		if i <= 0 {
+			t.Fatalf("test setup: %s produced no SGR prefix", name)
+		}
+		return rendered[:i]
+	}
+	errorTintFG := fgPrefix(TableHealthErrorStyle, "TableHealthErrorStyle")
+	warnTintFG := fgPrefix(TableHealthWarnStyle, "TableHealthWarnStyle")
+
+	// Cursor on the HEALTHY row → plain, no accent fill.
+	//
+	// This sub-test does not on its own discriminate against the old buggy code:
+	// the old dim-style cursor also rendered the healthy row without an accent
+	// fill. The UNHEALTHY sub-test below is the true regression discriminator,
+	// asserting no health-colored fill leaks onto the blurred cursor row.
+	t.Run("healthy cursor row renders plain", func(t *testing.T) {
+		hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+			"uid-healthy": plugin.Healthy,
+			"uid-err":     plugin.Error,
+		}}
+		rl := NewResourceList(hp, 80, 15)
+		rl.SetObjects([]*unstructured.Unstructured{
+			makeUIDObj("pod-a-healthy", "uid-healthy"),
+			makeUIDObj("pod-b-err", "uid-err"),
+		})
+		rl.Blur()
+
+		out := rl.table.View()
+		cursorLine := lineContaining(out, "pod-a-healthy")
+		if cursorLine == "" {
+			t.Fatalf("could not find healthy cursor row in output:\n%q", out)
+		}
+		if strings.Contains(cursorLine, accentBG) {
+			t.Fatalf("blurred healthy cursor row must NOT carry accent background fill %q, got %q", accentBG, cursorLine)
+		}
+	})
+
+	// Cursor on the UNHEALTHY row → fg tint only, no error fill (the bug-2 case).
+	t.Run("unhealthy cursor row shows tint, no fill", func(t *testing.T) {
+		hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+			"uid-healthy": plugin.Healthy,
+			"uid-err":     plugin.Error,
+		}}
+		rl := NewResourceList(hp, 80, 15)
+		rl.SetObjects([]*unstructured.Unstructured{
+			makeUIDObj("pod-a-err", "uid-err"),
+			makeUIDObj("pod-b-healthy", "uid-healthy"),
+		})
+		rl.Blur()
+
+		out := rl.table.View()
+		cursorLine := lineContaining(out, "pod-a-err")
+		if cursorLine == "" {
+			t.Fatalf("could not find unhealthy cursor row in output:\n%q", out)
+		}
+		// No background fill (neither the accent nor the error cursor fill).
+		if strings.Contains(cursorLine, errorBG) {
+			t.Fatalf("blurred unhealthy cursor row must NOT carry error background fill %q, got %q", errorBG, cursorLine)
+		}
+		if strings.Contains(cursorLine, accentBG) {
+			t.Fatalf("blurred unhealthy cursor row must NOT carry accent background fill %q, got %q", accentBG, cursorLine)
+		}
+		// But it must still carry the foreground health tint — proving it renders
+		// identically to a normal unhealthy row, not stripped of color entirely.
+		if !strings.Contains(cursorLine, errorTintFG) {
+			t.Fatalf("blurred unhealthy cursor row must carry the foreground tint %q, got %q", errorTintFG, cursorLine)
+		}
+	})
+
+	// Cursor on the WARNING row → fg tint only, no warn fill.
+	t.Run("warning cursor row shows tint, no fill", func(t *testing.T) {
+		hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+			"uid-warn":    plugin.Warning,
+			"uid-healthy": plugin.Healthy,
+		}}
+		rl := NewResourceList(hp, 80, 15)
+		rl.SetObjects([]*unstructured.Unstructured{
+			makeUIDObj("pod-a-warn", "uid-warn"),
+			makeUIDObj("pod-b-healthy", "uid-healthy"),
+		})
+		rl.Blur()
+
+		out := rl.table.View()
+		cursorLine := lineContaining(out, "pod-a-warn")
+		if cursorLine == "" {
+			t.Fatalf("could not find warning cursor row in output:\n%q", out)
+		}
+		// No background fill (neither the accent nor the warn cursor fill).
+		if strings.Contains(cursorLine, warnBG) {
+			t.Fatalf("blurred warning cursor row must NOT carry warn background fill %q, got %q", warnBG, cursorLine)
+		}
+		if strings.Contains(cursorLine, accentBG) {
+			t.Fatalf("blurred warning cursor row must NOT carry accent background fill %q, got %q", accentBG, cursorLine)
+		}
+		// But it must still carry the foreground warn tint — identical to a normal
+		// warning row.
+		if !strings.Contains(cursorLine, warnTintFG) {
+			t.Fatalf("blurred warning cursor row must carry the foreground tint %q, got %q", warnTintFG, cursorLine)
+		}
+	})
+}
+
+// TestViewCursorFillUnderBlurBorder covers the detail-focused production path
+// (BlurBorder → selectionActive=true, focused=false): even though the border is
+// dimmed, the cursor row must STILL carry its cursor fill — accent on a healthy
+// row, the status fill on an unhealthy row — exactly as under Focus().
+func TestViewCursorFillUnderBlurBorder(t *testing.T) {
+	accentBG := bgSGR(t, TableSelectedStyle)
+	warnBG := bgSGR(t, TableHealthWarnCursorStyle)
+	errorBG := bgSGR(t, TableHealthErrorCursorStyle)
+
+	// Healthy cursor row → accent fill under BlurBorder.
+	t.Run("healthy cursor row keeps accent fill", func(t *testing.T) {
+		hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+			"uid-healthy": plugin.Healthy,
+			"uid-err":     plugin.Error,
+		}}
+		rl := NewResourceList(hp, 80, 15)
+		rl.SetObjects([]*unstructured.Unstructured{
+			makeUIDObj("pod-a-healthy", "uid-healthy"),
+			makeUIDObj("pod-b-err", "uid-err"),
+		})
+		// Exercise a genuine false→true transition into BlurBorder.
+		rl.Blur()
+		rl.BlurBorder()
+		if rl.Focused() {
+			t.Fatal("BlurBorder must leave the border unfocused")
+		}
+		if !rl.SelectionActive() {
+			t.Fatal("BlurBorder must keep the selection active")
+		}
+
+		out := rl.table.View()
+		cursorLine := lineContaining(out, "pod-a-healthy")
+		if cursorLine == "" {
+			t.Fatalf("could not find healthy cursor row in output:\n%q", out)
+		}
+		if !strings.Contains(cursorLine, accentBG) {
+			t.Fatalf("BlurBorder healthy cursor row must keep accent background fill %q, got %q", accentBG, cursorLine)
+		}
+	})
+
+	// Warning cursor row → warn fill under BlurBorder.
+	t.Run("warning cursor row keeps warn fill", func(t *testing.T) {
+		hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+			"uid-warn":    plugin.Warning,
+			"uid-healthy": plugin.Healthy,
+		}}
+		rl := NewResourceList(hp, 80, 15)
+		rl.SetObjects([]*unstructured.Unstructured{
+			makeUIDObj("pod-a-warn", "uid-warn"),
+			makeUIDObj("pod-b-healthy", "uid-healthy"),
+		})
+		// Exercise a genuine false→true transition into BlurBorder.
+		rl.Blur()
+		rl.BlurBorder()
+		if rl.Focused() {
+			t.Fatal("BlurBorder must leave the border unfocused")
+		}
+		if !rl.SelectionActive() {
+			t.Fatal("BlurBorder must keep the selection active")
+		}
+
+		out := rl.table.View()
+		cursorLine := lineContaining(out, "pod-a-warn")
+		if cursorLine == "" {
+			t.Fatalf("could not find warning cursor row in output:\n%q", out)
+		}
+		if !strings.Contains(cursorLine, warnBG) {
+			t.Fatalf("BlurBorder warning cursor row must keep warn background fill %q, got %q", warnBG, cursorLine)
+		}
+	})
+
+	// Unhealthy cursor row → error fill under BlurBorder.
+	t.Run("unhealthy cursor row keeps error fill", func(t *testing.T) {
+		hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+			"uid-err":     plugin.Error,
+			"uid-healthy": plugin.Healthy,
+		}}
+		rl := NewResourceList(hp, 80, 15)
+		rl.SetObjects([]*unstructured.Unstructured{
+			makeUIDObj("pod-a-err", "uid-err"),
+			makeUIDObj("pod-b-healthy", "uid-healthy"),
+		})
+		// Exercise a genuine false→true transition into BlurBorder.
+		rl.Blur()
+		rl.BlurBorder()
+
+		out := rl.table.View()
+		cursorLine := lineContaining(out, "pod-a-err")
+		if cursorLine == "" {
+			t.Fatalf("could not find unhealthy cursor row in output:\n%q", out)
+		}
+		if !strings.Contains(cursorLine, errorBG) {
+			t.Fatalf("BlurBorder unhealthy cursor row must keep error background fill %q, got %q", errorBG, cursorLine)
+		}
+	})
+}
+
 // healthTestPlugin is a testPlugin that also implements plugin.HealthReporter,
 // reporting per-object health from a UID-keyed map.
 type healthTestPlugin struct {
@@ -1564,18 +1928,174 @@ func TestRebindRowStyleHealthNonCursor(t *testing.T) {
 	}
 	rl.SetObjects(objs)
 
-	if got := rl.table.RowStyleFunc(0, false); got != &TableHealthWarnStyle {
+	if got := rl.table.RowStyleFunc(0, false, true); got != &TableHealthWarnStyle {
 		t.Fatalf("warning non-cursor row: expected &TableHealthWarnStyle, got %v", got)
 	}
-	if got := rl.table.RowStyleFunc(1, false); got != &TableHealthErrorStyle {
+	if got := rl.table.RowStyleFunc(1, false, true); got != &TableHealthErrorStyle {
 		t.Fatalf("error non-cursor row: expected &TableHealthErrorStyle, got %v", got)
 	}
-	if got := rl.table.RowStyleFunc(2, false); got != nil {
+	if got := rl.table.RowStyleFunc(2, false, true); got != nil {
 		t.Fatalf("healthy non-cursor row: expected nil, got %v", got)
+	}
+
+	// The non-cursor health tint must be independent of selection-active state:
+	// flipping to inactive (Blur) and back to active (Focus) must not change it.
+	rl.Blur()
+	if got := rl.table.RowStyleFunc(0, false, false); got != &TableHealthWarnStyle {
+		t.Fatalf("blurred warning non-cursor row: expected &TableHealthWarnStyle, got %v", got)
+	}
+	if got := rl.table.RowStyleFunc(1, false, false); got != &TableHealthErrorStyle {
+		t.Fatalf("blurred error non-cursor row: expected &TableHealthErrorStyle, got %v", got)
+	}
+	rl.Focus()
+	if got := rl.table.RowStyleFunc(0, false, true); got != &TableHealthWarnStyle {
+		t.Fatalf("refocused warning non-cursor row: expected &TableHealthWarnStyle, got %v", got)
 	}
 }
 
-func TestRebindRowStyleCursorSuppressesHealth(t *testing.T) {
+func TestRebindRowStyleUnfocusedCursorRendersAsNormalRow(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-err": plugin.Error,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	// One Error object lives at display index 0, so RowStyleFunc(0, true) lands on
+	// a real unhealthy row — this guards against the closure's `index >= len(display)`
+	// bounds check returning nil for an EMPTY display and the test passing for the
+	// wrong reason (never reaching the inactive branch).
+	objs := []*unstructured.Unstructured{makeUIDObj("pod-err", "uid-err")}
+	rl.SetObjects(objs)
+
+	// Positive baseline: while still ACTIVE, the cursor row over the unhealthy
+	// object must take the status-colored cursor fill. If Blur() below failed to
+	// rebind the closure, this assertion would still pass but the next one would
+	// fail — proving the inactive branch (not a stale closure) changes the tint.
+	if got := rl.table.RowStyleFunc(0, true, true); got != &TableHealthErrorCursorStyle {
+		t.Fatalf("active baseline: expected &TableHealthErrorCursorStyle at index 0, got %v", got)
+	}
+
+	// After Blur() the pane is no longer active: the cursor row falls through to
+	// the standard non-cursor health tint, rendering identically to a normal
+	// unready row (so it matches its red siblings instead of dimming to Selected).
+	rl.Blur()
+	if got := rl.table.RowStyleFunc(0, true, false); got != &TableHealthErrorStyle {
+		t.Fatalf("blurred cursor row over unhealthy object: expected &TableHealthErrorStyle (normal row), got %v", got)
+	}
+}
+
+func TestRebindRowStyleCursorHealthWhenFocused(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-warn":    plugin.Warning,
+		"uid-err":     plugin.Error,
+		"uid-healthy": plugin.Healthy,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	// Default NAME-ascending sort yields:
+	//   row 0 = pod-a-warn, row 1 = pod-b-err, row 2 = pod-c-healthy.
+	objs := []*unstructured.Unstructured{
+		makeUIDObj("pod-a-warn", "uid-warn"),
+		makeUIDObj("pod-b-err", "uid-err"),
+		makeUIDObj("pod-c-healthy", "uid-healthy"),
+	}
+	rl.SetObjects(objs)
+
+	// Start blurred so Focus() exercises a real blurred→focused transition. The
+	// closure is NOT rebound on focus change (applyFocus does not call
+	// rebindRowStyle); the per-state behavior comes entirely from the live `active`
+	// arg passed below, so a single binding suffices for both focus states.
+	rl.Blur()
+	rl.Focus()
+	styleFunc := rl.table.RowStyleFunc
+
+	if got := styleFunc(0, true, true); got != &TableHealthWarnCursorStyle {
+		t.Fatalf("focused warning cursor row: expected &TableHealthWarnCursorStyle, got %v", got)
+	}
+	if got := styleFunc(1, true, true); got != &TableHealthErrorCursorStyle {
+		t.Fatalf("focused error cursor row: expected &TableHealthErrorCursorStyle, got %v", got)
+	}
+	// Healthy row under a focused cursor falls through to the table's Selected style.
+	if got := styleFunc(2, true, true); got != nil {
+		t.Fatalf("focused healthy cursor row: expected nil, got %v", got)
+	}
+	// Non-cursor unready rows keep the plain health tint (regression guard).
+	if got := styleFunc(0, false, true); got != &TableHealthWarnStyle {
+		t.Fatalf("focused warning non-cursor row: expected &TableHealthWarnStyle, got %v", got)
+	}
+	if got := styleFunc(1, false, true); got != &TableHealthErrorStyle {
+		t.Fatalf("focused error non-cursor row: expected &TableHealthErrorStyle, got %v", got)
+	}
+
+	// With active=false the unhealthy cursor rows fall through to the plain health
+	// tint (no cursor variant), while a healthy cursor row returns nil — and with
+	// active=false a nil return makes renderRow render a PLAIN row (Selected is
+	// gated off), not the Selected style. Blur() does not rebind the closure;
+	// styleFunc is the same object, just probed with active=false here.
+	rl.Blur()
+	if got := styleFunc(0, true, false); got != &TableHealthWarnStyle {
+		t.Fatalf("blurred warning cursor row: expected &TableHealthWarnStyle, got %v", got)
+	}
+	if got := styleFunc(1, true, false); got != &TableHealthErrorStyle {
+		t.Fatalf("blurred error cursor row: expected &TableHealthErrorStyle, got %v", got)
+	}
+	if got := styleFunc(2, true, false); got != nil {
+		t.Fatalf("blurred healthy cursor row: expected nil, got %v", got)
+	}
+}
+
+// TestRowStyleFuncHealthMappingIsPure proves the cursor-row health style is a pure
+// function of the live `active` arg, independent of which focus method last ran.
+// For both the warn and error rows: RowStyleFunc(i,true,true) returns the cursor
+// fill, RowStyleFunc(i,true,false) returns the plain tint — and the result does not
+// change across Focus/Blur/BlurBorder, because active is now a render
+// parameter, not captured focus state. (Replaces the deleted BorderFocusToggle
+// tests, which only asserted that BlurBorder/Focus re-ran rebindRowStyle.)
+func TestRowStyleFuncHealthMappingIsPure(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-warn": plugin.Warning,
+		"uid-err":  plugin.Error,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	// Default NAME-ascending sort: row 0 = pod-a-warn, row 1 = pod-b-err.
+	objs := []*unstructured.Unstructured{
+		makeUIDObj("pod-a-warn", "uid-warn"),
+		makeUIDObj("pod-b-err", "uid-err"),
+	}
+	rl.SetObjects(objs)
+
+	const (
+		warnRow = 0
+		errRow  = 1
+	)
+
+	assertMapping := func(t *testing.T, label string) {
+		t.Helper()
+		// active=true → cursor fill.
+		if got := rl.table.RowStyleFunc(warnRow, true, true); got != &TableHealthWarnCursorStyle {
+			t.Fatalf("%s: warn cursor row active: expected &TableHealthWarnCursorStyle, got %v", label, got)
+		}
+		if got := rl.table.RowStyleFunc(errRow, true, true); got != &TableHealthErrorCursorStyle {
+			t.Fatalf("%s: error cursor row active: expected &TableHealthErrorCursorStyle, got %v", label, got)
+		}
+		// active=false → plain tint (no cursor variant).
+		if got := rl.table.RowStyleFunc(warnRow, true, false); got != &TableHealthWarnStyle {
+			t.Fatalf("%s: warn cursor row inactive: expected &TableHealthWarnStyle, got %v", label, got)
+		}
+		if got := rl.table.RowStyleFunc(errRow, true, false); got != &TableHealthErrorStyle {
+			t.Fatalf("%s: error cursor row inactive: expected &TableHealthErrorStyle, got %v", label, got)
+		}
+	}
+
+	// The mapping is identical no matter which focus method last ran.
+	rl.Focus()
+	assertMapping(t, "after Focus")
+	rl.Blur()
+	assertMapping(t, "after Blur")
+	rl.BlurBorder()
+	assertMapping(t, "after BlurBorder")
+	rl.Focus()
+	assertMapping(t, "after Focus")
+}
+
+func TestRebindRowStyleMarkWinsOverCursorHealthWhenFocused(t *testing.T) {
 	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
 		"uid-err": plugin.Error,
 	}}
@@ -1583,10 +2103,35 @@ func TestRebindRowStyleCursorSuppressesHealth(t *testing.T) {
 	objs := []*unstructured.Unstructured{makeUIDObj("pod-err", "uid-err")}
 	rl.SetObjects(objs)
 
-	// Cursor row must return nil even though the object is unhealthy, so the
-	// table applies its Selected style (selection wins over health).
-	if got := rl.table.RowStyleFunc(0, true); got != nil {
-		t.Fatalf("cursor row over unhealthy object: expected nil, got %v", got)
+	// Start blurred so Focus() exercises a real active=false → active=true
+	// transition, guarding against a Focus() that fails to rebind the closure
+	// after a Blur().
+	rl.Blur()
+	rl.Focus()
+	rl.ToggleSelect() // rebinds the closure itself
+
+	// Marks win even on a focused unready cursor row.
+	if got := rl.table.RowStyleFunc(0, true, true); got != &TableMarkedSelectedStyle {
+		t.Fatalf("focused marked unready cursor row: expected &TableMarkedSelectedStyle, got %v", got)
+	}
+}
+
+func TestRebindRowStyleMarkWinsOverCursorHealthWhenBlurred(t *testing.T) {
+	hp := &healthTestPlugin{health: map[types.UID]plugin.Health{
+		"uid-err": plugin.Error,
+	}}
+	rl := NewResourceList(hp, 80, 15)
+	objs := []*unstructured.Unstructured{makeUIDObj("pod-err", "uid-err")}
+	rl.SetObjects(objs)
+
+	rl.Blur()
+	rl.ToggleSelect() // rebinds the closure itself
+
+	// The mark check precedes the health branch, but the cursor variant only
+	// applies in an active pane. A blurred (inactive) marked cursor row shows the
+	// plain mark style — no cursor highlight.
+	if got := rl.table.RowStyleFunc(0, true, false); got != &TableMarkedStyle {
+		t.Fatalf("blurred marked unready cursor row: expected &TableMarkedStyle, got %v", got)
 	}
 }
 
@@ -1598,15 +2143,22 @@ func TestRebindRowStyleMarkWinsOverHealth(t *testing.T) {
 	objs := []*unstructured.Unstructured{makeUIDObj("pod-err", "uid-err")}
 	rl.SetObjects(objs)
 
+	// Drive a real blurred→focused transition so the focused cursor assertion below
+	// is non-vacuous (distinguishes the active-cursor contract from the old one).
+	// The blurred marked-cursor case (→ &TableMarkedStyle) is covered separately by
+	// TestRebindRowStyleMarkWinsOverCursorHealthWhenBlurred.
+	rl.Blur()
+	rl.Focus()
+
 	// Mark the row. ToggleSelect rebinds the RowStyleFunc itself.
 	rl.ToggleSelect()
 
 	// Marked + non-cursor → mark style (not health).
-	if got := rl.table.RowStyleFunc(0, false); got != &TableMarkedStyle {
+	if got := rl.table.RowStyleFunc(0, false, true); got != &TableMarkedStyle {
 		t.Fatalf("marked non-cursor row: expected &TableMarkedStyle, got %v", got)
 	}
 	// Marked + cursor → marked-selected style (not health, not plain selection).
-	if got := rl.table.RowStyleFunc(0, true); got != &TableMarkedSelectedStyle {
+	if got := rl.table.RowStyleFunc(0, true, true); got != &TableMarkedSelectedStyle {
 		t.Fatalf("marked cursor row: expected &TableMarkedSelectedStyle, got %v", got)
 	}
 }
@@ -1632,10 +2184,10 @@ func TestRebindRowStyleOutOfRange(t *testing.T) {
 	objs := []*unstructured.Unstructured{makeUIDObj("pod-err", "uid-err")}
 	rl.SetObjects(objs)
 
-	if got := rl.table.RowStyleFunc(-1, false); got != nil {
+	if got := rl.table.RowStyleFunc(-1, false, true); got != nil {
 		t.Fatalf("index -1: expected nil, got %v", got)
 	}
-	if got := rl.table.RowStyleFunc(5, false); got != nil {
+	if got := rl.table.RowStyleFunc(5, false, true); got != nil {
 		t.Fatalf("out-of-range index: expected nil, got %v", got)
 	}
 }
@@ -1674,7 +2226,7 @@ func TestHealthTintStripsInnerANSIEndToEnd(t *testing.T) {
 	rl.SetObjects(objs)
 
 	// The RowStyleFunc must return the error health style for the unhealthy row.
-	if got := rl.table.RowStyleFunc(1, false); got != &TableHealthErrorStyle {
+	if got := rl.table.RowStyleFunc(1, false, true); got != &TableHealthErrorStyle {
 		t.Fatalf("unhealthy non-cursor row: expected &TableHealthErrorStyle, got %v", got)
 	}
 
@@ -1742,7 +2294,7 @@ func TestRebindRowStyleKeepsHealthAfterDeselect(t *testing.T) {
 	if rl.table.RowStyleFunc == nil {
 		t.Fatal("RowStyleFunc must stay non-nil while a HealthReporter is present")
 	}
-	if got := rl.table.RowStyleFunc(0, false); got != &TableHealthErrorStyle {
+	if got := rl.table.RowStyleFunc(0, false, true); got != &TableHealthErrorStyle {
 		t.Fatalf("unhealthy non-cursor row after deselect: expected &TableHealthErrorStyle, got %v", got)
 	}
 
@@ -1752,7 +2304,7 @@ func TestRebindRowStyleKeepsHealthAfterDeselect(t *testing.T) {
 	if rl.table.RowStyleFunc == nil {
 		t.Fatal("RowStyleFunc must stay non-nil after ClearSelection with a HealthReporter")
 	}
-	if got := rl.table.RowStyleFunc(0, false); got != &TableHealthErrorStyle {
+	if got := rl.table.RowStyleFunc(0, false, true); got != &TableHealthErrorStyle {
 		t.Fatalf("unhealthy non-cursor row after ClearSelection: expected &TableHealthErrorStyle, got %v", got)
 	}
 }
