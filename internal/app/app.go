@@ -211,8 +211,8 @@ type App struct {
 	// session id as terminals. Exec/pod-debug entries are mostly informational
 	// (ephemeral set); node-debug entries carry the created pod so it can be
 	// deleted. Entries are removed alongside the session in closeTerminalSession.
-	termCleanup       map[string]terminalMeta
-	config            *config.Config
+	termCleanup map[string]terminalMeta
+	config      *config.Config
 
 	// notify is the shared store of aku's own info/warning/error messages. It
 	// backs both the toast overlay (rendered each frame in View via Live) and the
@@ -226,7 +226,7 @@ type App struct {
 	// explicitly cleared (clear-notifications). The visible toast set is
 	// notify.Live(now, toastTTL) minus these IDs. The store's history is never
 	// mutated — dismissal is purely an overlay concern.
-	dismissed map[uint64]bool
+	dismissed         map[uint64]bool
 	pendingRun        *config.RunConfig            // external command waiting for confirm
 	pendingDelete     []*unstructured.Unstructured // delete targets (always-list) waiting for confirm
 	pendingDebug      *pendingDebugAction          // debug action waiting for confirm
@@ -253,6 +253,14 @@ type App struct {
 	lastClickRow   int // body-row index under the last click (-1 if chrome)
 	lastClickSplit int // split index for the last click (-1 if not a split)
 
+	// manifestSource records how the pinned "manifests" pseudo-context was built so
+	// Ctrl+r can rebuild it. The normal reload path (UnsubscribeAll + re-subscribe
+	// through informers) does nothing for the static, client-less manifest store, so
+	// reload must instead re-run manifest.LoadFiles from the original paths. A stdin
+	// source cannot be re-read, so reload is a no-op there. Nil/zero when not in
+	// manifest mode.
+	manifestSource *manifestSource
+
 	// executeCommandFn is a test seam for intercepting command dispatch from
 	// the mouse double-click handler. When nil, (App).executeCommand is
 	// used. Tests that supply a spy receive the current App so state
@@ -268,6 +276,25 @@ type App struct {
 	// assertion to what's actually under test — the double-click decision
 	// — leaving the command-dispatch path covered by its own tests.
 	executeCommandFn func(a App, cmd string) (tea.Model, tea.Cmd)
+}
+
+// manifestSource records the origin of the pinned "manifests" pseudo-context so
+// reload (Ctrl+r) can rebuild it. In files mode paths holds the original --file
+// arguments and fromStdin is false; in stdin mode paths is empty and fromStdin
+// is true (stdin can't be re-read, so reload is a no-op). defaultNS is the
+// namespace stamped onto objects that declare none, matching the startup build.
+type manifestSource struct {
+	paths     []string
+	defaultNS string
+	fromStdin bool
+}
+
+// SetManifestSource records how the pinned "manifests" cluster was built so that
+// reload (Ctrl+r) can rebuild it. It is called once during startup wiring
+// (cmd/root.go) when aku boots into manifest mode. fromStdin=true marks a
+// stdin-loaded source, which reload cannot re-read.
+func (a *App) SetManifestSource(paths []string, defaultNS string, fromStdin bool) {
+	a.manifestSource = &manifestSource{paths: paths, defaultNS: defaultNS, fromStdin: fromStdin}
 }
 
 // ResourceSpec describes a resource pane to open at startup.
@@ -358,6 +385,15 @@ func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, notify
 
 	if client != nil {
 		a.statusBar.SetContextName(client.Context)
+	} else {
+		// A pinned (nil-client) pseudo-context like "manifests" — and a degraded
+		// startup whose client failed to connect — would otherwise leave the badge
+		// at its "default" zero value, since nothing else sets it at boot.
+		// startupContext already carries the resolved name ("manifests", or the
+		// real context name on a degraded live startup). Mark it offline: it has no
+		// live connection.
+		a.statusBar.SetContextName(startupContext)
+		a.statusBar.SetOnline(false)
 	}
 
 	// Populate fuzzy picker with all registered plugins
@@ -367,6 +403,12 @@ func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, notify
 	defaultNs := "default"
 	if client != nil {
 		defaultNs = client.Namespace
+	}
+	// A pinned pseudo-context (the synthetic "manifests" cluster) carries no
+	// client and dual-keys every object into the all-namespaces ("") bucket, so
+	// its initial pane should open on All Namespaces rather than "default".
+	if mgr.IsPinned(startupContext) {
+		defaultNs = ""
 	}
 
 	// Add initial splits from specs. Each split is stamped with the explicit
@@ -387,7 +429,16 @@ func New(mgr *cluster.Manager, keymap *config.Keymap, cfg *config.Config, notify
 		}
 		a.layout.AddSplit(spec.Plugin, ns, startupContext)
 		if startupStore != nil {
-			startupStore.Subscribe(spec.Plugin.GVR(), ns)
+			objs := startupStore.Subscribe(spec.Plugin.GVR(), ns)
+			// A pinned (static, client-less) store has no informer, so the async
+			// ResourceUpdatedMsg that fills live panes never fires. Seed the pane
+			// synchronously from Subscribe's return instead, otherwise the initial
+			// manifest view renders empty even though the cache is populated.
+			if mgr.IsPinned(startupContext) {
+				if split := a.layout.SplitAt(i); split != nil {
+					split.SetObjects(objs)
+				}
+			}
 		}
 		if i == 0 {
 			a.keyTrie = bs.TrieFor("resources", spec.Plugin.Name())
@@ -500,24 +551,40 @@ func (a App) helmClientForFocused() helm.Client {
 }
 
 func (a App) Init() tea.Cmd {
-	startup, _ := a.mgr.Get(a.startupContext)
-	if startup == nil || !startup.Connected() {
-		return nil
+	var cmds []tea.Cmd
+
+	// Populate a detail panel opened at startup via --details. New() shows the
+	// panel and sets its mode but cannot dispatch a cmd; route the refresh through
+	// Update (via InitDetailRefreshMsg) so its App mutations persist. Skipped for
+	// log mode (driven by the log stream, not the describe path). For a live
+	// cluster the first row is not selected yet, so this no-ops cleanly and the
+	// async ResourceUpdatedMsg fills the panel later; for the pinned manifest
+	// cluster (no async update) this is the only thing that ever fills it.
+	if a.layout.RightPanelVisible() && !a.layout.IsLogMode() {
+		cmds = append(cmds, func() tea.Msg { return msgs.InitDetailRefreshMsg{} })
 	}
-	disc := startup.Discovery()
-	client := startup.Client()
-	typed := client.Typed
-	// disc.Refresh populates the startup cluster's own Discovery index directly;
-	// the message is tagged with the startup context so handleAPIResourcesDiscovered
-	// only feeds the plugin registry from the startup cluster's results.
-	startupCtx := startup.Context()
-	return tea.Batch(
-		func() tea.Msg {
-			resources, err := disc.Refresh(typed)
-			return k8s.APIResourcesDiscoveredMsg{Context: startupCtx, Resources: resources, Err: err}
-		},
-		initialHeartbeatCmd(startupCtx, client),
-	)
+
+	// Discovery + heartbeat only apply to a connected cluster. A pinned manifest
+	// cluster (or a degraded startup) is not connected, so it skips this but still
+	// gets the detail-refresh above.
+	if startup, _ := a.mgr.Get(a.startupContext); startup != nil && startup.Connected() {
+		disc := startup.Discovery()
+		client := startup.Client()
+		typed := client.Typed
+		// disc.Refresh populates the startup cluster's own Discovery index directly;
+		// the message is tagged with the startup context so handleAPIResourcesDiscovered
+		// only feeds the plugin registry from the startup cluster's results.
+		startupCtx := startup.Context()
+		cmds = append(cmds,
+			func() tea.Msg {
+				resources, err := disc.Refresh(typed)
+				return k8s.APIResourcesDiscoveredMsg{Context: startupCtx, Resources: resources, Err: err}
+			},
+			initialHeartbeatCmd(startupCtx, client),
+		)
+	}
+
+	return tea.Batch(cmds...)
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -1232,6 +1299,17 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a, cmd := a.startLogStream(podName, containerName, ns, opts)
 		return a, cmd
 
+	case msgs.InitDetailRefreshMsg:
+		// Startup populate for a --details panel (see App.Init). Refresh from the
+		// first selected row; mutations (describeGen, lastDetailKey) persist here
+		// because Update returns the updated model. Guard against a panel that was
+		// closed before this lands.
+		if !a.layout.RightPanelVisible() || a.layout.IsLogMode() {
+			return a, nil
+		}
+		app, cmd := a.refreshDetailPanel()
+		return app, cmd
+
 	case msgs.DescribeLoadedMsg:
 		a.statusBar.EndOperation()
 		if msg.Gen != a.describeGen {
@@ -1873,6 +1951,16 @@ func (a App) currentContext() (componentType, resourceName string) {
 			default:
 				componentType = "details"
 			}
+		}
+		// The detail pane renders the focused split's resource. FocusedSplit()
+		// still returns that underlying ResourceList when details are focused
+		// (focusing details doesn't move focusIdx — see CLAUDE.md pane-focus
+		// invariant), so report its plugin name. Without this, the context is
+		// ("describe", "") and any details-scoped binding with a non-empty For
+		// list (e.g. x → toggle-env-resolve) is filtered out of the trie, hints,
+		// and help overlay.
+		if focused := a.layout.FocusedSplit(); focused != nil {
+			resourceName = focused.Plugin().Name()
 		}
 		return
 	}
@@ -3075,6 +3163,7 @@ func (a App) startLogStream(podName, containerName, namespace string, opts k8s.L
 	// even if the pane is later switched to another context.
 	client := a.clientForFocused()
 	if client == nil {
+		a.notify.Add(notify.LevelError, "logs: not available in manifest mode", a.contextFor(a.layout.FocusedSplit()), "logs")
 		return a, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())

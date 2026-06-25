@@ -75,6 +75,46 @@ func TestStoreMultipleGVRs(t *testing.T) {
 	}
 }
 
+func TestStoreCountInNamespace(t *testing.T) {
+	s := NewStore(nil, "", nil)
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	svcsGVR := schema.GroupVersionResource{Version: "v1", Resource: "services"}
+
+	// Mirror the static-manifest store's dual-keying: each namespaced object is
+	// upserted under its namespace AND once into the all-namespaces ("") bucket.
+	upsertDual := func(gvr schema.GroupVersionResource, ns, name string) {
+		o := &unstructured.Unstructured{}
+		o.SetName(name)
+		o.SetNamespace(ns)
+		s.CacheUpsert(gvr, ns, o)
+		s.CacheUpsert(gvr, "", o)
+	}
+
+	// 2 pods + 1 svc in "default"; 1 pod in "kube-system".
+	upsertDual(podsGVR, "default", "pod-a")
+	upsertDual(podsGVR, "default", "pod-b")
+	upsertDual(svcsGVR, "default", "svc-a")
+	upsertDual(podsGVR, "kube-system", "pod-c")
+
+	// The "" bucket holds every distinct object exactly once: 4 total.
+	if got := s.CountInNamespace(""); got != 4 {
+		t.Fatalf("expected CountInNamespace(\"\")=4 distinct objects, got %d", got)
+	}
+
+	// A namespaced bucket counts only that namespace's objects across all GVRs.
+	if got := s.CountInNamespace("default"); got != 3 {
+		t.Fatalf("expected CountInNamespace(\"default\")=3, got %d", got)
+	}
+	if got := s.CountInNamespace("kube-system"); got != 1 {
+		t.Fatalf("expected CountInNamespace(\"kube-system\")=1, got %d", got)
+	}
+
+	// An unknown namespace counts zero.
+	if got := s.CountInNamespace("nope"); got != 0 {
+		t.Fatalf("expected CountInNamespace(\"nope\")=0, got %d", got)
+	}
+}
+
 func TestStoreUnsubscribeClearsCache(t *testing.T) {
 	s := NewStore(nil, "", nil)
 	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
@@ -87,6 +127,43 @@ func TestStoreUnsubscribeClearsCache(t *testing.T) {
 	items := s.List(gvr, "default")
 	if items != nil {
 		t.Fatal("cache should be cleared after Unsubscribe")
+	}
+}
+
+// TestStoreStaticUnsubscribePreservesCache verifies that a store marked static
+// (the client-less manifest pseudo-cluster) never tears down its cache on
+// Unsubscribe. Its cache is the sole copy of its data — no informer will ever
+// repopulate it — so teardown would orphan it permanently (the bug behind
+// "switching back to All Namespaces hides all pods forever").
+func TestStoreStaticUnsubscribePreservesCache(t *testing.T) {
+	s := NewStore(nil, "", nil)
+	s.MarkStatic()
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+	obj := &unstructured.Unstructured{}
+	obj.SetName("test-pod")
+	s.CacheUpsert(gvr, "", obj)
+
+	s.Unsubscribe(gvr, "")
+	if items := s.List(gvr, ""); len(items) != 1 {
+		t.Fatalf("static store cache should survive Unsubscribe, got %d items", len(items))
+	}
+}
+
+// TestStoreStaticUnsubscribeAllPreservesCache mirrors the above for the bulk
+// teardown path (reloadAll's UnsubscribeAll).
+func TestStoreStaticUnsubscribeAllPreservesCache(t *testing.T) {
+	s := NewStore(nil, "", nil)
+	s.MarkStatic()
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+	obj := &unstructured.Unstructured{}
+	obj.SetName("test-pod")
+	s.CacheUpsert(gvr, "", obj)
+
+	s.UnsubscribeAll()
+	if items := s.List(gvr, ""); len(items) != 1 {
+		t.Fatalf("static store cache should survive UnsubscribeAll, got %d items", len(items))
 	}
 }
 

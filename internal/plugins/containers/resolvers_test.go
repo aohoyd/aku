@@ -13,7 +13,7 @@ func TestIndexByName(t *testing.T) {
 		{Object: map[string]any{"metadata": map[string]any{"name": "a"}}},
 		{Object: map[string]any{"metadata": map[string]any{"name": "b"}}},
 	}
-	m := indexByName(objs)
+	m := IndexByName(objs)
 	if len(m) != 2 {
 		t.Fatalf("expected 2 entries, got %d", len(m))
 	}
@@ -23,9 +23,94 @@ func TestIndexByName(t *testing.T) {
 }
 
 func TestIndexByNameNil(t *testing.T) {
-	m := indexByName(nil)
+	m := IndexByName(nil)
 	if m == nil || len(m) != 0 {
 		t.Fatal("expected non-nil empty map")
+	}
+}
+
+func TestSecretData(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"data": map[string]any{
+			"u":   "YWRtaW4=", // "admin"
+			"bad": "!!!notbase64!!!",
+		},
+	}}
+	data := SecretData(obj)
+	if data["u"] != "admin" {
+		t.Errorf("expected decoded admin, got %q", data["u"])
+	}
+	if data["bad"] != "!!!notbase64!!!" {
+		t.Errorf("expected raw fallback, got %q", data["bad"])
+	}
+}
+
+func TestSecretDataNoDataReturnsNil(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "empty"},
+	}}
+	if data := SecretData(obj); data != nil {
+		t.Errorf("expected nil for secret with no data/binaryData, got %v", data)
+	}
+}
+
+func TestSecretDataBinaryData(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"data": map[string]any{
+			"u":   "YWRtaW4=", // "admin"
+			"dup": "ZGF0YQ==", // "data" — also present in binaryData
+		},
+		"binaryData": map[string]any{
+			"cert": "Q0VSVA==", // "CERT"
+			"dup":  "YmluYXJ5", // "binary" — must lose to .data
+		},
+	}}
+	data := SecretData(obj)
+	if data["u"] != "admin" {
+		t.Errorf("expected decoded data 'admin', got %q", data["u"])
+	}
+	if data["cert"] != "CERT" {
+		t.Errorf("expected decoded binaryData 'CERT', got %q", data["cert"])
+	}
+	// .data takes precedence over .binaryData on key collision.
+	if data["dup"] != "data" {
+		t.Errorf("expected .data value 'data' to win over .binaryData, got %q", data["dup"])
+	}
+}
+
+func TestConfigMapData(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"data": map[string]any{"k": "v"},
+	}}
+	data := ConfigMapData(obj)
+	if data["k"] != "v" {
+		t.Errorf("expected v, got %q", data["k"])
+	}
+}
+
+func TestConfigMapDataBinaryData(t *testing.T) {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"data": map[string]any{
+			"plain": "literal",
+			"dup":   "fromdata", // also present in binaryData
+		},
+		"binaryData": map[string]any{
+			"blob": "Q0VSVA==", // base64 "CERT"
+			"dup":  "YmluYXJ5", // base64 "binary" — must lose to .data
+		},
+	}}
+	data := ConfigMapData(obj)
+	// .data is surfaced as-is (not base64-decoded) for ConfigMaps.
+	if data["plain"] != "literal" {
+		t.Errorf("expected literal data value, got %q", data["plain"])
+	}
+	// .binaryData is base64-decoded.
+	if data["blob"] != "CERT" {
+		t.Errorf("expected decoded binaryData 'CERT', got %q", data["blob"])
+	}
+	// .data takes precedence over .binaryData on key collision (and stays raw).
+	if data["dup"] != "fromdata" {
+		t.Errorf("expected .data value 'fromdata' to win over .binaryData, got %q", data["dup"])
 	}
 }
 

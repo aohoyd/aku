@@ -418,6 +418,87 @@ func TestParseDetailMode_Invalid(t *testing.T) {
 	}
 }
 
+func TestManifestMode(t *testing.T) {
+	tests := []struct {
+		name       string
+		filePaths  []string
+		stdinIsTTY bool
+		want       bool
+	}{
+		{"files and tty", []string{"a.yaml"}, true, true},
+		{"files and non-tty", []string{"a.yaml"}, false, true},
+		{"no files and non-tty (pipe)", nil, false, true},
+		{"no files and tty", nil, true, false},
+		{"empty slice and tty", []string{}, true, false},
+		{"empty slice and non-tty", []string{}, false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := manifestMode(tt.filePaths, tt.stdinIsTTY); got != tt.want {
+				t.Errorf("manifestMode(%v, %v) = %v, want %v", tt.filePaths, tt.stdinIsTTY, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildManifestCluster_StdinDispatch(t *testing.T) {
+	// With no file paths, buildManifestCluster must read from the stdin reader
+	// (manifest.Load path).
+	in := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: from-stdin
+  namespace: foo
+`
+	cl, warns, err := buildManifestCluster(nil, "default", strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("expected no warnings, got %v", warns)
+	}
+	cmGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+	got := cl.Store().List(cmGVR, "foo")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 configmap loaded from stdin, got %d", len(got))
+	}
+	if got[0].GetName() != "from-stdin" {
+		t.Fatalf("expected configmap 'from-stdin', got %q", got[0].GetName())
+	}
+}
+
+func TestBuildManifestCluster_FilePathDispatch(t *testing.T) {
+	// With file paths, buildManifestCluster must read the files (manifest.LoadFiles
+	// path) and ignore the stdin reader entirely.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cm.yaml")
+	if err := os.WriteFile(path, []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: from-file
+  namespace: foo
+`), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// A poisoned stdin reader proves the file path is used, not stdin.
+	cl, warns, err := buildManifestCluster([]string{path}, "default", strings.NewReader("SHOULD NOT BE READ"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("expected no warnings, got %v", warns)
+	}
+	cmGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+	got := cl.Store().List(cmGVR, "foo")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 configmap loaded from file, got %d", len(got))
+	}
+	if got[0].GetName() != "from-file" {
+		t.Fatalf("expected configmap 'from-file', got %q", got[0].GetName())
+	}
+}
+
 func TestWarnThemeInit_WithWarning(t *testing.T) {
 	var buf bytes.Buffer
 	warnThemeInit(&buf, errors.New("theme \"nope\" not found"))

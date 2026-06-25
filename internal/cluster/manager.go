@@ -34,6 +34,14 @@ type Manager struct {
 	send       func(tea.Msg)
 	apiTimeout time.Duration
 
+	// pinned names contexts whose cluster is preserved across the whole session:
+	// it is never torn down by SyncRefs (even at zero pane refs) and its store is
+	// never UnsubscribeAll'd. Used for the synthetic "manifests" pseudo-context,
+	// whose pre-populated store has no informers to reconcile. The dial/connect
+	// path also short-circuits for pinned names so the stored cluster is returned
+	// verbatim rather than rebuilt as an empty store.
+	pinned map[string]bool
+
 	// connect builds a Client for a (file, ctx) pair. Injectable so tests can
 	// avoid touching real clusters. file may be "" to use the Manager's
 	// default kubeconfig path.
@@ -50,6 +58,7 @@ func NewManager(entries []ContextEntry, kubeconfig string, apiTimeout time.Durat
 		entries:    entries,
 		kubeconfig: kubeconfig,
 		apiTimeout: apiTimeout,
+		pinned:     make(map[string]bool),
 	}
 	m.connect = func(file, ctx string) (*k8s.Client, error) {
 		if file == "" {
@@ -66,6 +75,39 @@ func NewManager(entries []ContextEntry, kubeconfig string, apiTimeout time.Durat
 // context is replaced.
 func (m *Manager) Register(c *Cluster) {
 	m.clusters[c.context] = c
+}
+
+// RegisterPinned installs a pre-built Cluster as a persistent pseudo-context
+// that the Manager preserves for the whole session. Unlike Register, a pinned
+// cluster:
+//
+//   - appears in Entries() (so the gx/oX/contexts views, which build their lists
+//     from Entries(), can offer it for selection);
+//   - is NEVER torn down by SyncRefs even with zero referencing panes, and its
+//     store is never UnsubscribeAll'd (it has no informers to reconcile);
+//   - is returned verbatim by the get/dial path — GetOrCreate short-circuits on
+//     the cached pinned cluster and never re-dials/rebuilds an empty store.
+//
+// It is used for the synthetic "manifests" cluster built by internal/manifest.
+// Re-registering the same context replaces the stored cluster but never adds a
+// duplicate Entries() row.
+func (m *Manager) RegisterPinned(c *Cluster) {
+	m.clusters[c.context] = c
+	m.pinned[c.context] = true
+	for _, e := range m.entries {
+		if e.Name == c.context {
+			return
+		}
+	}
+	m.entries = append(m.entries, ContextEntry{Name: c.context})
+}
+
+// IsPinned reports whether ctx is a pinned pseudo-context (e.g. the synthetic
+// "manifests" cluster). Pinned clusters carry no client, so callers that derive
+// a default namespace from the client treat the all-namespaces view ("") as the
+// sensible default for them.
+func (m *Manager) IsPinned(ctx string) bool {
+	return m.pinned[ctx]
 }
 
 // SetConnect overrides the function used to build a Client for a (file, ctx)
@@ -120,6 +162,14 @@ func (m *Manager) fileFor(ctx string) string {
 func (m *Manager) GetOrCreate(ctx string) (*Cluster, error) {
 	if c, ok := m.clusters[ctx]; ok {
 		return c, c.err
+	}
+
+	// A pinned pseudo-context (e.g. "manifests") must never go through the connect
+	// path — doing so would build a fresh empty store and discard the pre-populated
+	// one. If it is pinned but not in the map it was torn down erroneously; return
+	// a degraded cluster rather than dialing a context that has no real client.
+	if m.pinned[ctx] {
+		return &Cluster{context: ctx}, nil
 	}
 
 	file := m.fileFor(ctx)
@@ -194,6 +244,12 @@ func (m *Manager) RegisterConnected(ctx string, client *k8s.Client) (*Cluster, b
 	if c, ok := m.clusters[ctx]; ok {
 		return c, false
 	}
+	// A pinned pseudo-context never accepts a dialed client; it carries no real
+	// connection. Return a degraded cluster reporting not-newly so callers do not
+	// start a heartbeat loop against it.
+	if m.pinned[ctx] {
+		return &Cluster{context: ctx}, false
+	}
 	file := m.fileFor(ctx)
 	store := k8s.NewStore(client.Dynamic, ctx, m.send)
 	if m.send != nil && client.WarningHandler != nil {
@@ -234,6 +290,12 @@ func (m *Manager) SyncRefs(paneContexts []string) {
 		want[ctx]++
 	}
 	for ctx, c := range m.clusters {
+		// Pinned pseudo-contexts (e.g. "manifests") are preserved for the whole
+		// session: never torn down and never UnsubscribeAll'd, regardless of how
+		// many panes reference them.
+		if m.pinned[ctx] {
+			continue
+		}
 		n := want[ctx]
 		c.refCount = n
 		if n <= 0 {

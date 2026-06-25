@@ -275,6 +275,16 @@ type DescribeLoadedMsg struct {
 	Err     error
 }
 
+// InitDetailRefreshMsg is dispatched once from App.Init when the detail panel
+// was opened at startup via the --details flag. New() opens the panel and sets
+// its mode but cannot dispatch a tea.Cmd, and Init cannot persist the App
+// mutations a refresh performs (notably the describeGen increment), so the
+// populate step is routed through Update — which handles it by calling
+// refreshDetailPanel on the first already-selected row. This is the only thing
+// that fills the panel for the pinned manifest cluster, whose static store
+// never emits an async ResourceUpdatedMsg.
+type InitDetailRefreshMsg struct{}
+
 // HelmHistoryEntry represents a single Helm release revision.
 // Defined here to avoid circular imports with the ui package.
 type HelmHistoryEntry struct {

@@ -4,6 +4,21 @@ Project-specific conventions and invariants for aku.
 
 ## Conventions
 
+### Secret/ConfigMap data extraction invariant
+
+`containers.IndexByName`, `containers.ConfigMapData`, and `containers.SecretData`
+(`internal/plugins/containers/resolvers.go`) are the single source of truth for
+turning `*unstructured.Unstructured` ConfigMaps/Secrets into a `map[string]string`:
+`IndexByName` keys objects by `metadata.name`; `ConfigMapData` returns `.data`
+as-is and base64-decodes `.binaryData`; `SecretData` base64-decodes both `.data`
+and `.binaryData` (raw fallback on decode error). For both, `.data` keys win over
+`.binaryData` keys, and a nil map is returned when neither field has entries.
+The `env`/`envFrom` resolvers, `DescribeContainer` (describe.go), and the pods
+volume/imagePullSecret reveal all index via `IndexByName` and read through these —
+never re-decode `.data`/`.binaryData` inline; reuse these primitives. The
+imagePullSecret non-docker fallback intentionally calls `SecretData` but emits
+keys only (values suppressed).
+
 ### Pane focus invariant
 
 `Layout.reconcileFocus()` is the single source of truth for pane + detail-panel
@@ -30,3 +45,26 @@ cursor row renders like any other (plain, or just the health fg-tint).
 bits: `focused` drives border + keyboard input (→ `table.Focus()/Blur()`), and
 `selectionActive` drives cursor visibility (→ `table.SetSelectionActive`). The three
 methods `Focus`/`Blur`/`BlurBorder` are thin wrappers over it.
+
+### Manifest pseudo-context invariant
+
+The `manifests` context (manifest-visualization mode) is a **pinned, nil-client
+static cluster** installed via `Manager.RegisterPinned` and identified by
+`Manager.IsPinned(ctx)`. Pinned clusters are NOT ordinary connected clusters:
+they appear in `Entries()`, are exempt from `SyncRefs` teardown (a pinned cluster
+with zero open panes is never deleted and its cache is never cleared), and are
+returned verbatim on re-select — never re-dialed through `connect →
+RegisterConnected` (which would build a fresh empty store). Code that tears down,
+re-dials, or repopulates clusters by walking refs must skip pinned ones; `Ctrl+r`
+on a manifest cluster *rebuilds and re-registers* it (informer-based
+`UnsubscribeAll`/re-subscribe won't repopulate a static store).
+
+Because `k8s.Store.List(gvr, ns)` reads only the `(gvr, ns)` bucket, every
+namespaced manifest object is `CacheUpsert`'d twice — into its own-namespace
+bucket AND the `""` (All Namespaces) bucket — so per-namespace and "All
+Namespaces" views both populate.
+
+Manifest provenance rides as the `manifest.SourceAnnotation`
+(`aku.dev/manifest-source`) metadata annotation: the `# Source:` path for parsed
+objects, the literal `"synthesized"` for fabricated ones. It surfaces in the YAML
+view for every kind for free — do not add per-plugin describe plumbing for it.

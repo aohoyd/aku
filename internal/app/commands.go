@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/aohoyd/aku/internal/k8s/session"
 	"github.com/aohoyd/aku/internal/layout"
 	"github.com/aohoyd/aku/internal/logs"
+	"github.com/aohoyd/aku/internal/manifest"
 	"github.com/aohoyd/aku/internal/msgs"
 	"github.com/aohoyd/aku/internal/notify"
 	"github.com/aohoyd/aku/internal/plugin"
@@ -518,6 +520,17 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 	case command == "namespace-picker":
 		a.activeOverlay = overlayNsPicker
 		a.nsPicker.Open()
+		// Pinned cluster (e.g. manifest mode): the client is nil, so list the
+		// fabricated Namespace objects from the store and feed them through the
+		// same NamespacesLoadedMsg path so the UI is identical. This is restricted
+		// to pinned clusters — a live cluster whose dial merely failed must not
+		// fall back to the (empty) store; it falls through to the client branch.
+		if cl := a.clusterForFocused(); cl != nil && a.mgr.IsPinned(cl.Context()) {
+			names := storeNamespaceNames(cl.Store())
+			return a, func() tea.Msg {
+				return msgs.NamespacesLoadedMsg{Namespaces: names}
+			}
+		}
 		if client := a.clientForFocused(); client != nil {
 			timeout := a.config.APITimeout()
 			opCmd := a.statusBar.StartOperation()
@@ -615,11 +628,12 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if !ok {
 			return a, nil
 		}
-		execClient := a.clientForFocused()
-		if execClient == nil {
-			a.notify.Add(notify.LevelError, "exec: no k8s client", a.contextFor(focused), "exec")
+		execCl := a.clusterFor(focused)
+		if execCl == nil || !execCl.Connected() {
+			a.notify.Add(notify.LevelError, "exec: not available in manifest mode", a.contextFor(focused), "exec")
 			return a, nil
 		}
+		execClient := execCl.Client()
 		ns := selected.GetNamespace()
 		if ns == "" {
 			ns = focused.Namespace()
@@ -655,6 +669,10 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if !ok {
 			return a, nil
 		}
+		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
+			a.notify.Add(notify.LevelError, "port-forward: not available in manifest mode", a.contextFor(focused), "port-forward")
+			return a, nil
+		}
 		ports := a.extractPorts(focused, selected)
 		if len(ports) == 0 {
 			a.notify.Add(notify.LevelError, "no ports found on this resource", a.contextFor(focused), "port-forward")
@@ -674,7 +692,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
-			a.notify.Add(notify.LevelError, "rollout-restart: no k8s client", a.contextFor(focused), "rollout-restart")
+			a.notify.Add(notify.LevelError, "rollout-restart: not available in manifest mode", a.contextFor(focused), "rollout-restart")
 			return a, nil
 		}
 		var objs []*unstructured.Unstructured
@@ -709,7 +727,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		}
 		editCl := a.clusterFor(focused)
 		if editCl == nil || !editCl.Connected() {
-			a.notify.Add(notify.LevelError, "edit: no k8s client", a.contextFor(focused), "edit")
+			a.notify.Add(notify.LevelError, "edit: not available in manifest mode", a.contextFor(focused), "edit")
 			return a, nil
 		}
 		if focused.Plugin().Name() == "helmreleases" {
@@ -743,7 +761,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
-			a.notify.Add(notify.LevelError, "set-image: no k8s client", a.contextFor(focused), "set-image")
+			a.notify.Add(notify.LevelError, "set-image: not available in manifest mode", a.contextFor(focused), "set-image")
 			return a, nil
 		}
 		pluginName := focused.Plugin().Name()
@@ -780,7 +798,7 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		if cl := a.clusterFor(focused); cl == nil || !cl.Connected() {
-			a.notify.Add(notify.LevelError, "scale: no k8s client", a.contextFor(focused), "scale")
+			a.notify.Add(notify.LevelError, "scale: not available in manifest mode", a.contextFor(focused), "scale")
 			return a, nil
 		}
 		gvr := focused.Plugin().GVR()
@@ -1876,11 +1894,26 @@ func (a App) subscribeAndPopulate(split *ui.ResourceList, p plugin.ResourcePlugi
 }
 
 func (a App) reloadAll() (tea.Model, tea.Cmd) {
+	// The pinned "manifests" pseudo-context is a static, client-less store with no
+	// informers, so the normal reload path (UnsubscribeAll + re-subscribe) is a
+	// no-op for it. When the focused context is the pinned manifest cluster, rebuild
+	// it from the recorded source instead.
+	if ctx := a.contextFor(a.layout.FocusedSplit()); a.mgr.IsPinned(ctx) && a.manifestSource != nil {
+		return a.reloadManifest(ctx)
+	}
+
 	wasLogMode := a.layout.IsLogMode()
 	wasRightVisible := a.layout.RightPanelVisible()
 
 	// Tear down all informers and clear store cache across every live cluster.
+	// Pinned clusters (the synthetic "manifests" pseudo-context) carry a static,
+	// client-less store with no informers: UnsubscribeAll would clear their cache
+	// and the subsequent re-subscribe would hand back an empty bucket, silently
+	// wiping a concurrently-open manifest pane. Skip them.
 	a.mgr.ForEach(func(c *cluster.Cluster) {
+		if a.mgr.IsPinned(c.Context()) {
+			return
+		}
 		if s := c.Store(); s != nil {
 			s.UnsubscribeAll()
 		}
@@ -1945,6 +1978,66 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 	return a, tea.Batch(allCmds...)
 }
 
+// reloadManifest rebuilds the pinned "manifests" pseudo-context on Ctrl+r. The
+// static manifest store carries no informers, so the normal reload path cannot
+// refresh it; instead this re-runs manifest.LoadFiles from the recorded file
+// paths and re-registers the rebuilt cluster under the SAME context name (so open
+// panes on that context stay valid). Panes on the manifests context are reset to
+// root and repopulated from the rebuilt store. A stdin source cannot be re-read,
+// so that path is a no-op with an explanatory toast.
+func (a App) reloadManifest(ctx string) (tea.Model, tea.Cmd) {
+	src := a.manifestSource
+
+	// stdin mode: the stream was consumed at startup and cannot be re-read.
+	if src.fromStdin || len(src.paths) == 0 {
+		a.notify.Add(notify.LevelInfo, "stdin can't be re-read; restart aku to reload", ctx, "reload")
+		return a, nil
+	}
+
+	// Rebuild the static cluster from the original file paths.
+	rebuilt, warns, err := manifest.LoadFiles(src.paths, src.defaultNS)
+	if err != nil {
+		a.notify.Add(notify.LevelError, fmt.Sprintf("reload failed: %s", err), ctx, "reload")
+		return a, nil
+	}
+
+	// Re-register the rebuilt cluster as pinned under the same context name. The
+	// map entry is replaced; panes referencing "manifests" now resolve to the new
+	// store via clusterFor.
+	a.mgr.RegisterPinned(rebuilt)
+
+	// Surface any new warnings (guessed plurals, unreadable files, malformed docs).
+	for _, w := range warns {
+		a.notify.Add(notify.LevelWarning, w.Reason, ctx, "manifest")
+	}
+
+	// Repopulate every pane on the manifests context from the rebuilt store. Reset
+	// each to root first (drill-down state references objects from the old store),
+	// then reuse subscribeAndPopulate — for a client-less store Subscribe returns
+	// the cached objects, exactly mirroring a normal pane populate.
+	objCount := 0
+	if rebuilt.Store() != nil {
+		objCount = rebuilt.Store().CountInNamespace("")
+	}
+	var populateCmds []tea.Cmd
+	for i := range a.layout.SplitCount() {
+		split := a.layout.SplitAt(i)
+		if split == nil || split.Context() != ctx {
+			continue
+		}
+		split.ResetForReload()
+		if cmd := a.subscribeAndPopulate(split, split.Plugin(), split.EffectiveNamespace()); cmd != nil {
+			populateCmds = append(populateCmds, cmd)
+		}
+	}
+
+	a.notify.Add(notify.LevelInfo, fmt.Sprintf("reloaded %d objects from %s", objCount, ctx), ctx, "reload")
+
+	a.statusBar.SetHints(a.currentHints())
+	a = a.syncIndicators()
+	return a, tea.Batch(append(populateCmds, tea.ClearScreen)...)
+}
+
 func (a App) unsubscribeIfUnused(gvr schema.GroupVersionResource, namespace string) {
 	// Skip synthetic GVRs that have no real informer
 	if gvr.Group == "_ktui" {
@@ -2007,6 +2100,17 @@ func (a App) handleGroupContextSwitch(ctx string) (tea.Model, tea.Cmd) {
 	// which panes move and which old store to clean up. Falls back to the startup
 	// context when there is no focused pane. Capture it BEFORE mutating anything.
 	target := a.contextFor(a.layout.FocusedSplit())
+
+	// Pinned target (the static "manifests" pseudo-context): never dial. Retarget
+	// the whole focused-context group onto the pinned store and populate each pane
+	// directly, mirroring switchPaneToPinned/startup. Re-selecting a group already
+	// on the pinned context is a clean no-op.
+	if a.mgr.IsPinned(ctx) {
+		if ctx == target {
+			return a, nil
+		}
+		return a.switchGroupToPinned(target, ctx)
+	}
 
 	// No-op only when the whole group is already on this context AND its cluster
 	// is connected. A group left on a broken context by a failed connect must be
@@ -2178,6 +2282,20 @@ func (a App) handlePaneContextSwitch(ctxName string) (tea.Model, tea.Cmd) {
 
 	old := focused.Context()
 
+	// Pinned target (the static "manifests" pseudo-context): never dial. Its
+	// cluster is already registered with a client-less store and reports
+	// Connected()==false, so the normal "connected?" no-op guard and the async
+	// Dial path below are both wrong for it (Dial would call k8s.NewClient for a
+	// non-existent kubeconfig context and fail, leaving the pane offline/empty).
+	// Instead retarget the pane and populate directly from the static store,
+	// mirroring startup. Re-selecting an already-pinned pane is a clean no-op.
+	if a.mgr.IsPinned(ctxName) {
+		if old == ctxName {
+			return a, nil
+		}
+		return a.switchPaneToPinned(focused, ctxName)
+	}
+
 	// No-op only when already on this exact context AND its cluster is
 	// connected. A pane left on a broken context by a failed connect must be able
 	// to retry: re-selecting the same context re-attempts the dial rather than
@@ -2213,6 +2331,85 @@ func (a App) handlePaneContextSwitch(ctxName string) (tea.Model, tea.Cmd) {
 
 	a.notify.Add(notify.LevelInfo, fmt.Sprintf("connecting to %s…", ctxName), ctxName, "context")
 	return a, asyncConnectCmd(a.mgr, ctxName)
+}
+
+// switchPaneToPinned retargets a single pane onto a pinned (client-less) context
+// such as the static "manifests" cluster, populating it directly from that
+// cluster's store instead of dialing. The pinned cluster dual-keys every object
+// into the all-namespaces ("") bucket, so the pane opens on All Namespaces —
+// matching startup (app.go) and reloadManifest. No async connect is dispatched;
+// the data is already present in the store.
+func (a App) switchPaneToPinned(focused *ui.ResourceList, ctxName string) (tea.Model, tea.Cmd) {
+	// Stop any log stream / log mode bound to the old cluster's client.
+	a = a.stopLogStream()
+	a.layout.SetLogMode(false)
+	a.envResolved = false
+
+	focused.SetContext(ctxName)
+	focused.ResetNav()
+	focused.SetNamespace("")
+	focused.SetOffline(false)
+
+	// Reconcile refcounts against the panes' new contexts; tears down the cluster
+	// the pane just left if no other pane references it.
+	a.mgr.SyncRefs(a.paneContexts())
+
+	// Populate from the static store (returns nil cmd for a client-less store).
+	cmd := a.subscribeAndPopulate(focused, focused.Plugin(), focused.EffectiveNamespace())
+
+	a = a.setStatusBarContext(ctxName)
+	a.syncPaneFooters()
+	a.statusBar.SetHints(a.currentHints())
+	a = a.syncIndicators()
+	return a, cmd
+}
+
+// switchGroupToPinned retargets every pane in the focused pane's context group
+// (those on context==target) onto a pinned (client-less) context such as the
+// static "manifests" cluster, populating each directly from the pinned store
+// instead of dialing. Mirrors switchPaneToPinned but for the whole group.
+func (a App) switchGroupToPinned(target, ctxName string) (tea.Model, tea.Cmd) {
+	oldStore := a.storeForContext(target)
+
+	a = a.stopLogStream()
+	a.layout.SetLogMode(false)
+	a.envResolved = false
+
+	type prevSub struct {
+		gvr schema.GroupVersionResource
+		ns  string
+	}
+	var oldSubs []prevSub
+	var cmds []tea.Cmd
+	for i := range a.layout.SplitCount() {
+		split := a.layout.SplitAt(i)
+		if split == nil || split.Context() != target {
+			continue
+		}
+		oldSubs = append(oldSubs, prevSub{gvr: split.Plugin().GVR(), ns: split.EffectiveNamespace()})
+		split.SetContext(ctxName)
+		split.ResetNav()
+		split.SetNamespace("")
+		split.SetOffline(false)
+		if cmd := a.subscribeAndPopulate(split, split.Plugin(), split.EffectiveNamespace()); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	a.mgr.SyncRefs(a.paneContexts())
+
+	// Clean up informers on the OLD store that no retargeted pane needs anymore.
+	if oldStore != nil {
+		for _, sub := range oldSubs {
+			a.unsubscribeOnStoreIfUnused(oldStore, target, sub.gvr, sub.ns)
+		}
+	}
+
+	a = a.setStatusBarContext(ctxName)
+	a.syncPaneFooters()
+	a.statusBar.SetHints(a.currentHints())
+	a = a.syncIndicators()
+	return a, tea.Batch(cmds...)
 }
 
 // paneContexts returns the multiset of contexts currently referenced by some
@@ -2473,6 +2670,7 @@ func (a App) executeDelete(targets []*unstructured.Unstructured, force bool) (te
 	// K8s resources via dynamic client
 	client := a.clientForFocused()
 	if client == nil {
+		a.notify.Add(notify.LevelError, "delete: not available in manifest mode", a.contextFor(focused), "delete")
 		return a, nil
 	}
 	gvr := p.GVR()
@@ -2526,11 +2724,12 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 	if !ok {
 		return a, nil
 	}
-	debugClient := a.clientForFocused()
-	if debugClient == nil {
-		a.notify.Add(notify.LevelError, "debug: no k8s client", a.contextFor(focused), "debug")
+	debugCl := a.clusterFor(focused)
+	if debugCl == nil || !debugCl.Connected() {
+		a.notify.Add(notify.LevelError, "debug: not available in manifest mode", a.contextFor(focused), "debug")
 		return a, nil
 	}
+	debugClient := debugCl.Client()
 
 	image := "busybox:latest"
 	if a.config != nil {
@@ -2590,16 +2789,17 @@ func (a App) handleDebug(privileged bool) (tea.Model, tea.Cmd) {
 // privileged pod-debug and node-debug open embedded terminal panes (the same
 // async pre-flight + DebugReadyMsg flow as the direct, non-privileged path).
 func (a App) executePendingDebug(dbg *pendingDebugAction) (tea.Model, tea.Cmd) {
-	client := a.clientForFocused()
-	if client == nil {
-		// Mirror handleDebug's "debug: no k8s client" error: tag it with the
+	focused := a.layout.FocusedSplit()
+	cl := a.clusterFor(focused)
+	if cl == nil || !cl.Connected() {
+		// Mirror handleDebug's "debug: not available in manifest mode" error: tag it with the
 		// focused split's context. contextFor(focused) and contextFor(nil) both
 		// resolve to the focused split here, but read it explicitly so the two
 		// duplicate sites match.
-		focused := a.layout.FocusedSplit()
-		a.notify.Add(notify.LevelError, "debug: no k8s client", a.contextFor(focused), "debug")
+		a.notify.Add(notify.LevelError, "debug: not available in manifest mode", a.contextFor(focused), "debug")
 		return a, nil
 	}
+	client := cl.Client()
 	if dbg.nodeMode {
 		return a.openNodeDebugTerminal(client, dbg.nodeName, dbg.image, dbg.command)
 	}
@@ -2820,6 +3020,28 @@ func appendImageChanges(result []msgs.ContainerImageChange, obj *unstructured.Un
 		}
 	}
 	return result
+}
+
+// namespacesGVR is the core/v1 namespaces GVR. Namespaces are cluster-scoped, so
+// the store keys them under namespace "".
+var namespacesGVR = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+
+// storeNamespaceNames returns the sorted names of every Namespace object held in
+// the store. Used by the namespace picker for offline (e.g. manifest-mode)
+// clusters whose nil client cannot serve ListNamespaces.
+func storeNamespaceNames(store *k8s.Store) []string {
+	if store == nil {
+		return nil
+	}
+	objs := store.List(namespacesGVR, "")
+	names := make([]string, 0, len(objs))
+	for _, obj := range objs {
+		if name := obj.GetName(); name != "" {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 func (a App) handlePortForwardRequested(msg msgs.PortForwardRequestedMsg) (tea.Model, tea.Cmd) {

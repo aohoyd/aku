@@ -30,6 +30,9 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Vertical and horizontal layout orientation (toggle with `%` or `--layout` flag)
 - Zoom the focused pane to fullscreen with `alt+z` (resource list, terminal, or detail/log panel) — a single top bar, status bar hidden; `alt+z` again to exit
 
+**Manifest visualization**
+- Pipe rendered manifests into aku (`helm template ./chart | aku`, `kustomize build ./overlay | aku`) or open files/dirs with `-f` and browse them as a simulated cluster — controllers' runtime is fabricated (Deployment→ReplicaSet→Pods, StatefulSet/DaemonSet→Pods, Job/CronJob→Pods, Service→Endpoints) so drill-down, health, and resource lists all work, with `# Source:` provenance surfaced in the YAML view
+
 **Operations**
 - Edit resources in your `$EDITOR` with automatic retry on validation errors
 - Exec into containers as live, embeddable terminal panes (multiple concurrent, zoomable, run in the background)
@@ -102,6 +105,10 @@ aku -l horizontal                      # start in horizontal layout
 aku -r certificates.cert-manager.io/v1 # qualified resource (when names collide)
 aku --kubeconfig /path/to/kubeconfig   # custom kubeconfig path
 aku --version                          # show version
+
+helm template ./chart | aku            # browse rendered manifests as a fake cluster
+kustomize build ./overlay | aku        # same, via kustomize
+aku -f ./manifests/                    # read manifest files/dirs instead of a pipe
 ```
 
 | Flag | Short | Description |
@@ -110,6 +117,7 @@ aku --version                          # show version
 | `--context` | | Kubeconfig context to use |
 | `--namespace` | `-n` | Kubernetes namespace |
 | `--resource` | `-r` | Resources to display (repeatable) |
+| `--file` | `-f` | Manifest file or directory to visualize (repeatable; dirs scanned for `*.yaml`/`*.yml`) |
 | `--details` | `-d` | Open detail panel (`y`/yaml, `d`/describe, `l`/logs) |
 | `--layout` | `-l` | Layout orientation (`v`/vertical, `h`/horizontal) |
 | `--version` | `-v` | Show version |
@@ -196,7 +204,7 @@ To copy text while mouse support is enabled, hold Option (iTerm2, macOS Terminal
 
 Exec (`s s`) and debug (`s d` / `s p`) open live terminal panes that run concurrently in the background — split them alongside other resources, zoom to focus, and switch away while a shell stays alive. A focused live terminal owns most keystrokes, so navigation goes through the tmux-style prefix (`terminal.prefix`, default `ctrl+a`): press the prefix, then a nav key (`h/j/k/l` or arrows to move focus, `x`/`q`/`Ctrl+w` to close the pane). Zoom and focus movement are an exception: by default `alt+z` (zoom) and `shift+left/right/up/down` (move focus between panes) are *captured* — handled by aku rather than forwarded to the shell — so you can zoom or switch panes without leaving the terminal (see the `capture:` keymap field below). `alt+z` is a unified fullscreen zoom: the focused pane (resource list, terminal, or detail/log panel) fills the whole screen borderlessly with a single top bar and the status bar hidden; press `alt+z` again to exit. Only one pane is zoomed at a time, but while zoomed you can still move focus with `shift+arrows` — zoom follows the newly-focused split. A zoomed terminal's top bar shows an `alt+z: exit zoom` hint. To close a *live* pane use the prefix then `x`, `q`, or `Ctrl+w` — a *bare* `Ctrl+w` (no prefix) is forwarded to the shell, not intercepted. Once a pane has exited it behaves like any other split, so `Ctrl+w` closes it directly (no prefix). Press the prefix twice to send a literal prefix byte to the shell. When a shell exits, its pane keeps an `[exited — status N]` banner and scrollback until you close it. If the I/O stream fails mid-session (network drop, API-server error), the pane freezes with a `[exited — status 1] stream error: <detail>` banner instead of a clean status, so a broken connection is never mistaken for a normal exit. If a debug/exec pre-flight fails before the shell ever starts, the placeholder pane is removed (or, when it is the only pane, frozen as a closeable exited pane showing `debug failed: <reason>` that you dismiss like any other exited pane). Under sustained I/O saturation, keystrokes may be dropped rather than blocking — a deliberate tradeoff that keeps the UI responsive when the remote shell can't keep up. Node-debug pods are removed on pane close and on quit; ephemeral debug containers can't be deleted (a Kubernetes limitation) and the pane notes this on exit. `terminal.scrollback` sets how many off-screen lines each terminal retains for wheel/page scrolling. The shell launched by exec (`s s`) is overridable via `exec.command` (default `["sh", "-c", "clear; (bash || ash || sh)"]`, which clears the screen and prefers `bash`, falling back to `ash`/`sh`).
 
-`contexts.directories` lists extra directories aku scans recursively (in addition to the active `$KUBECONFIG`/`~/.kube/config`) for kubeconfig files. Every context across those files becomes switchable; files that aren't valid kubeconfigs or contain zero contexts are skipped. There is no "pinned" pane — every pane simply carries a context, and the focused pane is the source of truth (its context drives new-split defaults and the status bar). `gx` opens a fuzzy overlay picker that moves every pane sharing the focused pane's context to the chosen cluster (focused-context-group move), connecting asynchronously. `gX` opens an in-pane contexts list (a resource view) in the focused pane; Enter switches that pane's context. `oX` opens the contexts list in a new split, so you can bring up another cluster side-by-side. The contexts view has columns NAME, CLUSTER, SERVER, STATUS, and PANES, where STATUS is `●` connected, `○` offline/degraded, or `–` not yet dialed. The `gx` overlay annotates each row: contexts currently open get a `●` marker plus their pane count, and the focused pane's current context is highlighted. All context switches dial asynchronously off the Update goroutine, so the UI never freezes — even when a cluster is unreachable, the pane shows an `⚠ offline` marker instead of hanging. Pane context labels are shown only when more than one distinct context is open across panes; when every pane shares one context, labels are hidden. On switch, a pane lands on the chosen context's default namespace (the kubeconfig `namespace:` field, else `default`); if the pane's current resource type doesn't exist on the new cluster it shows an empty list and a short message in the status bar (there is no inline annotation in the list). That missing-resource check requires the cluster's API discovery to have been populated; until then the pane simply shows an empty list. Different panes can run live on different clusters at the same time, each with its own watches.
+`contexts.directories` lists extra directories aku scans recursively (in addition to the active `$KUBECONFIG`/`~/.kube/config`) for kubeconfig files. Every context across those files becomes switchable; files that aren't valid kubeconfigs or contain zero contexts are skipped. There is no "pinned" pane — every pane simply carries a context, and the focused pane is the source of truth (its context drives new-split defaults and the status bar). `gx` opens a fuzzy overlay picker that moves every pane sharing the focused pane's context to the chosen cluster (focused-context-group move), connecting asynchronously. `gX` opens an in-pane contexts list (a resource view) in the focused pane; Enter switches that pane's context. `oX` opens the contexts list in a new split, so you can bring up another cluster side-by-side. The contexts view has columns NAME, CLUSTER, SERVER, STATUS, and PANES, where STATUS is `●` in use (green when connected, red when offline/degraded), `○` idle (no panes), or `◆` a pinned pseudo-context (the static `manifests` cluster). The `gx` overlay annotates each row: contexts currently open get a `●` marker plus their pane count, and the focused pane's current context is highlighted. All context switches dial asynchronously off the Update goroutine, so the UI never freezes — even when a cluster is unreachable, the pane shows an `⚠ offline` marker instead of hanging. Pane context labels are shown only when more than one distinct context is open across panes; when every pane shares one context, labels are hidden. On switch, a pane lands on the chosen context's default namespace (the kubeconfig `namespace:` field, else `default`); if the pane's current resource type doesn't exist on the new cluster it shows an empty list and a short message in the status bar (there is no inline annotation in the list). That missing-resource check requires the cluster's API discovery to have been populated; until then the pane simply shows an empty list. Different panes can run live on different clusters at the same time, each with its own watches.
 
 aku surfaces its own info/warning/error messages as noice.nvim-style **toasts** that float in the top-right corner (newest on top), non-modally — they never steal focus from the pane you're working in. Each toast auto-hides after a per-level timeout: `timeout_info` (default `3`s), `timeout_warning` (default `5`s), and `timeout_error` (default `8`s), so errors linger longer than transient successes. A timeout of `0` (or omitted) falls back to the default; a *negative* value makes that level **sticky** — it never auto-hides until dismissed (e.g. `timeout_error: -1` keeps every error on screen until you clear it). At most `max_visible` toasts (default `5`) are shown at once; any beyond that collapse into a `+N more…` line. Press `ctrl+x` to clear all live toasts at once (the history is kept). Async operation results — scale, delete, restart, helm, context switch, port-forward, save-logs, and the like — now appear as toasts rather than in the status bar, so the status bar shows only key hints and the activity spinner. The full session-wide history lives in the **`aku-messages`** resource (open it with `g m`, or via the `:` picker / short name `msg`), browsable like Events with columns TIME / LEVEL / CONTEXT / SOURCE / MESSAGE, newest-first. The TIME column shows a *relative age* (e.g. `2m`, `1h`) — how long ago the message was recorded, just like the Events view's LAST SEEN column — not a wall-clock time. Press `Enter` on a row for a detail view that shows, in order, the full untruncated message body first, then its level, the exact timestamp, the origin context, and the source. `notifications.buffer_size` (default `1000`) caps that history ring buffer.
 
@@ -352,7 +360,7 @@ Directories are scanned recursively; files that aren't valid kubeconfigs (or con
 | `gX` | Opens the **contexts list** in the focused pane; `Enter` switches that pane |
 | `oX` | Opens the contexts list in a **new split** — bring up another cluster side-by-side |
 
-The contexts list is itself a resource view, with columns **NAME, CLUSTER, SERVER, STATUS, PANES**, where STATUS is `●` connected, `○` offline/degraded, or `–` not yet dialed. The `gx` overlay marks already-open contexts with `●` and their pane count, and highlights the focused pane's current context.
+The contexts list is itself a resource view, with columns **NAME, CLUSTER, SERVER, STATUS, PANES**, where STATUS is `●` in use (green when connected, red when offline/degraded), `○` idle (no panes), or `◆` a pinned pseudo-context (the static `manifests` cluster — see [Manifest visualization](#manifest-visualization)). The `gx` overlay marks already-open contexts with `●` and their pane count, and highlights the focused pane's current context.
 
 ### Behavior
 
@@ -365,6 +373,64 @@ The contexts list is itself a resource view, with columns **NAME, CLUSTER, SERVE
 1. `oX` opens the contexts list in a new split.
 2. Move focus there (`shift+→`) and press `Enter` on `staging` — that pane is now live on staging while your original pane stays on prod.
 3. From either pane, `gx` moves its whole context group to a different cluster.
+
+## Manifest visualization
+
+aku can read rendered Kubernetes manifests and present them as a **simulated, browsable cluster** — so you can inspect what a chart or overlay actually renders, interactively, before applying it, without a live cluster.
+
+### Invoking
+
+- **Pipe** a manifest stream — aku auto-detects it whenever stdin is not a TTY:
+
+  ```bash
+  helm template ./chart | aku
+  kustomize build ./overlay | aku
+  cat deploy.yaml | aku
+  ```
+
+- **`-f`** points at manifest files or directories (repeatable; directories are scanned for `*.yaml`/`*.yml`):
+
+  ```bash
+  aku -f ./manifests/
+  aku -f deploy.yaml -f service.yaml
+  ```
+
+The manifests open in a pinned pseudo-context named **`manifests`** that coexists with your live clusters — `gx`/`gX`/`oX` all work, so you can bring a real cluster into a split alongside the simulated one. The initial pane opens at "All Namespaces" so a chart rendering into a non-`default` namespace isn't empty.
+
+### What gets simulated
+
+aku doesn't just list the YAML — it **fabricates the runtime that controllers would create**, so drill-down, health coloring, and resource lists all behave like a live cluster:
+
+- **Deployment** → one ReplicaSet → N Pods (N = `spec.replicas`, default `1`; `0` ⇒ none)
+- **StatefulSet** → ordinal Pods (`<sts>-0..N-1`)
+- **DaemonSet** → one Pod
+- **Job** → one Pod; **CronJob** → one Job → one Pod
+- **Service** → an Endpoints object addressing the matching fabricated Pods
+
+Fabricated objects carry **deterministic UIDs** (a stable hash of kind+namespace+name) so owner-ref drill-down (Deployment → ReplicaSet → Pods) resolves and runs are reproducible. Synthesized Pods are stamped **healthy/green** — `Running`, all containers ready, with a synthetic pod IP and start time; user-supplied objects that already carry a status keep it.
+
+### Namespaces
+
+Namespaced objects with no `metadata.namespace` default to `default` (or the value of `-n`/`--namespace`). aku then **fabricates a `Namespace` object** (phase `Active`) for every namespace referenced across the manifests, so the namespaces view and the namespace picker are populated even with no live API server.
+
+### Provenance
+
+When a manifest carries a `# Source: <path>` comment (as Helm emits), aku captures it into the `aku.dev/manifest-source` annotation on the object. Fabricated objects are annotated `aku.dev/manifest-source: synthesized`. The annotation shows up in the **YAML view** (`y`) for every kind — there is no separate column or describe line. It's a read-only preview, so the annotation simply appearing inline in the YAML is harmless.
+
+### Blocked operations
+
+The `manifests` context has no real API server, so anything that needs one is blocked and emits a toast reading `<op>: not available in manifest mode` — covering edit, scale, set image, rollout restart, delete, exec, debug, logs, and port-forward. (Helm operations toast `helm: no client` instead.) Browsing, drill-down, YAML, and describe all work.
+
+### Reload
+
+`Ctrl+r` re-reads `-f` files and rebuilds the simulated cluster in place, so editing a chart and re-running `helm template` into the same files is reflected on reload. A **piped stdin source can't be re-read** — `Ctrl+r` is a no-op there and emits a toast saying so.
+
+### Limitations
+
+- There are no real Pods, so logs, exec, and debug have nothing to attach to (they toast).
+- Rendered manifests have **no real status** — synthesized health is fabricated, not observed; user objects that ship without a status are shown as-is.
+- Only `Endpoints` is synthesized for Services; the `EndpointSlice` view is not populated.
+- Unknown/CRD kinds get a **best-effort plural** for the resource name plus a warning (there's no live discovery to ask); they browse and show YAML, but nothing is synthesized for them.
 
 ## Key Bindings
 
@@ -427,7 +493,7 @@ The `c` chord copies or opens whatever the focused pane is showing. Copies attem
 |-----|--------|
 | `Tab` | Back to list |
 | `w` | Toggle word wrap |
-| `x` | Resolve env variables |
+| `x` | Resolve env variables (for pods also reveals volume-mounted Secrets/ConfigMaps, projected sources, and imagePullSecrets — docker-config: registry+username only, never the password/token; non-docker-config pull secrets fall back to listing data keys with no values) |
 | `r` | Refresh |
 | `y` | Return to manifest YAML (resets `Values (user)`/`Values (all)` variant on helm releases) |
 
@@ -459,7 +525,7 @@ Saved logs go to `$XDG_STATE_HOME/aku/logs/<cluster>/<ns>-<pod>-<container>-<YYY
 | `C` | Helm releases | Set chart |
 | `v` | Helm releases | View user values |
 | `V` | Helm releases | View all (coalesced) values |
-| `x` | Pods, Secrets, Containers, Deployments, StatefulSets, DaemonSets | Resolve/show env variables (list and detail) |
+| `x` | Pods, Secrets, Containers, Deployments, StatefulSets, DaemonSets | Resolve/show env variables (list and detail); for pods also reveals volume-mounted Secrets/ConfigMaps, projected sources, and imagePullSecrets (docker-config: registry+username only, never the password/token; non-docker-config pull secrets fall back to listing data keys with no values) |
 | `f` | Pods, Containers | Port forward |
 | `ss` | Pods, Containers | Exec (live terminal pane) |
 | `sd` | Pods, Containers, Nodes | Debug container (live terminal pane) |

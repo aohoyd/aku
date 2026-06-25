@@ -1,6 +1,7 @@
 package pods
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -503,6 +504,444 @@ func TestPluginDescribeUncovered(t *testing.T) {
 	}
 }
 
+func TestPluginDescribeUncoveredVolumes(t *testing.T) {
+	cmGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+	secGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+
+	tests := []struct {
+		name        string
+		volume      map[string]any
+		wantPresent []string
+		wantAbsent  []string
+	}{
+		{
+			name: "secret volume reveals decoded data",
+			volume: map[string]any{
+				"name":   "creds",
+				"secret": map[string]any{"secretName": "db"},
+			},
+			wantPresent: []string{"creds:", "SecretName", "db", "password", "s3cret"},
+			// guard against the undecoded base64 leaking alongside the decoded value
+			wantAbsent: []string{"czNjcmV0"},
+		},
+		{
+			name: "secret volume with items subset honors path",
+			volume: map[string]any{
+				"name": "creds",
+				"secret": map[string]any{
+					"secretName": "db",
+					"items": []any{
+						map[string]any{"key": "password", "path": "pw"},
+					},
+				},
+			},
+			wantPresent: []string{"creds:", "pw", "s3cret"},
+			wantAbsent:  []string{"username"},
+		},
+		{
+			name: "configMap volume reveals data",
+			volume: map[string]any{
+				"name":      "cfg",
+				"configMap": map[string]any{"name": "app"},
+			},
+			wantPresent: []string{"cfg:", "Name", "app", "mode", "prod"},
+		},
+		{
+			name: "configMap volume with items subset",
+			volume: map[string]any{
+				"name": "cfg",
+				"configMap": map[string]any{
+					"name":  "app",
+					"items": []any{map[string]any{"key": "mode", "path": "MODE"}},
+				},
+			},
+			wantPresent: []string{"cfg:", "MODE", "prod"},
+			wantAbsent:  []string{"other"},
+		},
+		{
+			name: "secret volume with item missing path falls back to key",
+			volume: map[string]any{
+				"name": "creds",
+				"secret": map[string]any{
+					"secretName": "db",
+					"items":      []any{map[string]any{"key": "password"}},
+				},
+			},
+			wantPresent: []string{"creds:", "password", "s3cret"},
+			wantAbsent:  []string{"username"},
+		},
+		{
+			name: "secret volume referencing absent secret renders name only",
+			volume: map[string]any{
+				"name":   "creds",
+				"secret": map[string]any{"secretName": "nonexistent"},
+			},
+			wantPresent: []string{"creds:", "SecretName", "nonexistent"},
+			// no data revealed for a secret not in the store
+			wantAbsent: []string{"s3cret", "password"},
+		},
+		{
+			name: "configMap volume referencing absent configmap renders name only",
+			volume: map[string]any{
+				"name":      "cfg",
+				"configMap": map[string]any{"name": "nonexistent"},
+			},
+			wantPresent: []string{"cfg:", "Name", "nonexistent"},
+			wantAbsent:  []string{"prod", "mode"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := k8s.NewStore(nil, "", nil)
+			store.CacheUpsert(cmGVR, "default", &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{"name": "app", "namespace": "default"},
+					"data":     map[string]any{"mode": "prod", "other": "x"},
+				},
+			})
+			store.CacheUpsert(secGVR, "default", &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{"name": "db", "namespace": "default"},
+					"data":     map[string]any{"password": "czNjcmV0", "username": "YWRtaW4="},
+				},
+			})
+
+			p := New()
+			obj := &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{
+						"name":              "test-pod",
+						"namespace":         "default",
+						"creationTimestamp": "2026-02-24T10:00:00Z",
+					},
+					"spec": map[string]any{
+						"containers": []any{
+							map[string]any{"name": "app", "image": "nginx"},
+						},
+						"volumes": []any{tt.volume},
+					},
+					"status": map[string]any{"phase": "Running"},
+				},
+			}
+
+			unc := p.(plugin.Uncoverable)
+			c, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(store), obj)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if stripped := ansi.Strip(c.Display); stripped != c.Raw {
+				t.Errorf("strip invariant violated:\nstripped: %q\nraw: %q", stripped, c.Raw)
+			}
+			for _, want := range tt.wantPresent {
+				if !strings.Contains(c.Raw, want) {
+					t.Errorf("uncovered output should contain %q\n\nFull output:\n%s", want, c.Raw)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(c.Raw, absent) {
+					t.Errorf("uncovered output should NOT contain %q\n\nFull output:\n%s", absent, c.Raw)
+				}
+			}
+		})
+	}
+}
+
+func TestPluginDescribeUncoveredProjectedVolume(t *testing.T) {
+	cmGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
+	secGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+
+	store := k8s.NewStore(nil, "", nil)
+	store.CacheUpsert(cmGVR, "default", &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{"name": "ca", "namespace": "default"},
+			"data":     map[string]any{"ca.crt": "ROOT"},
+		},
+	})
+	store.CacheUpsert(secGVR, "default", &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{"name": "tls", "namespace": "default"},
+			// base64("CERT") == "Q0VSVA=="
+			"data": map[string]any{"tls.crt": "Q0VSVA=="},
+		},
+	})
+
+	projectedVolume := map[string]any{
+		"name": "kube-api-access",
+		"projected": map[string]any{
+			"sources": []any{
+				map[string]any{
+					"secret": map[string]any{"name": "tls"},
+				},
+				map[string]any{
+					"configMap": map[string]any{"name": "ca"},
+				},
+				map[string]any{
+					"serviceAccountToken": map[string]any{
+						"path":              "token",
+						"expirationSeconds": int64(3607),
+					},
+				},
+			},
+		},
+	}
+
+	p := New()
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{
+				"name":              "test-pod",
+				"namespace":         "default",
+				"creationTimestamp": "2026-02-24T10:00:00Z",
+			},
+			"spec": map[string]any{
+				"containers": []any{
+					map[string]any{"name": "app", "image": "nginx"},
+				},
+				"volumes": []any{projectedVolume},
+			},
+			"status": map[string]any{"phase": "Running"},
+		},
+	}
+
+	// Plain Describe must not leak any resolved values.
+	plain, err := p.Describe(t.Context(), obj)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, absent := range []string{"CERT", "ROOT"} {
+		if strings.Contains(plain.Raw, absent) {
+			t.Errorf("plain describe must NOT contain projected value %q\n%s", absent, plain.Raw)
+		}
+	}
+
+	unc := p.(plugin.Uncoverable)
+	c, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(store), obj)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stripped := ansi.Strip(c.Display); stripped != c.Raw {
+		t.Errorf("strip invariant violated:\nstripped: %q\nraw: %q", stripped, c.Raw)
+	}
+
+	wantPresent := []string{
+		// secret source resolved + decoded
+		"tls.crt", "CERT",
+		// configMap source resolved
+		"ca.crt", "ROOT",
+		// serviceAccountToken source labeled, not resolved
+		"ServiceAccountToken",
+	}
+	for _, want := range wantPresent {
+		if !strings.Contains(c.Raw, want) {
+			t.Errorf("uncovered projected output should contain %q\n\nFull output:\n%s", want, c.Raw)
+		}
+	}
+}
+
+func TestPluginDescribePlainVolumeNoValueLeak(t *testing.T) {
+	p := New()
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{
+				"name":              "test-pod",
+				"namespace":         "default",
+				"creationTimestamp": "2026-02-24T10:00:00Z",
+			},
+			"spec": map[string]any{
+				"containers": []any{
+					map[string]any{"name": "app", "image": "nginx"},
+				},
+				"volumes": []any{
+					map[string]any{"name": "creds", "secret": map[string]any{"secretName": "db"}},
+					map[string]any{"name": "cfg", "configMap": map[string]any{"name": "app"}},
+				},
+			},
+			"status": map[string]any{"phase": "Running"},
+		},
+	}
+
+	c, err := p.Describe(t.Context(), obj)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// names present
+	for _, want := range []string{"creds:", "SecretName", "db", "cfg:", "Name", "app"} {
+		if !strings.Contains(c.Raw, want) {
+			t.Errorf("plain describe should contain %q\n%s", want, c.Raw)
+		}
+	}
+	// no data values leaked
+	for _, absent := range []string{"s3cret", "prod"} {
+		if strings.Contains(c.Raw, absent) {
+			t.Errorf("plain describe must NOT contain value %q\n%s", absent, c.Raw)
+		}
+	}
+}
+
+func TestPluginDescribeUncoveredImagePullSecrets(t *testing.T) {
+	secGVR := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+
+	// dockerconfigjson with registry/username plus password+auth token that must
+	// never surface. password "S3cretPass" and auth "QXV0aFRva2Vu" are chosen so
+	// they cannot coincidentally appear elsewhere in the output.
+	dockerJSON := `{"auths":{"reg.example.com":{"username":"alice","password":"S3cretPass","email":"a@x.io","auth":"QXV0aFRva2Vu"}}}`
+	// legacy .dockercfg shape: no "auths" wrapper.
+	legacyJSON := `{"legacy.example.com":{"username":"bob","password":"L3gacyPass","auth":"TGVnYXV0aA=="}}`
+	// auth-only config: no explicit username; credentials live in the base64
+	// "auth" field as "alice:topsecret". The username must be recovered from it
+	// while the password "topsecret" and the raw auth string never surface.
+	authBlob := base64.StdEncoding.EncodeToString([]byte("alice:topsecret")) // YWxpY2U6dG9wc2VjcmV0
+	authOnlyJSON := `{"auth.example.com":{"auth":"` + authBlob + `"}}`
+
+	tests := []struct {
+		name        string
+		secret      *unstructured.Unstructured
+		wantPresent []string
+		wantAbsent  []string
+	}{
+		{
+			name: "dockerconfigjson reveals registry and username only",
+			secret: &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{"name": "regcred", "namespace": "default"},
+					"type":     "kubernetes.io/dockerconfigjson",
+					"data": map[string]any{
+						".dockerconfigjson": base64.StdEncoding.EncodeToString([]byte(dockerJSON)),
+					},
+				},
+			},
+			wantPresent: []string{"Image Pull Secrets", "regcred", "reg.example.com", "alice"},
+			wantAbsent:  []string{"S3cretPass", "QXV0aFRva2Vu", "AuthToken", "a@x.io"},
+		},
+		{
+			name: "legacy dockercfg reveals registry and username only",
+			secret: &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{"name": "regcred", "namespace": "default"},
+					"type":     "kubernetes.io/dockercfg",
+					"data": map[string]any{
+						".dockercfg": base64.StdEncoding.EncodeToString([]byte(legacyJSON)),
+					},
+				},
+			},
+			wantPresent: []string{"Image Pull Secrets", "regcred", "legacy.example.com", "bob"},
+			wantAbsent:  []string{"L3gacyPass", "TGVnYXV0aA==", "Legauth"},
+		},
+		{
+			name: "auth-only dockerconfigjson recovers username from auth field",
+			secret: &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{"name": "regcred", "namespace": "default"},
+					"type":     "kubernetes.io/dockerconfigjson",
+					"data": map[string]any{
+						".dockerconfigjson": base64.StdEncoding.EncodeToString([]byte(authOnlyJSON)),
+					},
+				},
+			},
+			wantPresent: []string{"Image Pull Secrets", "regcred", "auth.example.com", "alice"},
+			// password and the raw base64 auth string must never surface.
+			wantAbsent: []string{"topsecret", authBlob},
+		},
+		{
+			name: "non-docker secret falls back to listing data keys",
+			secret: &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{"name": "regcred", "namespace": "default"},
+					"data": map[string]any{
+						"foo": base64.StdEncoding.EncodeToString([]byte("barvalue")),
+					},
+				},
+			},
+			wantPresent: []string{"Image Pull Secrets", "regcred", "foo"},
+			// fallback lists keys only, never decoded values.
+			wantAbsent: []string{"barvalue"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := k8s.NewStore(nil, "", nil)
+			store.CacheUpsert(secGVR, "default", tt.secret)
+
+			p := New()
+			obj := &unstructured.Unstructured{
+				Object: map[string]any{
+					"metadata": map[string]any{
+						"name":              "test-pod",
+						"namespace":         "default",
+						"creationTimestamp": "2026-02-24T10:00:00Z",
+					},
+					"spec": map[string]any{
+						"containers": []any{
+							map[string]any{"name": "app", "image": "nginx"},
+						},
+						"imagePullSecrets": []any{
+							map[string]any{"name": "regcred"},
+						},
+					},
+					"status": map[string]any{"phase": "Running"},
+				},
+			}
+
+			unc := p.(plugin.Uncoverable)
+			c, err := unc.DescribeUncovered(t.Context(), plugintest.NewFakeCluster(store), obj)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if stripped := ansi.Strip(c.Display); stripped != c.Raw {
+				t.Errorf("strip invariant violated:\nstripped: %q\nraw: %q", stripped, c.Raw)
+			}
+			for _, want := range tt.wantPresent {
+				if !strings.Contains(c.Raw, want) {
+					t.Errorf("uncovered output should contain %q\n\nFull output:\n%s", want, c.Raw)
+				}
+			}
+			for _, absent := range tt.wantAbsent {
+				if strings.Contains(c.Raw, absent) {
+					t.Errorf("uncovered output must NOT contain secret material %q\n\nFull output:\n%s", absent, c.Raw)
+				}
+			}
+		})
+	}
+}
+
+func TestPluginDescribePlainImagePullSecretsNamesOnly(t *testing.T) {
+	p := New()
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"metadata": map[string]any{
+				"name":              "test-pod",
+				"namespace":         "default",
+				"creationTimestamp": "2026-02-24T10:00:00Z",
+			},
+			"spec": map[string]any{
+				"containers": []any{
+					map[string]any{"name": "app", "image": "nginx"},
+				},
+				"imagePullSecrets": []any{
+					map[string]any{"name": "regcred"},
+					map[string]any{"name": "other-cred"},
+				},
+			},
+			"status": map[string]any{"phase": "Running"},
+		},
+	}
+
+	c, err := p.Describe(t.Context(), obj)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stripped := ansi.Strip(c.Display); stripped != c.Raw {
+		t.Errorf("strip invariant violated:\nstripped: %q\nraw: %q", stripped, c.Raw)
+	}
+	for _, want := range []string{"Image Pull Secrets", "regcred", "other-cred"} {
+		if !strings.Contains(c.Raw, want) {
+			t.Errorf("plain describe should contain %q\n%s", want, c.Raw)
+		}
+	}
+}
+
 func TestPluginImplementsDrillDowner(t *testing.T) {
 	p := New()
 	_, ok := p.(plugin.DrillDowner)
@@ -751,5 +1190,76 @@ func TestComputePodStatus(t *testing.T) {
 				t.Fatalf("computePodStatus() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseDockerConfig(t *testing.T) {
+	// base64("alice:topsecret") == "YWxpY2U6dG9wc2VjcmV0"
+	authOnly := `{"auths":{"reg.io":{"auth":"YWxpY2U6dG9wc2VjcmV0"}}}`
+
+	tests := []struct {
+		name string
+		raw  string
+		want []serverUser
+	}{
+		{
+			name: "invalid json returns nil",
+			raw:  `{not json`,
+			want: nil,
+		},
+		{
+			name: "empty auths object yields no entries (no bogus 'auths' server)",
+			raw:  `{"auths":{}}`,
+			want: []serverUser{},
+		},
+		{
+			name: "dockerconfigjson username",
+			raw:  `{"auths":{"reg.io":{"username":"bob","password":"x"}}}`,
+			want: []serverUser{{server: "reg.io", username: "bob"}},
+		},
+		{
+			name: "auth-only config derives username from auth, never password",
+			raw:  authOnly,
+			want: []serverUser{{server: "reg.io", username: "alice"}},
+		},
+		{
+			name: "legacy flat dockercfg",
+			raw:  `{"legacy.io":{"username":"carol","password":"x"}}`,
+			want: []serverUser{{server: "legacy.io", username: "carol"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseDockerConfig(tt.raw)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d entries %v, want %d %v", len(got), got, len(tt.want), tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("entry %d: got %+v, want %+v", i, got[i], tt.want[i])
+				}
+				if strings.Contains(got[i].username, "topsecret") || strings.Contains(got[i].username, ":") {
+					t.Errorf("username must never contain the password: %q", got[i].username)
+				}
+			}
+		})
+	}
+}
+
+func TestUsernameFromAuth(t *testing.T) {
+	cases := []struct {
+		auth string
+		want string
+	}{
+		{base64.StdEncoding.EncodeToString([]byte("user:pass")), "user"},
+		{base64.StdEncoding.EncodeToString([]byte("noColon")), ""}, // no separator
+		{"!!!notbase64!!!", ""}, // decode failure
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := usernameFromAuth(tc.auth); got != tc.want {
+			t.Errorf("usernameFromAuth(%q) = %q, want %q", tc.auth, got, tc.want)
+		}
 	}
 }

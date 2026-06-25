@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -71,9 +72,12 @@ import (
 	"github.com/aohoyd/aku/internal/theme"
 	"github.com/aohoyd/aku/pkg/build"
 
+	"github.com/aohoyd/aku/internal/manifest"
+
 	tea "charm.land/bubbletea/v2"
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 )
@@ -85,6 +89,7 @@ var (
 	resources  []string
 	details    string
 	layoutFlag string
+	filePaths  []string
 )
 
 var rootCmd = &cobra.Command{
@@ -106,6 +111,7 @@ func init() {
 	rootCmd.PersistentFlags().StringSliceVarP(&resources, "resource", "r", nil, "resources to display (e.g. pods,deploy or -r svc -r deploy)")
 	rootCmd.PersistentFlags().StringVarP(&details, "details", "d", "", "open detail panel on startup (y/yaml, d/describe, l/logs)")
 	rootCmd.PersistentFlags().StringVarP(&layoutFlag, "layout", "l", "", "layout orientation (v/vertical, h/horizontal)")
+	rootCmd.PersistentFlags().StringSliceVarP(&filePaths, "file", "f", nil, "manifest file/dir paths to visualize as a static cluster (repeatable)")
 
 	// Register flag completion functions
 	rootCmd.RegisterFlagCompletionFunc("context", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -323,6 +329,27 @@ func parseLayoutOrientation(s string) (layout.Orientation, error) {
 	}
 }
 
+// manifestMode reports whether aku should boot into static-manifest mode rather
+// than connecting to the live default context. It is a pure function (stdin's
+// TTY-ness is passed in) so it can be unit-tested without a terminal: manifest
+// mode is on when explicit --file paths were given, OR when stdin is not a TTY
+// (i.e. manifests are being piped in). When no files are given and stdin IS a
+// TTY, aku behaves exactly as before.
+func manifestMode(filePaths []string, stdinIsTTY bool) bool {
+	return len(filePaths) > 0 || !stdinIsTTY
+}
+
+// buildManifestCluster builds the static manifest cluster from the given file
+// paths (LoadFiles) or, when no paths are given, from stdin (Load). defaultNS is
+// the namespace stamped onto objects that declare none. It returns the cluster,
+// any non-fatal warnings, and a fatal error.
+func buildManifestCluster(filePaths []string, defaultNS string, stdin io.Reader) (*cluster.Cluster, []manifest.Warning, error) {
+	if len(filePaths) > 0 {
+		return manifest.LoadFiles(filePaths, defaultNS)
+	}
+	return manifest.Load(stdin, defaultNS)
+}
+
 // warnThemeInit writes a non-fatal theme initialization warning to w. It is a
 // no-op when warning is nil. It is a small wrapper (rather than an inline
 // fmt.Fprintf like the k8s-connect warning below) so the formatting can be
@@ -348,6 +375,25 @@ func run(cmd *cobra.Command, args []string) error {
 	// Surface any non-fatal theme resolution warning (missing named theme or
 	// unparseable theme file) before the TUI takes over the screen.
 	warnThemeInit(os.Stderr, theme.InitWarning())
+
+	// Detect static-manifest mode (explicit --file paths, or piped stdin). The
+	// cluster is built up front so a fatal parse error aborts before the TUI
+	// takes over the screen; non-fatal warnings are surfaced as toasts after the
+	// program is wired (see below).
+	stdinIsTTY := term.IsTerminal(int(os.Stdin.Fd()))
+	useManifest := manifestMode(filePaths, stdinIsTTY)
+	// defaultNS is the namespace stamped onto namespaced manifest objects that lack
+	// one. Computed once so the build path (buildManifestCluster) and the reload
+	// source recorded later (SetManifestSource) can never drift.
+	manifestDefaultNS := cmp.Or(namespace, "default")
+	var manifestCluster *cluster.Cluster
+	var manifestWarnings []manifest.Warning
+	if useManifest {
+		manifestCluster, manifestWarnings, err = buildManifestCluster(filePaths, manifestDefaultNS, os.Stdin)
+		if err != nil {
+			return fmt.Errorf("error loading manifests: %w", err)
+		}
+	}
 
 	// Resolve kubeconfig path: flag > env > default
 	kubeconfigPath := kubeconfig
@@ -391,6 +437,16 @@ func run(cmd *cobra.Command, args []string) error {
 		} else {
 			startupContext = cluster.CurrentContextName(kubeconfigPath)
 		}
+	}
+
+	// In manifest mode, register the static cluster as a pinned pseudo-context so
+	// it survives SyncRefs and shows up in the contexts view, then make it the
+	// initial pane's context. Live contexts stay scanned/available — the user can
+	// still switch to a real cluster — but boot lands on "manifests" (All
+	// Namespaces, set in app.New for pinned startup clusters).
+	if useManifest {
+		mgr.RegisterPinned(manifestCluster)
+		startupContext = manifest.ContextName
 	}
 
 	// Pull the startup cluster's client for plugin registration. Built-in plugins
@@ -512,8 +568,26 @@ func run(cmd *cobra.Command, args []string) error {
 	// chartResolver lets the app build per-cluster helm clients lazily.
 	application := app.New(mgr, km, cfg, notifyStore, pfRegistry, chartResolver, specs, detailMode, orientation, startupContext)
 
-	// Create program
-	p := tea.NewProgram(application)
+	// Record the manifest source so Ctrl+r can rebuild the pinned "manifests"
+	// pseudo-context. Files mode re-reads the original --file paths; stdin mode is a
+	// no-op (the stream was consumed at startup and cannot be re-read). defaultNS
+	// must match the namespace used to build the cluster above.
+	if useManifest {
+		application.SetManifestSource(filePaths, manifestDefaultNS, len(filePaths) == 0)
+	}
+
+	// Create program. When manifests were piped in via stdin (no --file paths),
+	// stdin has been consumed for the manifest stream and is not a usable input
+	// for the TUI, so point Bubble Tea at the controlling terminal (/dev/tty) for
+	// keyboard input. If /dev/tty can't be opened we fall back to the default
+	// (stdin) — the TUI simply won't get key input, which is the best we can do.
+	var progOpts []tea.ProgramOption
+	if useManifest && len(filePaths) == 0 && !stdinIsTTY {
+		if tty, ttyErr := os.Open("/dev/tty"); ttyErr == nil {
+			progOpts = append(progOpts, tea.WithInput(tty))
+		}
+	}
+	p := tea.NewProgram(application, progOpts...)
 
 	// Wire the send function through the Manager. SetSend propagates to every
 	// already-created cluster's store + warning handler (the startup cluster was
@@ -523,6 +597,13 @@ func run(cmd *cobra.Command, args []string) error {
 	// Wire the notify store's send so that Add emits MessageAddedMsg into the
 	// Bubble Tea loop (driving the toast overlay). Must run before p.Run.
 	notifyStore.SetSend(p.Send)
+
+	// Surface any non-fatal manifest-load warnings as toasts now that the send is
+	// wired. Best-effort: these are informational (guessed plurals, unreadable
+	// files, malformed documents) and never block startup.
+	for _, w := range manifestWarnings {
+		notifyStore.Add(notify.LevelWarning, w.Reason, manifest.ContextName, "manifest")
+	}
 
 	teardown := func() {
 		mgr.ForEach(func(c *cluster.Cluster) {

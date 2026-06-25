@@ -10,8 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// indexByName builds a name-keyed lookup from a slice of unstructured objects.
-func indexByName(objs []*unstructured.Unstructured) map[string]*unstructured.Unstructured {
+// IndexByName builds a name-keyed lookup from a slice of unstructured objects.
+func IndexByName(objs []*unstructured.Unstructured) map[string]*unstructured.Unstructured {
 	m := make(map[string]*unstructured.Unstructured, len(objs))
 	for _, o := range objs {
 		m[o.GetName()] = o
@@ -19,10 +19,52 @@ func indexByName(objs []*unstructured.Unstructured) map[string]*unstructured.Uns
 	return m
 }
 
-// getData extracts the string data map from an unstructured ConfigMap or Secret.
-func getData(obj *unstructured.Unstructured) map[string]string {
+// ConfigMapData returns the data map from an unstructured ConfigMap. Plain
+// `.data` values are returned as-is; `.binaryData` values are base64-decoded
+// (with raw fallback on decode error). When a key appears in both, `.data`
+// wins. Returns nil when neither field has any entries.
+func ConfigMapData(obj *unstructured.Unstructured) map[string]string {
+	return mergeData(obj, false)
+}
+
+// SecretData returns the data map from an unstructured Secret. Both `.data` and
+// `.binaryData` values are base64-decoded (with raw fallback on decode error).
+// When a key appears in both, `.data` wins. Returns nil when neither field has
+// any entries.
+func SecretData(obj *unstructured.Unstructured) map[string]string {
+	return mergeData(obj, true)
+}
+
+// mergeData reads `.data` and `.binaryData` from an unstructured ConfigMap or
+// Secret into a single map. `.binaryData` values are always base64-decoded;
+// `.data` values are decoded only when decodeData is true (Secrets). Decode
+// errors fall back to the raw value. `.data` keys take precedence over
+// `.binaryData` keys. Returns nil when there are no entries.
+func mergeData(obj *unstructured.Unstructured, decodeData bool) map[string]string {
 	data, _, _ := unstructured.NestedStringMap(obj.Object, "data")
-	return data
+	binary, _, _ := unstructured.NestedStringMap(obj.Object, "binaryData")
+	if len(data) == 0 && len(binary) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(data)+len(binary))
+	for k, v := range binary {
+		out[k] = decodeBase64(v)
+	}
+	for k, v := range data {
+		if decodeData {
+			v = decodeBase64(v)
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// decodeBase64 returns the base64-decoded value, or the raw value on error.
+func decodeBase64(v string) string {
+	if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+		return string(decoded)
+	}
+	return v
 }
 
 // resolveEnv resolves a single EnvVar's valueFrom to its actual value.
@@ -52,19 +94,15 @@ func resolveEnv(
 	case e.ValueFrom.ConfigMapKeyRef != nil:
 		ref := e.ValueFrom.ConfigMapKeyRef
 		if obj, ok := cms[ref.Name]; ok {
-			if data := getData(obj); data != nil {
+			if data := ConfigMapData(obj); data != nil {
 				return data[ref.Key]
 			}
 		}
 	case e.ValueFrom.SecretKeyRef != nil:
 		ref := e.ValueFrom.SecretKeyRef
 		if obj, ok := secrets[ref.Name]; ok {
-			if data := getData(obj); data != nil {
-				v := data[ref.Key]
-				if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
-					return string(decoded)
-				}
-				return v
+			if data := SecretData(obj); data != nil {
+				return data[ref.Key]
 			}
 		}
 	}
@@ -78,16 +116,14 @@ func resolveEnvFrom(
 	cms, secrets map[string]*unstructured.Unstructured,
 ) map[string]string {
 	var data map[string]string
-	var isSecret bool
 	switch {
 	case ef.ConfigMapRef != nil:
 		if obj, ok := cms[ef.ConfigMapRef.Name]; ok {
-			data = getData(obj)
+			data = ConfigMapData(obj)
 		}
 	case ef.SecretRef != nil:
-		isSecret = true
 		if obj, ok := secrets[ef.SecretRef.Name]; ok {
-			data = getData(obj)
+			data = SecretData(obj)
 		}
 	}
 	if data == nil {
@@ -95,11 +131,6 @@ func resolveEnvFrom(
 	}
 	result := make(map[string]string, len(data))
 	for k, v := range data {
-		if isSecret {
-			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
-				v = string(decoded)
-			}
-		}
 		result[ef.Prefix+k] = v
 	}
 	return result

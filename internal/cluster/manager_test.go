@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/aohoyd/aku/internal/k8s"
@@ -420,6 +421,95 @@ func TestForEachVisitsAllClusters(t *testing.T) {
 		if !seen[ctx] {
 			t.Errorf("ForEach did not visit %q", ctx)
 		}
+	}
+}
+
+// TestRegisterPinnedSurvivesSyncRefs proves the manifest pseudo-context
+// lifecycle: a pinned cluster appears in Entries(), is never torn down by
+// SyncRefs even at zero pane refs (and its store is never UnsubscribeAll'd), and
+// is returned verbatim (same pointer, pre-populated store intact) on re-select.
+func TestRegisterPinnedSurvivesSyncRefs(t *testing.T) {
+	m, _ := newTestManager(t, nil)
+
+	gvr := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	store := k8s.NewStore(nil, "manifests", nil)
+	obj := &unstructured.Unstructured{}
+	obj.SetName("manifest-pod")
+	obj.SetNamespace("default")
+	store.CacheUpsert(gvr, "default", obj)
+
+	pinned := New("manifests", "", nil, store, k8s.NewDiscovery(), nil)
+	m.RegisterPinned(pinned)
+
+	// Appears in Entries() so the gx/oX/contexts views can list it.
+	found := false
+	for _, e := range m.Entries() {
+		if e.Name == "manifests" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Entries() does not contain pinned context %q: %+v", "manifests", m.Entries())
+	}
+
+	// SyncRefs with a pane set that does NOT include "manifests" (zero refs).
+	m.SyncRefs([]string{"other"})
+
+	got, ok := m.Get("manifests")
+	if !ok {
+		t.Fatal("pinned cluster torn down by SyncRefs with zero pane refs")
+	}
+	if got != pinned {
+		t.Error("Get(manifests) returned a different pointer than the pinned cluster")
+	}
+
+	// The store must NOT have been cleared (UnsubscribeAll skipped); the
+	// pre-populated object still lists.
+	items := got.Store().List(gvr, "default")
+	if len(items) != 1 || items[0].GetName() != "manifest-pod" {
+		t.Errorf("pinned store was cleared by SyncRefs: List = %+v", items)
+	}
+
+	// A second SyncRefs cycle (still zero refs) keeps it returnable, same pointer.
+	m.SyncRefs(nil)
+	got2, ok2 := m.Get("manifests")
+	if !ok2 || got2 != pinned {
+		t.Error("Get(manifests) after second SyncRefs did not return the same pinned cluster")
+	}
+}
+
+// TestRegisterPinnedDoesNotDuplicateEntry proves RegisterPinned does not add a
+// duplicate Entries() row when the context is already present in the entries.
+func TestRegisterPinnedDoesNotDuplicateEntry(t *testing.T) {
+	m := NewManager([]ContextEntry{{Name: "manifests"}}, "", time.Second)
+	m.RegisterPinned(New("manifests", "", nil, k8s.NewStore(nil, "manifests", nil), k8s.NewDiscovery(), nil))
+
+	n := 0
+	for _, e := range m.Entries() {
+		if e.Name == "manifests" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("Entries() has %d 'manifests' rows, want 1 (no duplicate)", n)
+	}
+}
+
+// TestSyncRefsStillTearsDownNonPinned is a regression guard: pinning must not
+// exempt ordinary zero-ref clusters from teardown.
+func TestSyncRefsStillTearsDownNonPinned(t *testing.T) {
+	m, _ := newTestManager(t, nil)
+	m.RegisterPinned(New("manifests", "", nil, k8s.NewStore(nil, "manifests", nil), k8s.NewDiscovery(), nil))
+
+	// A normal connected cluster with zero referencing panes must still go away.
+	if _, _ = m.RegisterConnected("normal", &k8s.Client{Context: "normal"}); false {
+	}
+	m.SyncRefs([]string{"other"})
+	if _, ok := m.Get("normal"); ok {
+		t.Error("non-pinned zero-ref cluster survived SyncRefs (pinning leaked exemption)")
+	}
+	if _, ok := m.Get("manifests"); !ok {
+		t.Error("pinned cluster torn down alongside the non-pinned one")
 	}
 }
 

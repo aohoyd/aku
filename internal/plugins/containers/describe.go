@@ -27,8 +27,8 @@ func DescribeContainer(
 ) {
 	var cms, secs map[string]*unstructured.Unstructured
 	if len(configMaps) > 0 || len(secrets) > 0 {
-		cms = indexByName(configMaps)
-		secs = indexByName(secrets)
+		cms = IndexByName(configMaps)
+		secs = IndexByName(secrets)
 	}
 
 	describeSpec(b, level, c, status)

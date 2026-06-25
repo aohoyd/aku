@@ -2,7 +2,10 @@ package pods
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -179,12 +182,27 @@ func (p *Plugin) renderDescribe(pod *corev1.Pod, configMaps, secrets []*unstruct
 	// Conditions
 	workload.DescribeConditions(b, pod)
 
+	// Lookup indexes shared by the Volumes and Image Pull Secrets sections.
+	// Empty (plain Describe) → names only, no value leak.
+	cms := containers.IndexByName(configMaps)
+	secs := containers.IndexByName(secrets)
+
 	// Volumes section
 	if len(pod.Spec.Volumes) > 0 {
 		b.Section(render.LEVEL_0, "Volumes")
 		for _, vol := range pod.Spec.Volumes {
 			b.Section(render.LEVEL_1, vol.Name)
-			describeVolume(b, vol)
+			describeVolume(b, vol, cms, secs)
+		}
+	}
+
+	// Image Pull Secrets section. In uncover mode (secs populated) reveal
+	// registry → username only — never the password or auth token.
+	if len(pod.Spec.ImagePullSecrets) > 0 {
+		b.Section(render.LEVEL_0, "Image Pull Secrets")
+		for _, ref := range pod.Spec.ImagePullSecrets {
+			b.Section(render.LEVEL_1, ref.Name)
+			describeImagePullSecret(b, secs[ref.Name])
 		}
 	}
 
@@ -256,15 +274,23 @@ func buildContainerStatusMap(pod *corev1.Pod) map[string]corev1.ContainerStatus 
 	return m
 }
 
-// describeVolume writes volume type and fields to the Builder.
-func describeVolume(b *render.Builder, vol corev1.Volume) {
+// describeVolume writes volume type and fields to the Builder. When cms/secs
+// contain the referenced object, ConfigMap/Secret volume data is revealed at
+// LEVEL_3 (honoring Items). Empty maps render names only (no value leak).
+func describeVolume(b *render.Builder, vol corev1.Volume, cms, secs map[string]*unstructured.Unstructured) {
 	switch {
 	case vol.ConfigMap != nil:
 		b.KV(render.LEVEL_2, "Type", "ConfigMap (a volume populated by a ConfigMap)")
 		b.KV(render.LEVEL_2, "Name", vol.ConfigMap.Name)
+		if obj, ok := cms[vol.ConfigMap.Name]; ok {
+			revealVolumeData(b, containers.ConfigMapData(obj), itemKeyPaths(vol.ConfigMap.Items))
+		}
 	case vol.Secret != nil:
 		b.KV(render.LEVEL_2, "Type", "Secret (a volume populated by a Secret)")
 		b.KV(render.LEVEL_2, "SecretName", vol.Secret.SecretName)
+		if obj, ok := secs[vol.Secret.SecretName]; ok {
+			revealVolumeData(b, containers.SecretData(obj), itemKeyPaths(vol.Secret.Items))
+		}
 	case vol.EmptyDir != nil:
 		b.KV(render.LEVEL_2, "Type", "EmptyDir (a temporary directory that shares a pod's lifetime)")
 	case vol.HostPath != nil:
@@ -275,9 +301,191 @@ func describeVolume(b *render.Builder, vol corev1.Volume) {
 		b.KV(render.LEVEL_2, "ClaimName", vol.PersistentVolumeClaim.ClaimName)
 	case vol.Projected != nil:
 		b.KV(render.LEVEL_2, "Type", "Projected (a volume that contains injected data from multiple sources)")
+		for _, src := range vol.Projected.Sources {
+			switch {
+			case src.ConfigMap != nil:
+				b.KV(render.LEVEL_2, "ConfigMap", src.ConfigMap.Name)
+				if obj, ok := cms[src.ConfigMap.Name]; ok {
+					revealVolumeData(b, containers.ConfigMapData(obj), itemKeyPaths(src.ConfigMap.Items))
+				}
+			case src.Secret != nil:
+				b.KV(render.LEVEL_2, "Secret", src.Secret.Name)
+				if obj, ok := secs[src.Secret.Name]; ok {
+					revealVolumeData(b, containers.SecretData(obj), itemKeyPaths(src.Secret.Items))
+				}
+			case src.ServiceAccountToken != nil:
+				path := src.ServiceAccountToken.Path
+				if path == "" {
+					path = "<token>"
+				}
+				b.KV(render.LEVEL_2, "ServiceAccountToken", path)
+			case src.DownwardAPI != nil:
+				b.KV(render.LEVEL_2, "DownwardAPI", "<field refs>")
+			}
+		}
 	default:
 		b.KV(render.LEVEL_2, "Type", "<unknown>")
 	}
+}
+
+// itemKeyPaths maps a volume Items subset to key->displayPath, where displayPath
+// is item.Path when set, else item.Key. Returns nil when there are no items
+// (whole-object reveal).
+func itemKeyPaths(items []corev1.KeyToPath) map[string]string {
+	if len(items) == 0 {
+		return nil
+	}
+	m := make(map[string]string, len(items))
+	for _, it := range items {
+		path := it.Path
+		if path == "" {
+			path = it.Key
+		}
+		m[it.Key] = path
+	}
+	return m
+}
+
+// revealVolumeData emits sorted key->value pairs at LEVEL_3. When items is
+// non-nil, only those keys are emitted (displayed by their path); keys absent
+// from data are skipped.
+func revealVolumeData(b *render.Builder, data, items map[string]string) {
+	if len(data) == 0 {
+		return
+	}
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		if items != nil {
+			path, ok := items[k]
+			if !ok {
+				continue
+			}
+			b.KV(render.LEVEL_3, path, data[k])
+			continue
+		}
+		b.KV(render.LEVEL_3, k, data[k])
+	}
+}
+
+// describeImagePullSecret reveals the registry → username pairs of a
+// docker-config pull secret. obj is the referenced Secret object, or nil when
+// not available (plain Describe, or secret missing) in which case only the name
+// (already emitted by the caller) is shown. Passwords and auth tokens are NEVER
+// emitted. Non-docker secrets fall back to listing their decoded data keys.
+func describeImagePullSecret(b *render.Builder, obj *unstructured.Unstructured) {
+	if obj == nil {
+		return
+	}
+	data := containers.SecretData(obj)
+	for _, key := range []string{".dockerconfigjson", ".dockercfg"} {
+		if raw, ok := data[key]; ok {
+			for _, sv := range parseDockerConfig(raw) {
+				b.KV(render.LEVEL_2, sv.server, sv.username)
+			}
+			return
+		}
+	}
+	// Not a docker-config secret: list decoded data keys only (no values).
+	emitSortedKeys(b, render.LEVEL_2, data)
+}
+
+// emitSortedKeys writes each map key (sorted) as a value-less KV at level. Used
+// to surface key names without their values.
+func emitSortedKeys(b *render.Builder, level int, data map[string]string) {
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		b.KV(level, k, "")
+	}
+}
+
+// serverUser is a registry → username pair extracted from a docker-config
+// secret. It intentionally carries no password or auth token.
+type serverUser struct {
+	server   string
+	username string
+}
+
+// parseDockerConfig parses a dockerconfigjson or legacy dockercfg JSON string
+// and returns sorted server → username pairs. It handles both the
+// {"auths":{server:{...}}} shape (dockerconfigjson) and the legacy top-level
+// {server:{...}} shape (dockercfg). It never returns password or auth fields.
+func parseDockerConfig(raw string) []serverUser {
+	type entry struct {
+		Username string `json:"username"`
+		Auth     string `json:"auth"`
+	}
+
+	// Detect the dockerconfigjson shape by the presence of an "auths" key —
+	// even when it is empty — so {"auths":{}} is NOT mistaken for the legacy
+	// flat shape (which would yield a bogus "auths" server).
+	var wrapped struct {
+		Auths map[string]entry `json:"auths"`
+	}
+	var probe map[string]json.RawMessage
+	auths := map[string]entry{}
+	if err := json.Unmarshal([]byte(raw), &probe); err != nil {
+		return nil
+	}
+	if _, hasAuths := probe["auths"]; hasAuths {
+		if err := json.Unmarshal([]byte(raw), &wrapped); err != nil {
+			return nil
+		}
+		auths = wrapped.Auths
+	} else {
+		// Legacy dockercfg: server map at top level.
+		if err := json.Unmarshal([]byte(raw), &auths); err != nil {
+			return nil
+		}
+	}
+
+	servers := make([]string, 0, len(auths))
+	for s := range auths {
+		servers = append(servers, s)
+	}
+	slices.Sort(servers)
+
+	out := make([]serverUser, 0, len(servers))
+	for _, s := range servers {
+		username := auths[s].Username
+		if username == "" {
+			// Auth-only configs (GCR/ECR/GHCR) store credentials in the
+			// base64 "auth" field as "username:password". Surface only the
+			// username; NEVER the password.
+			username = usernameFromAuth(auths[s].Auth)
+		}
+		out = append(out, serverUser{server: s, username: username})
+	}
+	return out
+}
+
+// usernameFromAuth decodes a base64 "username:password" auth string and returns
+// the username portion only. Returns "" on decode failure or when no username
+// is present. The password is never returned.
+func usernameFromAuth(auth string) string {
+	if auth == "" {
+		return ""
+	}
+	decoded, err := base64.StdEncoding.DecodeString(auth)
+	if err != nil {
+		// Some configs use URL-safe base64; fall back before giving up.
+		decoded, err = base64.URLEncoding.DecodeString(auth)
+		if err != nil {
+			return ""
+		}
+	}
+	user, _, found := strings.Cut(string(decoded), ":")
+	if !found {
+		return ""
+	}
+	return user
 }
 
 // formatToleration formats a typed toleration for display.

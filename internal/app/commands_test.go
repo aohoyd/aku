@@ -7987,3 +7987,165 @@ func TestOpenCurrent_DetailsBufferWritesYaml(t *testing.T) {
 		t.Fatalf("temp file content = %q, want %q", string(content), sentinel)
 	}
 }
+
+// nsGVRForTest is the core/v1 namespaces GVR (cluster-scoped, stored under ns "").
+var nsGVRForTest = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "namespaces"}
+
+// newOfflineManifestApp builds an App whose single startup cluster mimics the
+// "manifests" pseudo-context: it carries a populated store but a nil client, so
+// Connected() == false. Mutating ops must guard on this. The store is seeded with
+// the given Namespace names so the offline namespace picker can source them.
+func newOfflineManifestApp(t *testing.T, nsNames ...string) App {
+	t.Helper()
+	km := config.DefaultKeymap()
+	cfg := config.DefaultConfig()
+	plugin.Reset()
+
+	store := k8s.NewStore(nil, "manifests", nil)
+	for _, name := range nsNames {
+		ns := &unstructured.Unstructured{}
+		ns.SetAPIVersion("v1")
+		ns.SetKind("Namespace")
+		ns.SetName(name)
+		store.CacheUpsert(nsGVRForTest, "", ns)
+	}
+
+	mgr := cluster.NewManager(nil, "", 0)
+	// nil client => Connected() == false; store is still present. Register as
+	// pinned to mirror production (the manifests pseudo-context is always pinned),
+	// so the namespace picker's store-fallback path — gated on IsPinned — engages.
+	mgr.RegisterPinned(cluster.New("manifests", "", nil, store, k8s.NewDiscovery(), nil))
+	return New(mgr, km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, "manifests")
+}
+
+// seedPodSplit adds a focused pods split holding a single pod that exposes a
+// container port, so port-forward's extractPorts would otherwise find a port.
+func seedPodSplit(app App, ctxName string) App {
+	p := &mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}}
+	plugin.Register(p)
+	app.layout.AddSplit(p, "default", ctxName)
+	pod := &unstructured.Unstructured{Object: map[string]any{
+		"spec": map[string]any{
+			"containers": []any{
+				map[string]any{
+					"name":  "app",
+					"ports": []any{map[string]any{"containerPort": int64(8080)}},
+				},
+			},
+		},
+	}}
+	pod.SetName("pod-1")
+	pod.SetNamespace("default")
+	app.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{pod})
+	return app
+}
+
+// TestPortForward_OfflineCluster_GuardToast verifies that port-forward on a
+// not-Connected() focused cluster (manifest mode) emits a toast and does NOT open
+// the port-forward overlay.
+func TestPortForward_OfflineCluster_GuardToast(t *testing.T) {
+	app := newOfflineManifestApp(t)
+	app = seedPodSplit(app, "manifests")
+	prevOverlay := app.activeOverlay
+
+	model, cmd := app.executeCommand("port-forward")
+	got := model.(App)
+
+	if cmd != nil {
+		t.Fatalf("expected nil cmd from guarded port-forward, got %v", cmd)
+	}
+	if !hasNotifyLevel(got, notify.LevelError) {
+		t.Fatal("expected an error notification when port-forwarding in manifest mode")
+	}
+	if !notifyContains(got, "not available in manifest mode") {
+		t.Fatalf("expected toast mentioning manifest mode, got %+v", got.notify.List())
+	}
+	if got.activeOverlay != prevOverlay {
+		t.Fatalf("expected activeOverlay unchanged (%v), got %v", prevOverlay, got.activeOverlay)
+	}
+	if got.portForwardOverlay.Active() {
+		t.Fatal("expected port-forward overlay to remain closed in manifest mode")
+	}
+}
+
+// TestNamespacePicker_OfflineCluster_SourcesFromStore verifies that the namespace
+// picker, when the focused cluster is offline, sources namespace names from the
+// store (fabricated Namespace objects) instead of calling ListNamespaces on the
+// nil client.
+func TestNamespacePicker_OfflineCluster_SourcesFromStore(t *testing.T) {
+	app := newOfflineManifestApp(t, "prod", "staging", "default")
+	app = seedPodSplit(app, "manifests")
+
+	model, cmd := app.executeCommand("namespace-picker")
+	got := model.(App)
+
+	if got.activeOverlay != overlayNsPicker {
+		t.Fatalf("expected ns picker overlay open, got %v", got.activeOverlay)
+	}
+
+	// If the offline path is async via a cmd yielding NamespacesLoadedMsg, drive it.
+	if cmd != nil {
+		msg := cmd()
+		if loaded, ok := msg.(msgs.NamespacesLoadedMsg); ok {
+			if loaded.Err != nil {
+				t.Fatalf("offline ns picker should not error, got %v", loaded.Err)
+			}
+			m2, _ := got.update(loaded)
+			got = m2.(App)
+		}
+	}
+
+	want := []string{"All Namespaces", "default", "prod", "staging"}
+	have := got.nsPicker.Filtered()
+	if !reflect.DeepEqual(have, want) {
+		t.Fatalf("offline ns picker items mismatch:\nwant %v\ngot  %v", want, have)
+	}
+}
+
+// TestNamespacePicker_NonPinnedOffline_DoesNotUseStore proves that the store
+// fallback is restricted to PINNED clusters: a live-but-unconnected cluster
+// (nil client, not pinned — e.g. a dial that failed) must NOT take the
+// store-derived path and surface stale/empty store namespaces. It falls through
+// to the client branch, which with a nil client yields no NamespacesLoadedMsg.
+func TestNamespacePicker_NonPinnedOffline_DoesNotUseStore(t *testing.T) {
+	km := config.DefaultKeymap()
+	cfg := config.DefaultConfig()
+	plugin.Reset()
+
+	// Seed the store with namespace objects that MUST NOT leak through.
+	store := k8s.NewStore(nil, "live", nil)
+	for _, name := range []string{"prod", "staging"} {
+		ns := &unstructured.Unstructured{}
+		ns.SetAPIVersion("v1")
+		ns.SetKind("Namespace")
+		ns.SetName(name)
+		store.CacheUpsert(nsGVRForTest, "", ns)
+	}
+
+	mgr := cluster.NewManager(nil, "", 0)
+	// Register (NOT pinned), nil client => Connected()==false but IsPinned==false.
+	mgr.Register(cluster.New("live", "", nil, store, k8s.NewDiscovery(), nil))
+	app := New(mgr, km, cfg, nil, nil, nil, nil, nil, layout.OrientationVertical, "live")
+	app = seedPodSplit(app, "live")
+
+	if mgr.IsPinned("live") {
+		t.Fatal("precondition: 'live' must not be pinned")
+	}
+
+	model, cmd := app.executeCommand("namespace-picker")
+	got := model.(App)
+
+	// The picker opens, but the store path must NOT have run: no cmd yielding a
+	// store-derived NamespacesLoadedMsg, and no fabricated namespaces in the
+	// picker (it falls through to the nil-client branch, which returns nil).
+	if cmd != nil {
+		if loaded, ok := cmd().(msgs.NamespacesLoadedMsg); ok {
+			t.Fatalf("non-pinned offline cluster must not take the store path, got %v", loaded.Namespaces)
+		}
+	}
+	for _, item := range got.nsPicker.Filtered() {
+		if item == "prod" || item == "staging" {
+			t.Fatalf("non-pinned offline cluster leaked store namespace %q into picker: %v", item, got.nsPicker.Filtered())
+		}
+	}
+}

@@ -25,11 +25,24 @@ type watchKey struct {
 type Store struct {
 	client    dynamic.Interface
 	ctxName   string // kube-context this store belongs to; stamped onto ResourceUpdatedMsg
+	static    bool // when true (the manifest pseudo-cluster) the cache is the sole copy of the data; teardown is suppressed
 	mu        sync.RWMutex
 	cache     map[watchKey]map[string]*unstructured.Unstructured // outer=watchKey, inner=name
 	informers map[watchKey]context.CancelFunc
 	send      func(tea.Msg)
 	debouncer *Debouncer
+}
+
+// MarkStatic flags this store as a static, client-less pseudo-cluster (the
+// pinned "manifests" context). A static store has no informers, so its cache is
+// the only copy of its data and can never be repopulated. Unsubscribe and
+// UnsubscribeAll therefore no-op on it: tearing a bucket down would orphan that
+// data permanently. Subscribe still returns the cached items synchronously,
+// which is the sole population path for such a store.
+func (s *Store) MarkStatic() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.static = true
 }
 
 // NewStore creates a new Store for the given kube-context. ctxName is stamped
@@ -128,6 +141,11 @@ func (s *Store) Unsubscribe(gvr schema.GroupVersionResource, namespace string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// A static store's cache is its only copy of the data; never tear it down.
+	if s.static {
+		return
+	}
+
 	if cancel, ok := s.informers[key]; ok {
 		cancel()
 		delete(s.informers, key)
@@ -140,6 +158,11 @@ func (s *Store) Unsubscribe(gvr schema.GroupVersionResource, namespace string) {
 func (s *Store) UnsubscribeAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// A static store's cache is its only copy of the data; never tear it down.
+	if s.static {
+		return
+	}
 
 	s.debouncer.Stop()
 	for _, cancel := range s.informers {
@@ -165,6 +188,22 @@ func (s *Store) List(gvr schema.GroupVersionResource, namespace string) []*unstr
 		items = append(items, obj)
 	}
 	return items
+}
+
+// CountInNamespace sums the cached objects across every GVR bucket for the given
+// namespace. The static manifest store dual-keys every object into the
+// all-namespaces ("") bucket exactly once, so CountInNamespace("") yields the
+// total distinct object count for such a store without enumerating GVRs.
+func (s *Store) CountInNamespace(namespace string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := 0
+	for key, bucket := range s.cache {
+		if key.Namespace == namespace {
+			n += len(bucket)
+		}
+	}
+	return n
 }
 
 // cacheObjKey returns a unique key for an object within a watch bucket.

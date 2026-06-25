@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/aohoyd/aku/internal/k8s"
+	"github.com/aohoyd/aku/internal/manifest"
 	"github.com/aohoyd/aku/internal/plugin"
 	"github.com/aohoyd/aku/internal/plugin/plugintest"
 	"github.com/aohoyd/aku/internal/render"
@@ -153,6 +154,46 @@ func TestPluginDescribeDocument(t *testing.T) {
 		if !strings.Contains(c.Raw, want) {
 			t.Errorf("describe output should contain %q\n\nFull output:\n%s", want, c.Raw)
 		}
+	}
+}
+
+// TestYAMLShowsManifestProvenance proves the zero-cost provenance surface: an
+// object carrying the manifest-source annotation renders that annotation
+// (key and value) in the YAML view, so a user viewing a manifest object's YAML
+// can see where it came from. MarshalYAML strips managedFields but must keep
+// arbitrary annotations.
+func TestYAMLShowsManifestProvenance(t *testing.T) {
+	p := New()
+	obj := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "apps/v1",
+			"kind":       "Deployment",
+			"metadata": map[string]any{
+				"name":      "nginx",
+				"namespace": "default",
+				"annotations": map[string]any{
+					manifest.SourceAnnotation: "chart/templates/x.yaml",
+				},
+				// managedFields must be stripped; a real annotation must survive.
+				"managedFields": []any{
+					map[string]any{"manager": "helm"},
+				},
+			},
+		},
+	}
+
+	c, err := p.YAML(obj)
+	if err != nil {
+		t.Fatalf("YAML err = %v", err)
+	}
+	if !strings.Contains(c.Raw, manifest.SourceAnnotation) {
+		t.Errorf("YAML output missing annotation key %q; got:\n%s", manifest.SourceAnnotation, c.Raw)
+	}
+	if !strings.Contains(c.Raw, "chart/templates/x.yaml") {
+		t.Errorf("YAML output missing annotation value; got:\n%s", c.Raw)
+	}
+	if strings.Contains(c.Raw, "managedFields") {
+		t.Errorf("YAML output should strip managedFields; got:\n%s", c.Raw)
 	}
 }
 

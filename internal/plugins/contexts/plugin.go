@@ -38,10 +38,14 @@ var syntheticGVR = schema.GroupVersionResource{
 
 // STATUS glyphs. A context in use by at least one pane shows a filled ● —
 // colored green when its cluster is connected and red when it is not (offline or
-// failed to connect). A context no pane uses shows a neutral hollow ○.
+// failed to connect). A context no pane uses shows a neutral hollow ○. A pinned
+// pseudo-context (the synthetic "manifests" cluster) is clientless by design —
+// never "connected" yet not broken — so it shows a distinct ◆ marker instead of
+// the red ● that would otherwise read as a failed/offline cluster.
 const (
-	glyphInUse = "●"
-	glyphIdle  = "○"
+	glyphInUse  = "●"
+	glyphIdle   = "○"
+	glyphPinned = "◆"
 )
 
 // Plugin lists kube-contexts as a synthetic resource view.
@@ -165,7 +169,13 @@ func (p *Plugin) clusterAndServer(parsed map[string]*clientcmdapi.Config, e clus
 //     a failed dial, which leaves no Manager entry — pane presence is the only
 //     signal in that case);
 //   - neutral ○ — no pane uses ctx (idle).
+//   - neutral ◆ — a pinned pseudo-context (e.g. "manifests"): clientless by
+//     design, so neither connected nor failed; the distinct marker avoids the
+//     misleading red ●.
 func (p *Plugin) status(ctx string) string {
+	if p.mgr.IsPinned(ctx) {
+		return glyphPinned
+	}
 	c, ok := p.mgr.Get(ctx)
 	if ok && c.Connected() {
 		return plugin.StyledFg(glyphInUse, plugin.FgRunning)

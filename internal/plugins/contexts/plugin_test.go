@@ -18,9 +18,10 @@ import (
 
 // Expected STATUS cell renderings.
 var (
-	statusGreen = plugin.StyledFg(glyphInUse, plugin.FgRunning) // connected
-	statusRed   = plugin.StyledFg(glyphInUse, plugin.FgFailed)  // in-use but offline
-	statusIdle  = glyphIdle                                     // no panes
+	statusGreen  = plugin.StyledFg(glyphInUse, plugin.FgRunning) // connected
+	statusRed    = plugin.StyledFg(glyphInUse, plugin.FgFailed)  // in-use but offline
+	statusIdle   = glyphIdle                                     // no panes
+	statusPinned = glyphPinned                                   // pinned pseudo-context
 )
 
 // writeKubeconfig writes a minimal kubeconfig with the given context→cluster→server
@@ -214,6 +215,47 @@ func TestObjectsDegradesGracefully(t *testing.T) {
 		if clusterName != "" || server != "" {
 			t.Errorf("%q should degrade to empty cluster/server, got cluster=%q server=%q", name, clusterName, server)
 		}
+	}
+}
+
+// TestPinnedManifestContextPresentation verifies how the contexts view renders
+// a pinned, clientless pseudo-context (the synthetic "manifests" cluster). Such
+// a context is Connected()==false yet always has a viewing pane, so without a
+// special case it would render the red ● used for a genuinely failed/offline
+// cluster — misleading, because a manifest source is not a broken cluster. The
+// row must render without crashing, CLUSTER/SERVER must be blank (it has no
+// kubeconfig file), and STATUS must use the distinct pinned marker rather than
+// the failed glyph.
+func TestPinnedManifestContextPresentation(t *testing.T) {
+	mgr := cluster.NewManager(nil, "", time.Second)
+	mgr.RegisterPinned(cluster.New("manifests", "", nil, nil, nil, nil))
+
+	p := New(mgr)
+	// A pinned context is always being viewed, so it carries panes.
+	p.SetPaneCounts(map[string]int{"manifests": 1})
+
+	var objs []*unstructured.Unstructured
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("Objects() panicked: %v", r)
+			}
+		}()
+		objs = p.Objects()
+	}()
+
+	obj := findRow(objs, "manifests")
+	if obj == nil {
+		t.Fatal("no row for manifests")
+	}
+	row := p.Row(obj)
+	want := []string{"manifests", "", "", statusPinned}
+	if !slices.Equal(row, want) {
+		t.Errorf("Row(manifests) = %v, want %v", row, want)
+	}
+	// The pinned marker must NOT be the red failed glyph used for offline clusters.
+	if row[3] == statusRed {
+		t.Error("pinned manifest context renders the failed (red ●) glyph; expected a distinct marker")
 	}
 }
 

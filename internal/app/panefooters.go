@@ -98,6 +98,12 @@ func (a App) syncPaneOffline(split *ui.ResourceList) {
 		split.SetOffline(false)
 		return
 	}
+	// A pinned pseudo-context (the static "manifests" cluster) is client-less and
+	// reports Connected()==false by design — it is not "offline". Never flag it.
+	if a.mgr.IsPinned(ctx) {
+		split.SetOffline(false)
+		return
+	}
 	cl, ok := a.mgr.Get(ctx)
 	if !ok || cl == nil {
 		// No cluster entry: leave the marker as-is (see doc comment).
