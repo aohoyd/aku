@@ -1319,6 +1319,10 @@ func (a App) closeFocusedSplit() (App, tea.Cmd) {
 		// AFTER CloseCurrentSplit so the just-closed pane is no longer counted.
 		a.mgr.SyncRefs(a.paneContexts())
 		a.syncTerminalSizes()
+		// Re-derive context badges against the remaining panes: closing a pane can
+		// drop the pane set back to a single context, in which case the badge must
+		// clear. Only open/switch paths called this before, so close left it stale.
+		a.syncPaneFooters()
 		return a, nil
 	}
 
@@ -1347,6 +1351,11 @@ func (a App) closeFocusedSplit() (App, tea.Cmd) {
 	// Reconcile manager refcounts against the remaining panes; a cluster no
 	// remaining pane references is torn down here (no global exemption).
 	a.mgr.SyncRefs(a.paneContexts())
+
+	// Re-derive context badges against the remaining panes: closing a pane can
+	// drop the pane set back to a single context, in which case the badge must
+	// clear. Only open/switch paths called this before, so close left it stale.
+	a.syncPaneFooters()
 
 	return a, nil
 }
@@ -1984,14 +1993,15 @@ func (a App) reloadAll() (tea.Model, tea.Cmd) {
 // paths and re-registers the rebuilt cluster under the SAME context name (so open
 // panes on that context stay valid). Panes on the manifests context are reset to
 // root and repopulated from the rebuilt store. A stdin source cannot be re-read,
-// so that path is a no-op with an explanatory toast.
+// so that path silently rewrites the screen (no data refresh, no toast).
 func (a App) reloadManifest(ctx string) (tea.Model, tea.Cmd) {
 	src := a.manifestSource
 
-	// stdin mode: the stream was consumed at startup and cannot be re-read.
+	// stdin mode: the stream was consumed at startup and cannot be re-read, so
+	// there is no new data to load. Reload just rewrites the screen silently
+	// (matching the file path's redraw) rather than surfacing an error toast.
 	if src.fromStdin || len(src.paths) == 0 {
-		a.notify.Add(notify.LevelInfo, "stdin can't be re-read; restart aku to reload", ctx, "reload")
-		return a, nil
+		return a, tea.ClearScreen
 	}
 
 	// Rebuild the static cluster from the original file paths.

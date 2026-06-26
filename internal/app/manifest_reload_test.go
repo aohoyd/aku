@@ -279,21 +279,25 @@ func TestReloadManifest_VanishedFileWarns(t *testing.T) {
 }
 
 // TestReloadManifest_StdinNoOp verifies that Ctrl+r on the pinned manifests
-// context, in stdin mode, does NOT rebuild and emits a toast explaining stdin
-// can't be re-read.
+// context, in stdin mode, does NOT rebuild the store and silently rewrites the
+// screen (a non-nil redraw command) without surfacing any toast.
 func TestReloadManifest_StdinNoOp(t *testing.T) {
 	app := newManifestStdinApp(t, manifestV1)
 
 	storeBefore := app.clusterForFocused().Store()
 
-	model, _ := app.executeCommand("reload-all")
+	model, cmd := app.executeCommand("reload-all")
 	app = model.(App)
 
 	// Store must be the same instance (no rebuild).
 	if app.clusterForFocused().Store() != storeBefore {
 		t.Fatalf("expected store to be unchanged for stdin reload (no rebuild)")
 	}
-	if !notifyContains(app, "stdin") {
-		t.Fatalf("expected toast mentioning stdin, got %+v", app.notify.List())
+	// Silent redraw: a screen-rewrite command is returned and no toast is added.
+	if cmd == nil {
+		t.Fatalf("expected a non-nil redraw command for stdin reload")
+	}
+	if len(app.notify.List()) != 0 {
+		t.Fatalf("expected no toast for stdin reload, got %+v", app.notify.List())
 	}
 }

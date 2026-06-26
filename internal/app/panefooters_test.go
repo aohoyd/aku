@@ -122,3 +122,29 @@ func TestSyncPaneFooters_ConvergingBackToOneClearsLabels(t *testing.T) {
 		}
 	}
 }
+
+// TestCloseFocusedSplit_ClearsRemainingPaneLabel verifies the real close path
+// re-derives footers: with two distinct-context panes labeled, closing the
+// second drops the pane set to a single context, and closeFocusedSplit must
+// clear the remaining pane's stale label (the bug was that close never re-ran
+// syncPaneFooters, leaving the badge visible).
+func TestCloseFocusedSplit_ClearsRemainingPaneLabel(t *testing.T) {
+	a := appWithManager(t, "ctx-a", "ctx-b")
+
+	// Two panes on distinct contexts; the newly-added split (ctx-b) is focused.
+	a = addSplit(t, a, "deployments")
+	a.layout.SplitAt(1).SetContext("ctx-b")
+	a.syncPaneFooters()
+	if a.layout.SplitAt(0).ContextLabel() != "ctx-a" {
+		t.Fatalf("precondition: expected pane 0 labeled ctx-a, got %q", a.layout.SplitAt(0).ContextLabel())
+	}
+
+	// Close the focused (ctx-b) pane: only the ctx-a pane remains.
+	a, _ = a.closeFocusedSplit()
+	if got := a.layout.SplitCount(); got != 1 {
+		t.Fatalf("expected 1 split after close, got %d", got)
+	}
+	if got := a.layout.SplitAt(0).ContextLabel(); got != "" {
+		t.Errorf("remaining pane footer = %q after close, want empty", got)
+	}
+}
