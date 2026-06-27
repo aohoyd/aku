@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -14,9 +15,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var gvr = schema.GroupVersionResource{Group: "discovery.k8s.io", Version: "v1", Resource: "endpointslices"}
+var gvr = workload.EndpointSlicesGVR
 
-// Plugin implements plugin.ResourcePlugin for Kubernetes EndpointSlices.
+// Plugin implements plugin.ResourcePlugin, plugin.DrillDowner, and plugin.DrillUp for Kubernetes EndpointSlices.
 type Plugin struct{}
 
 // New creates a new EndpointSlices plugin.
@@ -149,6 +150,20 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 	}
 
 	return b.Build(), nil
+}
+
+// DrillDown implements plugin.DrillDowner: endpointslice → pods. It returns the
+// Pods backing this EndpointSlice (resolved from endpoints[].targetRef), delegating
+// to the single resolver workload.FindPodsByEndpointSlice.
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	return workload.FindPodsByEndpointSlice(cl, obj)
+}
+
+// DrillUp implements plugin.DrillUp: endpointslice → svc. It returns the Service
+// owning this EndpointSlice (kubernetes.io/service-name label match), delegating
+// to the single resolver workload.FindServiceForEndpointSlice.
+func (p *Plugin) DrillUp(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return workload.FindServiceForEndpointSlice(cl, obj)
 }
 
 // toEndpointSlice converts an unstructured object to a typed discoveryv1.EndpointSlice.

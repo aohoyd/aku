@@ -18,7 +18,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Automatic discovery of any CRD or API resource not covered by built-in plugins
 - Disambiguation of same-name resources across API groups (e.g. `certificates [cert-manager.io/v1]`)
 - Helm release management with values editing, rollback, and chart switching
-- Drill-down navigation between related resources (deployment → replicaset → pods → containers)
+- Drill-down navigation between related resources (deployment → replicaset → pods → containers, and service → endpointslice → pods), with `Backspace` to walk back up to a resource's owner/source (parent — including endpointslice → service), and `gN` to jump from a pod to its hosting Node
 
 **Views**
 - YAML view with syntax highlighting (managedFields stripped)
@@ -31,7 +31,7 @@ A terminal UI for managing Kubernetes clusters, built with [Bubble Tea](https://
 - Zoom the focused pane to fullscreen with `alt+z` (resource list, terminal, or detail/log panel) — a single top bar, status bar hidden; `alt+z` again to exit
 
 **Manifest visualization**
-- Pipe rendered manifests into aku (`helm template ./chart | aku`, `kustomize build ./overlay | aku`) or open files/dirs with `-f` and browse them as a simulated cluster — controllers' runtime is fabricated (Deployment→ReplicaSet→Pods, StatefulSet/DaemonSet→Pods, Job/CronJob→Pods, Service→Endpoints) so drill-down, health, and resource lists all work, with `# Source:` provenance surfaced in the YAML view
+- Pipe rendered manifests into aku (`helm template ./chart | aku`, `kustomize build ./overlay | aku`) or open files/dirs with `-f` and browse them as a simulated cluster — controllers' runtime is fabricated (Deployment→ReplicaSet→Pods, StatefulSet/DaemonSet→Pods, Job/CronJob→Pods, Service→EndpointSlice) so drill-down, health, and resource lists all work, with `# Source:` provenance surfaced in the YAML view
 
 **Operations**
 - Edit resources in your `$EDITOR` with automatic retry on validation errors
@@ -405,7 +405,7 @@ aku doesn't just list the YAML — it **fabricates the runtime that controllers 
 - **StatefulSet** → ordinal Pods (`<sts>-0..N-1`)
 - **DaemonSet** → one Pod
 - **Job** → one Pod; **CronJob** → one Job → one Pod
-- **Service** → an Endpoints object addressing the matching fabricated Pods
+- **Service** → an EndpointSlice (carrying the `kubernetes.io/service-name` label) addressing the matching fabricated Pods
 
 Fabricated objects carry **deterministic UIDs** (a stable hash of kind+namespace+name) so owner-ref drill-down (Deployment → ReplicaSet → Pods) resolves and runs are reproducible. Synthesized Pods are stamped **healthy/green** — `Running`, all containers ready, with a synthetic pod IP and start time; user-supplied objects that already carry a status keep it.
 
@@ -429,7 +429,7 @@ The `manifests` context has no real API server, so anything that needs one is bl
 
 - There are no real Pods, so logs, exec, and debug have nothing to attach to (they toast).
 - Rendered manifests have **no real status** — synthesized health is fabricated, not observed; user objects that ship without a status are shown as-is.
-- Only `Endpoints` is synthesized for Services; the `EndpointSlice` view is not populated.
+- Only `EndpointSlice` is synthesized for Services; the legacy `Endpoints` view is not populated.
 - Unknown/CRD kinds get a **best-effort plural** for the resource name plus a warning (there's no live discovery to ask); they browse and show YAML, but nothing is synthesized for them.
 
 ## Key Bindings
@@ -477,6 +477,9 @@ The `c` chord copies or opens whatever the focused pane is showing. Copies attem
 |-----|--------|
 | `gg` / `G` | Top / bottom |
 | `Enter` | Drill down / open detail |
+| `Backspace` | Go to parent resource (owner, or for an endpointslice its Service) |
+| `gN` | Go to the hosting Node (`spec.nodeName`), pods only |
+| `Esc` | Dismiss: clears selection/search/filter, else go back (pop navigation) |
 | `Tab` | Switch to detail panel |
 | `Shift+Tab` | Next split pane |
 | `Space` | Toggle select |
@@ -484,6 +487,9 @@ The `c` chord copies or opens whatever the focused pane is showing. Copies attem
 | `Ctrl+d` | Delete selected |
 | `g + p/d/s/v/c/n/m` | Go to pods/deployments/secrets/services/configmaps/namespaces/aku-messages |
 | `o + p/d/s/v/c` | Open split: pods/deployments/secrets/services/configmaps |
+| `o enter` | Open selected resource's children in a new split |
+| `o backspace` | Open selected resource's parent in a new split (owner, or for an endpointslice its Service), matching in-pane `Backspace` |
+| `oN` | Open the hosting Node in a new split, matching in-pane `gN`, pods only |
 | `gX` / `oX` | Open the contexts list (`g` in current pane, `o` in a new split) |
 | `S + n/N/a/s` | Sort by name/namespace/age/status |
 

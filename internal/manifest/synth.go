@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -28,8 +29,8 @@ func stableUID(kind, namespace, name string) string {
 // podIP derives a deterministic, distinct, RFC 1918 pod IP from a Pod's
 // identity (kind/namespace/name). Hashing the identity means two fabricated
 // pods get different IPs and a re-render yields the same IP for a given pod, so
-// synthesizeEndpoints emits one distinct address per matching pod rather than a
-// shared literal. The address lives in 10.x.y.z; the low octets avoid 0/255 so
+// synthesizeEndpointSlices emits one distinct address per matching pod rather
+// than a shared literal. The address lives in 10.x.y.z; the low octets avoid 0/255 so
 // the result is always a usable host address.
 func podIP(pod *unstructured.Unstructured) string {
 	sum := sha1.Sum([]byte("Pod/" + pod.GetNamespace() + "/" + pod.GetName()))
@@ -395,22 +396,29 @@ func synthCronJob(cj *unstructured.Unstructured) []*unstructured.Unstructured {
 	return out
 }
 
-// synthesizeEndpoints returns the input objects plus a fabricated core/v1
-// Endpoints object for every Service that has a non-empty spec.selector, so the
-// Endpoints resource list isn't empty in the simulated cluster. The Endpoints
-// share the Service's name+namespace and address every Pod in the same namespace
-// whose labels are a superset of the selector (reading each Pod's
-// status.podIP). Selectorless / headless Services — whose endpoints are normally
-// managed manually — are skipped. Each fabricated Endpoints carries a stable
-// metadata.uid and SourceAnnotation="synthesized".
+// synthesizeEndpointSlices returns the input objects plus a fabricated
+// discovery.k8s.io/v1 EndpointSlice for every Service that has a non-empty
+// spec.selector, so the svc → endpointslice → pods drill-down resolves offline
+// and the EndpointSlices resource list isn't empty in the simulated cluster.
+// This is the producer half: it matches Pods to each selector-having Service and
+// appends exactly one fabricated EndpointSlice per such Service, delegating the
+// object's shape (naming, labels, ports, uid) to fabricateEndpointSlice. It
+// addresses every Pod in the same namespace whose labels are a superset of the
+// selector (reading each Pod's status.podIP) and stamps each endpoint's
+// targetRef. Selectorless / headless / ExternalName Services — whose endpoints
+// are normally managed manually — are skipped.
 //
 // This is intended to run after synthesizeWorkloads so fabricated Pods (with
 // IPs) already exist in the slice.
-func synthesizeEndpoints(objs []*unstructured.Unstructured) []*unstructured.Unstructured {
-	// Index pods by namespace, capturing labels + podIP.
+func synthesizeEndpointSlices(objs []*unstructured.Unstructured) []*unstructured.Unstructured {
+	// Index pods by namespace, capturing labels + podIP plus the identity
+	// (name/namespace/uid) needed to stamp each endpoint's targetRef.
 	type podInfo struct {
-		labels map[string]string
-		ip     string
+		labels    map[string]string
+		ip        string
+		name      string
+		namespace string
+		uid       string
 	}
 	podsByNS := map[string][]podInfo{}
 	for _, o := range objs {
@@ -419,8 +427,11 @@ func synthesizeEndpoints(objs []*unstructured.Unstructured) []*unstructured.Unst
 		}
 		ip, _, _ := unstructured.NestedString(o.Object, "status", "podIP")
 		podsByNS[o.GetNamespace()] = append(podsByNS[o.GetNamespace()], podInfo{
-			labels: o.GetLabels(),
-			ip:     ip,
+			labels:    o.GetLabels(),
+			ip:        ip,
+			name:      o.GetName(),
+			namespace: o.GetNamespace(),
+			uid:       string(o.GetUID()),
 		})
 	}
 
@@ -431,19 +442,35 @@ func synthesizeEndpoints(objs []*unstructured.Unstructured) []*unstructured.Unst
 		}
 		selector, found, _ := unstructured.NestedStringMap(o.Object, "spec", "selector")
 		if !found || len(selector) == 0 {
-			// Selectorless / headless Service: endpoints are managed manually.
+			// Selectorless / headless / ExternalName Service: endpoints are
+			// managed manually, so no slice is fabricated.
 			continue
 		}
 
-		var addresses []any
+		var endpoints []any
 		for _, p := range podsByNS[o.GetNamespace()] {
 			if p.ip == "" || !labelsMatch(p.labels, selector) {
 				continue
 			}
-			addresses = append(addresses, map[string]any{"ip": p.ip})
+			// Stamp a targetRef so the endpointslice → pods drill-down resolves
+			// the backing pod in manifest mode, just as a live EndpointSlice
+			// would. kind/name are always present; uid/namespace are omitted
+			// when empty to stay faithful to real EndpointSlice shape.
+			targetRef := map[string]any{"kind": "Pod", "name": p.name}
+			if p.namespace != "" {
+				targetRef["namespace"] = p.namespace
+			}
+			if p.uid != "" {
+				targetRef["uid"] = p.uid
+			}
+			endpoints = append(endpoints, map[string]any{
+				"addresses":  []any{p.ip},
+				"conditions": map[string]any{"ready": true},
+				"targetRef":  targetRef,
+			})
 		}
 
-		out = append(out, fabricateEndpoints(o, addresses))
+		out = append(out, fabricateEndpointSlice(o, endpoints))
 	}
 	return out
 }
@@ -459,37 +486,43 @@ func labelsMatch(labels, selector map[string]string) bool {
 	return true
 }
 
-// fabricateEndpoints builds a core/v1 Endpoints object for svc, addressing the
-// given addresses (each a {"ip": ...} map) plus ports derived from svc
-// spec.ports. With no addresses, subsets is left empty.
-func fabricateEndpoints(svc *unstructured.Unstructured, addresses []any) *unstructured.Unstructured {
+// fabricateEndpointSlice builds a discovery.k8s.io/v1 EndpointSlice for svc,
+// carrying the given endpoints (each an {"addresses":[ip], "conditions":{ready},
+// "targetRef":{...}} map) plus top-level ports derived from svc spec.ports. Its
+// name is the Service name with a "-manifest" suffix so it never collides with
+// the Service; the kubernetes.io/service-name label links it back. With no
+// endpoints the endpoints field is left absent.
+func fabricateEndpointSlice(svc *unstructured.Unstructured, endpoints []any) *unstructured.Unstructured {
 	ns := svc.GetNamespace()
-	name := svc.GetName()
+	name := svc.GetName() + "-manifest"
 
-	ep := &unstructured.Unstructured{Object: map[string]any{}}
-	ep.SetAPIVersion("v1")
-	ep.SetKind("Endpoints")
+	es := &unstructured.Unstructured{Object: map[string]any{}}
+	es.SetAPIVersion("discovery.k8s.io/v1")
+	es.SetKind("EndpointSlice")
 	if ns != "" {
-		ep.SetNamespace(ns)
+		es.SetNamespace(ns)
 	}
-	ep.SetName(name)
-	ep.SetUID(types.UID(stableUID("Endpoints", ns, name)))
-	ep.SetAnnotations(map[string]string{SourceAnnotation: "synthesized"})
+	es.SetName(name)
+	es.SetUID(types.UID(stableUID("EndpointSlice", ns, name)))
+	es.SetLabels(map[string]string{workload.ServiceNameLabel: svc.GetName()})
+	es.SetAnnotations(map[string]string{SourceAnnotation: "synthesized"})
+	_ = unstructured.SetNestedField(es.Object, "IPv4", "addressType")
 
-	if len(addresses) > 0 {
-		subset := map[string]any{"addresses": addresses}
-		if ports := endpointPorts(svc); len(ports) > 0 {
-			subset["ports"] = ports
-		}
-		_ = unstructured.SetNestedSlice(ep.Object, []any{subset}, "subsets")
+	if ports := endpointSlicePorts(svc); len(ports) > 0 {
+		_ = unstructured.SetNestedSlice(es.Object, ports, "ports")
 	}
-	return ep
+	if len(endpoints) > 0 {
+		_ = unstructured.SetNestedSlice(es.Object, endpoints, "endpoints")
+	}
+	return es
 }
 
-// endpointPorts derives an Endpoints subset ports section from a Service's
-// spec.ports, carrying over name/protocol/port (using the port number as-is;
-// targetPort resolution is out of scope for a static preview).
-func endpointPorts(svc *unstructured.Unstructured) []any {
+// endpointSlicePorts derives an EndpointSlice top-level ports[] section from a
+// Service's spec.ports, carrying over name/protocol/port (using the port number
+// as-is; targetPort resolution is out of scope for a static preview). The shape
+// — {name?, protocol?, port} — matches what the endpointslices plugin's
+// extractPorts/Describe read.
+func endpointSlicePorts(svc *unstructured.Unstructured) []any {
 	svcPorts, _, _ := unstructured.NestedSlice(svc.Object, "spec", "ports")
 	var out []any
 	for _, p := range svcPorts {

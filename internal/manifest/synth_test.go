@@ -1,11 +1,18 @@
 package manifest
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/aohoyd/aku/internal/k8s"
+	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugin/plugintest"
+	"github.com/aohoyd/aku/internal/plugins/workload"
+	"github.com/aohoyd/aku/internal/render"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -56,7 +63,7 @@ func TestAssignNamespacesStampsDefault(t *testing.T) {
 	}
 
 	// A fabricated Namespace must carry a stable uid and the synthesized
-	// provenance annotation, matching newChild/fabricateEndpoints.
+	// provenance annotation, matching newChild/fabricateEndpointSlice.
 	if string(ns.GetUID()) == "" {
 		t.Fatalf("expected fabricated Namespace to carry a stable uid")
 	}
@@ -655,7 +662,7 @@ func TestSynthesizeWorkloadsPassesThroughOtherKinds(t *testing.T) {
 	}
 }
 
-// --- synthesizeEndpoints tests ---
+// --- synthesizeEndpointSlices tests ---
 
 // newService builds a Service with the given spec.selector (nil for a
 // selectorless service) and optional spec.ports.
@@ -684,59 +691,84 @@ func newReadyPod(namespace, name, ip string, labels map[string]any) *unstructure
 	return p
 }
 
-// endpointsFor returns the Endpoints object with the given namespace/name, or nil.
-func endpointsFor(objs []*unstructured.Unstructured, namespace, name string) *unstructured.Unstructured {
+// sliceFor returns the fabricated EndpointSlice for the given service
+// namespace/name (the slice is named <svc>-manifest), or nil.
+func sliceFor(objs []*unstructured.Unstructured, namespace, svcName string) *unstructured.Unstructured {
 	for _, o := range objs {
-		if o.GetKind() == "Endpoints" && o.GetAPIVersion() == "v1" &&
-			o.GetNamespace() == namespace && o.GetName() == name {
+		if o.GetKind() == "EndpointSlice" && o.GetAPIVersion() == "discovery.k8s.io/v1" &&
+			o.GetNamespace() == namespace && o.GetName() == svcName+"-manifest" {
 			return o
 		}
 	}
 	return nil
 }
 
-// endpointAddresses collects all subset address IPs from an Endpoints object.
-func endpointAddresses(ep *unstructured.Unstructured) []string {
+// sliceAddresses collects all addresses across an EndpointSlice's flat
+// endpoints[] (each endpoint's addresses[]).
+func sliceAddresses(es *unstructured.Unstructured) []string {
 	var out []string
-	subsets, _, _ := unstructured.NestedSlice(ep.Object, "subsets")
-	for _, s := range subsets {
-		sm, ok := s.(map[string]any)
+	endpoints, _, _ := unstructured.NestedSlice(es.Object, "endpoints")
+	for _, e := range endpoints {
+		em, ok := e.(map[string]any)
 		if !ok {
 			continue
 		}
-		addrs, _, _ := unstructured.NestedSlice(sm, "addresses")
-		for _, a := range addrs {
-			am, ok := a.(map[string]any)
-			if !ok {
-				continue
-			}
-			ip, _, _ := unstructured.NestedString(am, "ip")
-			out = append(out, ip)
-		}
+		addrs, _, _ := unstructured.NestedStringSlice(em, "addresses")
+		out = append(out, addrs...)
 	}
 	return out
 }
 
-func TestSynthesizeEndpointsMatchingPods(t *testing.T) {
+// sliceTargetRefs collects the targetRef map of every endpoint of an
+// EndpointSlice, in order (nil for an endpoint with no targetRef).
+func sliceTargetRefs(es *unstructured.Unstructured) []map[string]any {
+	var out []map[string]any
+	endpoints, _, _ := unstructured.NestedSlice(es.Object, "endpoints")
+	for _, e := range endpoints {
+		em, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		ref, found, _ := unstructured.NestedMap(em, "targetRef")
+		if !found {
+			out = append(out, nil)
+			continue
+		}
+		out = append(out, ref)
+	}
+	return out
+}
+
+func TestSynthesizeEndpointSlicesMatchingPods(t *testing.T) {
 	svc := newService("ns", "web", map[string]any{"app": "web"},
 		map[string]any{"name": "http", "port": int64(80), "protocol": "TCP", "targetPort": int64(8080)})
 	pod1 := newReadyPod("ns", "web-1", "10.0.0.1", map[string]any{"app": "web", "tier": "frontend"})
 	pod2 := newReadyPod("ns", "web-2", "10.0.0.2", map[string]any{"app": "web"})
 	other := newReadyPod("ns", "db-1", "10.0.0.9", map[string]any{"app": "db"})
 
-	out := synthesizeEndpoints([]*unstructured.Unstructured{svc, pod1, pod2, other})
+	out := synthesizeEndpointSlices([]*unstructured.Unstructured{svc, pod1, pod2, other})
 
-	ep := endpointsFor(out, "ns", "web")
-	if ep == nil {
-		t.Fatalf("expected an Endpoints object named web in ns")
+	es := sliceFor(out, "ns", "web")
+	if es == nil {
+		t.Fatalf("expected an EndpointSlice for service web in ns")
 	}
 
-	// Endpoints name == service name, same namespace.
-	if ep.GetName() != "web" || ep.GetNamespace() != "ns" {
-		t.Fatalf("expected Endpoints ns/web, got %s/%s", ep.GetNamespace(), ep.GetName())
+	// Slice name is suffixed so it doesn't collide with the Service name.
+	if es.GetName() != "web-manifest" || es.GetNamespace() != "ns" {
+		t.Fatalf("expected EndpointSlice ns/web-manifest, got %s/%s", es.GetNamespace(), es.GetName())
 	}
 
-	addrs := endpointAddresses(ep)
+	// The slice carries the service-name label linking it back to the Service.
+	if got := es.GetLabels()["kubernetes.io/service-name"]; got != "web" {
+		t.Fatalf("expected kubernetes.io/service-name=web, got %q", got)
+	}
+
+	// addressType is IPv4.
+	if at, _, _ := unstructured.NestedString(es.Object, "addressType"); at != "IPv4" {
+		t.Fatalf("expected addressType IPv4, got %q", at)
+	}
+
+	addrs := sliceAddresses(es)
 	want := map[string]bool{"10.0.0.1": true, "10.0.0.2": true}
 	if len(addrs) != 2 {
 		t.Fatalf("expected 2 endpoint addresses, got %d: %v", len(addrs), addrs)
@@ -747,43 +779,61 @@ func TestSynthesizeEndpointsMatchingPods(t *testing.T) {
 		}
 	}
 
-	// The subset must carry the Service's named port (name/port/protocol),
-	// exercising endpointPorts output.
-	ports := endpointPortsOf(ep)
+	// The slice must carry the Service's named port (name/port/protocol) in its
+	// top-level ports[], exercising endpointSlicePorts output.
+	ports := slicePortsOf(es)
 	if len(ports) != 1 {
-		t.Fatalf("expected exactly 1 endpoint subset port, got %d: %v", len(ports), ports)
+		t.Fatalf("expected exactly 1 top-level slice port, got %d: %v", len(ports), ports)
 	}
 	p := ports[0]
 	if name, _, _ := unstructured.NestedString(p, "name"); name != "http" {
-		t.Fatalf("expected endpoint port name 'http', got %q", name)
+		t.Fatalf("expected slice port name 'http', got %q", name)
 	}
 	if proto, _, _ := unstructured.NestedString(p, "protocol"); proto != "TCP" {
-		t.Fatalf("expected endpoint port protocol 'TCP', got %q", proto)
+		t.Fatalf("expected slice port protocol 'TCP', got %q", proto)
 	}
 	if num, found, _ := unstructured.NestedInt64(p, "port"); !found || num != 80 {
-		t.Fatalf("expected endpoint port 80, got %d (found=%v)", num, found)
+		t.Fatalf("expected slice port 80, got %d (found=%v)", num, found)
 	}
 
 	// Provenance + stable uid.
-	if ep.GetAnnotations()[SourceAnnotation] != "synthesized" {
-		t.Fatalf("expected Endpoints annotation %s=synthesized, got %q", SourceAnnotation, ep.GetAnnotations()[SourceAnnotation])
+	if es.GetAnnotations()[SourceAnnotation] != "synthesized" {
+		t.Fatalf("expected EndpointSlice annotation %s=synthesized, got %q", SourceAnnotation, es.GetAnnotations()[SourceAnnotation])
 	}
-	if string(ep.GetUID()) == "" {
-		t.Fatalf("expected Endpoints to carry a stable uid")
+	if string(es.GetUID()) == "" {
+		t.Fatalf("expected EndpointSlice to carry a stable uid")
 	}
 }
 
-// endpointPortsOf collects the ports of the first subset of an Endpoints object.
-func endpointPortsOf(ep *unstructured.Unstructured) []map[string]any {
-	subsets, _, _ := unstructured.NestedSlice(ep.Object, "subsets")
-	if len(subsets) == 0 {
-		return nil
+func TestEndpointSlicePortsAnonymousPortOmitsName(t *testing.T) {
+	// A Service port with no "name" (anonymous, legal for single-port services)
+	// must produce a slice port that OMITS the "name" key entirely — not one
+	// carrying name:"".
+	svc := newService("ns", "web", map[string]any{"app": "web"},
+		map[string]any{"port": int64(443), "protocol": "TCP"})
+
+	ports := endpointSlicePorts(svc)
+	if len(ports) != 1 {
+		t.Fatalf("expected exactly 1 slice port, got %d: %v", len(ports), ports)
 	}
-	sm, ok := subsets[0].(map[string]any)
+	p, ok := ports[0].(map[string]any)
 	if !ok {
-		return nil
+		t.Fatalf("expected slice port to be a map, got %T", ports[0])
 	}
-	raw, _, _ := unstructured.NestedSlice(sm, "ports")
+	if _, present := p["name"]; present {
+		t.Fatalf("expected no 'name' key for an anonymous port, got %v", p["name"])
+	}
+	if proto, _, _ := unstructured.NestedString(p, "protocol"); proto != "TCP" {
+		t.Fatalf("expected protocol 'TCP', got %q", proto)
+	}
+	if num, found, _ := unstructured.NestedInt64(p, "port"); !found || num != 443 {
+		t.Fatalf("expected port 443, got %d (found=%v)", num, found)
+	}
+}
+
+// slicePortsOf collects the top-level ports[] of an EndpointSlice object.
+func slicePortsOf(es *unstructured.Unstructured) []map[string]any {
+	raw, _, _ := unstructured.NestedSlice(es.Object, "ports")
 	out := make([]map[string]any, 0, len(raw))
 	for _, p := range raw {
 		if pm, ok := p.(map[string]any); ok {
@@ -795,7 +845,7 @@ func endpointPortsOf(ep *unstructured.Unstructured) []map[string]any {
 
 func TestMarkPodHealthyDistinctIPs(t *testing.T) {
 	// Two fabricated pods with distinct identities must get distinct podIPs so
-	// synthesizeEndpoints doesn't emit duplicate addresses.
+	// synthesizeEndpointSlices doesn't emit duplicate addresses.
 	p1 := newObj("v1", "Pod", "ns", "web-1")
 	p2 := newObj("v1", "Pod", "ns", "web-2")
 	markPodHealthy(p1)
@@ -818,21 +868,107 @@ func TestMarkPodHealthyDistinctIPs(t *testing.T) {
 	}
 }
 
-func TestSynthesizeEndpointsDistinctAddressesPerPod(t *testing.T) {
+func TestSynthesizeEndpointSlicesStampsTargetRefAndReady(t *testing.T) {
+	// A selector-matched Service must yield an EndpointSlice whose endpoint
+	// carries conditions.ready=true and a targetRef of kind=Pod with the matched
+	// pod's name/namespace/uid.
+	svc := newService("ns", "web", map[string]any{"app": "web"})
+	pod := newReadyPod("ns", "web-1", "10.0.0.1", map[string]any{"app": "web"})
+	pod.SetUID(types.UID("pod-uid-1"))
+
+	out := synthesizeEndpointSlices([]*unstructured.Unstructured{svc, pod})
+
+	es := sliceFor(out, "ns", "web")
+	if es == nil {
+		t.Fatalf("expected an EndpointSlice for service web in ns")
+	}
+
+	endpoints, _, _ := unstructured.NestedSlice(es.Object, "endpoints")
+	if len(endpoints) != 1 {
+		t.Fatalf("expected exactly 1 endpoint, got %d", len(endpoints))
+	}
+	em, ok := endpoints[0].(map[string]any)
+	if !ok {
+		t.Fatalf("endpoint[0] not a map: %T", endpoints[0])
+	}
+
+	// conditions.ready: true is stamped.
+	ready, found, _ := unstructured.NestedBool(em, "conditions", "ready")
+	if !found || !ready {
+		t.Fatalf("expected conditions.ready=true, got %v (found=%v)", ready, found)
+	}
+
+	refs := sliceTargetRefs(es)
+	if len(refs) != 1 {
+		t.Fatalf("expected exactly 1 endpoint targetRef, got %d: %v", len(refs), refs)
+	}
+	ref := refs[0]
+	if ref == nil {
+		t.Fatalf("expected the endpoint to carry a targetRef, got none")
+	}
+	if kind, _ := ref["kind"].(string); kind != "Pod" {
+		t.Fatalf("expected targetRef.kind=Pod, got %q", kind)
+	}
+	if name, _ := ref["name"].(string); name != "web-1" {
+		t.Fatalf("expected targetRef.name=web-1, got %q", name)
+	}
+	if ns, _ := ref["namespace"].(string); ns != "ns" {
+		t.Fatalf("expected targetRef.namespace=ns, got %q", ns)
+	}
+	if uid, _ := ref["uid"].(string); uid != "pod-uid-1" {
+		t.Fatalf("expected targetRef.uid=pod-uid-1, got %q", uid)
+	}
+}
+
+func TestSynthesizeEndpointSlicesOmitsEmptyTargetRefUID(t *testing.T) {
+	// A matched pod with no metadata.uid must yield a targetRef carrying only
+	// kind/name/namespace — the "uid" key is omitted, not present-and-empty, to
+	// stay faithful to real EndpointSlice shape.
+	svc := newService("ns", "web", map[string]any{"app": "web"})
+	pod := newReadyPod("ns", "web-1", "10.0.0.1", map[string]any{"app": "web"})
+	// pod has no UID set.
+
+	out := synthesizeEndpointSlices([]*unstructured.Unstructured{svc, pod})
+
+	es := sliceFor(out, "ns", "web")
+	if es == nil {
+		t.Fatalf("expected an EndpointSlice for service web in ns")
+	}
+	refs := sliceTargetRefs(es)
+	if len(refs) != 1 || refs[0] == nil {
+		t.Fatalf("expected exactly 1 non-nil targetRef, got %v", refs)
+	}
+	ref := refs[0]
+	if _, present := ref["uid"]; present {
+		t.Fatalf("expected uid key to be omitted for a pod with no metadata.uid, got %v", ref["uid"])
+	}
+	// kind/name/namespace are still present.
+	if kind, _ := ref["kind"].(string); kind != "Pod" {
+		t.Fatalf("expected targetRef.kind=Pod, got %q", kind)
+	}
+	if name, _ := ref["name"].(string); name != "web-1" {
+		t.Fatalf("expected targetRef.name=web-1, got %q", name)
+	}
+	if ns, _ := ref["namespace"].(string); ns != "ns" {
+		t.Fatalf("expected targetRef.namespace=ns, got %q", ns)
+	}
+}
+
+func TestSynthesizeEndpointSlicesDistinctAddressesPerPod(t *testing.T) {
 	// A Deployment with 3 replicas fabricates 3 pods; a matching Service must
-	// yield 3 distinct endpoint addresses (no shared literal IP).
+	// yield 3 distinct endpoint addresses (one per pod, no shared literal IP).
 	dep := newDeployment("ns", "web", new(int64(3)))
 	_ = unstructured.SetNestedMap(dep.Object, map[string]any{"app": "web"}, "spec", "template", "metadata", "labels")
 	svc := newService("ns", "web", map[string]any{"app": "web"})
 
 	objs := synthesizeWorkloads([]*unstructured.Unstructured{dep, svc})
-	objs = synthesizeEndpoints(objs)
+	objs = synthesizeEndpointSlices(objs)
 
-	ep := endpointsFor(objs, "ns", "web")
-	if ep == nil {
-		t.Fatalf("expected an Endpoints object named web in ns")
+	es := sliceFor(objs, "ns", "web")
+	if es == nil {
+		t.Fatalf("expected an EndpointSlice for service web in ns")
 	}
-	addrs := endpointAddresses(ep)
+	addrs := sliceAddresses(es)
 	if len(addrs) != 3 {
 		t.Fatalf("expected 3 endpoint addresses (one per fabricated pod), got %d: %v", len(addrs), addrs)
 	}
@@ -845,58 +981,66 @@ func TestSynthesizeEndpointsDistinctAddressesPerPod(t *testing.T) {
 	}
 }
 
-func TestSynthesizeEndpointsNoMatchingPods(t *testing.T) {
+func TestSynthesizeEndpointSlicesNoMatchingPods(t *testing.T) {
 	svc := newService("ns", "web", map[string]any{"app": "web"})
 	pod := newReadyPod("ns", "db-1", "10.0.0.9", map[string]any{"app": "db"})
 
-	out := synthesizeEndpoints([]*unstructured.Unstructured{svc, pod})
+	out := synthesizeEndpointSlices([]*unstructured.Unstructured{svc, pod})
 
-	ep := endpointsFor(out, "ns", "web")
-	if ep == nil {
-		t.Fatalf("expected an Endpoints object even with no matching pods")
+	es := sliceFor(out, "ns", "web")
+	if es == nil {
+		t.Fatalf("expected an EndpointSlice even with no matching pods")
 	}
-	if addrs := endpointAddresses(ep); len(addrs) != 0 {
+	if addrs := sliceAddresses(es); len(addrs) != 0 {
 		t.Fatalf("expected no endpoint addresses for non-matching selector, got %v", addrs)
+	}
+	// Even an empty slice must still carry the service-name label and addressType
+	// so the svc → endpointslice link and IPv4 shape survive.
+	if got := es.GetLabels()["kubernetes.io/service-name"]; got != "web" {
+		t.Fatalf("expected service-name label 'web' on empty slice, got %q", got)
+	}
+	if at, _, _ := unstructured.NestedString(es.Object, "addressType"); at != "IPv4" {
+		t.Fatalf("expected addressType 'IPv4' on empty slice, got %q", at)
 	}
 }
 
-func TestSynthesizeEndpointsSelectorless(t *testing.T) {
-	// A selectorless (headless / manually-managed) Service must not get a
-	// fabricated Endpoints object.
+func TestSynthesizeEndpointSlicesSelectorless(t *testing.T) {
+	// A selectorless (headless / ExternalName / manually-managed) Service must
+	// not get a fabricated EndpointSlice.
 	svc := newService("ns", "external", nil)
 	pod := newReadyPod("ns", "web-1", "10.0.0.1", map[string]any{"app": "web"})
 
-	out := synthesizeEndpoints([]*unstructured.Unstructured{svc, pod})
+	out := synthesizeEndpointSlices([]*unstructured.Unstructured{svc, pod})
 
-	if ep := endpointsFor(out, "ns", "external"); ep != nil {
-		t.Fatalf("expected no Endpoints fabricated for selectorless Service, got one")
+	if es := sliceFor(out, "ns", "external"); es != nil {
+		t.Fatalf("expected no EndpointSlice fabricated for selectorless Service, got one")
 	}
 }
 
-func TestSynthesizeEndpointsNamespaceScoped(t *testing.T) {
+func TestSynthesizeEndpointSlicesNamespaceScoped(t *testing.T) {
 	// A pod with matching labels in a different namespace must not be included.
 	svc := newService("ns", "web", map[string]any{"app": "web"})
 	same := newReadyPod("ns", "web-1", "10.0.0.1", map[string]any{"app": "web"})
 	otherNS := newReadyPod("other", "web-2", "10.9.9.9", map[string]any{"app": "web"})
 
-	out := synthesizeEndpoints([]*unstructured.Unstructured{svc, same, otherNS})
+	out := synthesizeEndpointSlices([]*unstructured.Unstructured{svc, same, otherNS})
 
-	ep := endpointsFor(out, "ns", "web")
-	if ep == nil {
-		t.Fatalf("expected Endpoints object for web")
+	es := sliceFor(out, "ns", "web")
+	if es == nil {
+		t.Fatalf("expected EndpointSlice for web")
 	}
-	addrs := endpointAddresses(ep)
+	addrs := sliceAddresses(es)
 	if len(addrs) != 1 || addrs[0] != "10.0.0.1" {
 		t.Fatalf("expected only the in-namespace pod ip, got %v", addrs)
 	}
 }
 
-func TestSynthesizeEndpointsReturnsOriginals(t *testing.T) {
+func TestSynthesizeEndpointSlicesReturnsOriginals(t *testing.T) {
 	svc := newService("ns", "web", map[string]any{"app": "web"})
 	pod := newReadyPod("ns", "web-1", "10.0.0.1", map[string]any{"app": "web"})
 	in := []*unstructured.Unstructured{svc, pod}
 
-	out := synthesizeEndpoints(in)
+	out := synthesizeEndpointSlices(in)
 
 	var sawSvc, sawPod bool
 	for _, o := range out {
@@ -910,6 +1054,112 @@ func TestSynthesizeEndpointsReturnsOriginals(t *testing.T) {
 	if !sawSvc || !sawPod {
 		t.Fatalf("expected originals to be returned (svc=%v pod=%v)", sawSvc, sawPod)
 	}
+}
+
+// --- end-to-end resolver parity test ---
+//
+// Fabricate an EndpointSlice + matching pods exactly as the manifest pipeline
+// does, upsert them into a k8s.Store (dual-keyed under their namespace and the
+// "" all-namespaces bucket, mirroring manifest Load), and assert
+// workload.FindPodsByEndpointSlice resolves the backing pods exactly once. This
+// guards the manifest-mode endpointslice → pods drilldown against the real
+// resolver.
+
+// e2ePodsPlugin is a minimal pods plugin for the resolver parity test.
+type e2ePodsPlugin struct{}
+
+func (e2ePodsPlugin) Name() string      { return "pods" }
+func (e2ePodsPlugin) ShortName() string { return "po" }
+func (e2ePodsPlugin) GVR() schema.GroupVersionResource {
+	return workload.PodsGVR
+}
+func (e2ePodsPlugin) IsClusterScoped() bool          { return false }
+func (e2ePodsPlugin) Columns() []plugin.Column       { return nil }
+func (e2ePodsPlugin) Row(*unstructured.Unstructured) []string {
+	return nil
+}
+func (e2ePodsPlugin) YAML(*unstructured.Unstructured) (render.Content, error) {
+	return render.Content{}, nil
+}
+func (e2ePodsPlugin) Describe(context.Context, *unstructured.Unstructured) (render.Content, error) {
+	return render.Content{}, nil
+}
+
+func TestEndpointSliceResolvesPodsEndToEnd(t *testing.T) {
+	plugin.Reset()
+	t.Cleanup(plugin.Reset)
+	plugin.Register(e2ePodsPlugin{})
+
+	// Build a Service + 2 matching pods + 1 non-matching pod, then run the
+	// manifest synthesis steps to fabricate the EndpointSlice.
+	svc := newService("ns", "web", map[string]any{"app": "web"})
+	pod1 := newReadyPod("ns", "web-1", "10.0.0.1", map[string]any{"app": "web"})
+	pod1.SetUID(types.UID("pod-uid-1"))
+	pod2 := newReadyPod("ns", "web-2", "10.0.0.2", map[string]any{"app": "web"})
+	pod2.SetUID(types.UID("pod-uid-2"))
+	other := newReadyPod("ns", "db-1", "10.0.0.9", map[string]any{"app": "db"})
+
+	objs := synthesizeEndpointSlices([]*unstructured.Unstructured{svc, pod1, pod2, other})
+
+	es := sliceFor(objs, "ns", "web")
+	if es == nil {
+		t.Fatalf("expected a fabricated EndpointSlice for service web")
+	}
+
+	// Upsert every object into the store dual-keyed (own namespace + the ""
+	// all-namespaces bucket), mirroring how manifest Load populates the cache.
+	store := k8s.NewStore(nil, "", nil)
+	for _, o := range objs {
+		gvr := gvrForKind(o.GetKind())
+		ns := o.GetNamespace()
+		store.CacheUpsert(gvr, ns, o)
+		if ns != "" {
+			store.CacheUpsert(gvr, "", o)
+		}
+	}
+	cl := plugintest.NewFakeClusterWithDiscovery(store, k8s.NewDiscovery())
+
+	gotPlugin, gotPods := workload.FindPodsByEndpointSlice(cl, es)
+	if gotPlugin == nil || gotPlugin.Name() != "pods" {
+		t.Fatalf("expected pods plugin, got %v", gotPlugin)
+	}
+	if len(gotPods) != 2 {
+		t.Fatalf("expected exactly 2 backing pods, got %d: %v", len(gotPods), podNames(gotPods))
+	}
+	seen := map[string]int{}
+	for _, p := range gotPods {
+		seen[p.GetName()]++
+	}
+	if seen["web-1"] != 1 || seen["web-2"] != 1 {
+		t.Fatalf("expected web-1 and web-2 exactly once each, got %v", seen)
+	}
+	if seen["db-1"] != 0 {
+		t.Fatalf("did not expect the non-matching pod db-1, got %v", seen)
+	}
+}
+
+// gvrForKind maps the handful of kinds in the e2e test to their GVR. An
+// unrecognized kind panics rather than silently mis-storing it, so adding a new
+// fabricated kind without updating this mapping fails the test loudly.
+func gvrForKind(kind string) schema.GroupVersionResource {
+	switch kind {
+	case "Pod":
+		return workload.PodsGVR
+	case "EndpointSlice":
+		return workload.EndpointSlicesGVR
+	case "Service":
+		return workload.ServicesGVR
+	default:
+		panic(fmt.Sprintf("gvrForKind: unmapped kind %q", kind))
+	}
+}
+
+func podNames(pods []*unstructured.Unstructured) []string {
+	out := make([]string, 0, len(pods))
+	for _, p := range pods {
+		out = append(out, p.GetName())
+	}
+	return out
 }
 
 func keys(m map[string]*unstructured.Unstructured) []string {

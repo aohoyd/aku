@@ -191,6 +191,35 @@ metadata:
 	}
 }
 
+func TestLoadEndpointSliceNoGuessWarning(t *testing.T) {
+	// EndpointSlice is a built-in kind: it must resolve to discovery.k8s.io/v1
+	// endpointslices via the static table, never the guessPlural fallback, so no
+	// "guessed plural" warning fires for it.
+	in := `apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: web-abc
+  namespace: foo
+addressType: IPv4
+`
+	cl, warns, err := Load(strings.NewReader(in), "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, w := range warns {
+		if strings.Contains(w.Reason, "EndpointSlice") {
+			t.Fatalf("expected no guessed-plural warning for EndpointSlice, got %q", w.Reason)
+		}
+	}
+	gvr, ok := cl.Discovery().ResolveGVR("discovery.k8s.io/v1", "EndpointSlice")
+	if !ok {
+		t.Fatalf("expected to resolve discovery.k8s.io/v1 EndpointSlice")
+	}
+	if gvr.Group != "discovery.k8s.io" || gvr.Version != "v1" || gvr.Resource != "endpointslices" {
+		t.Fatalf("expected discovery.k8s.io/v1 endpointslices, got %+v", gvr)
+	}
+}
+
 func TestLoadGuessedKindIsListable(t *testing.T) {
 	// An unknown/CRD kind must remain browsable: resolvable via discovery AND
 	// listable from the store under both its namespace and the all-namespaces

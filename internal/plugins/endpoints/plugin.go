@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -13,7 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var gvr = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "endpoints"}
+var gvr = workload.EndpointsGVR
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes Endpoints.
 type Plugin struct{}

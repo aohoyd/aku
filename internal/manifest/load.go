@@ -61,6 +61,9 @@ var builtinKinds = map[string]kindMeta{
 	"Job":     {"batch", "v1", "jobs", true},
 	"CronJob": {"batch", "v1", "cronjobs", true},
 
+	// discovery.k8s.io/v1
+	"EndpointSlice": {"discovery.k8s.io", "v1", "endpointslices", true},
+
 	// networking.k8s.io/v1
 	"Ingress":       {"networking.k8s.io", "v1", "ingresses", true},
 	"IngressClass":  {"networking.k8s.io", "v1", "ingressclasses", false},
@@ -105,7 +108,7 @@ var builtinKinds = map[string]kindMeta{
 
 // Load builds a static cluster.Cluster from a single manifest stream. The
 // pipeline is Parse → assignNamespaces → synthesizeWorkloads →
-// synthesizeEndpoints; the resulting objects are upserted into a client-less
+// synthesizeEndpointSlices; the resulting objects are upserted into a client-less
 // Store (dual-keyed under their namespace and the all-namespaces "" bucket) and
 // the per-kind GVRs are seeded into a Discovery index. The returned Cluster
 // reports Connected() == false because it carries no client.
@@ -133,7 +136,7 @@ func Load(r io.Reader, defaultNS string) (*cluster.Cluster, []Warning, error) {
 
 	objs = assignNamespaces(objs, defaultNS)
 	objs = synthesizeWorkloads(objs)
-	objs = synthesizeEndpoints(objs)
+	objs = synthesizeEndpointSlices(objs)
 
 	store := k8s.NewStore(nil, ContextName, nil)
 	// The manifest store is static and client-less: its cache is the only copy of

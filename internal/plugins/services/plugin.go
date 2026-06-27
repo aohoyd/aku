@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/aohoyd/aku/internal/plugin"
+	"github.com/aohoyd/aku/internal/plugins/workload"
 	"github.com/aohoyd/aku/internal/render"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -13,9 +14,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var gvr = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "services"}
+var gvr = workload.ServicesGVR
 
-// Plugin implements plugin.ResourcePlugin for Kubernetes Services.
+// Plugin implements plugin.ResourcePlugin and plugin.DrillDowner for Kubernetes Services.
 type Plugin struct{}
 
 // New creates a new Service plugin.
@@ -164,6 +165,13 @@ func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (
 	}
 
 	return b.Build(), nil
+}
+
+// DrillDown implements plugin.DrillDowner: svc → endpointslice. It returns the
+// EndpointSlice objects backing this Service (kubernetes.io/service-name label
+// match), delegating to the single resolver workload.FindEndpointSlicesForService.
+func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	return workload.FindEndpointSlicesForService(cl, obj)
 }
 
 // toService converts an unstructured object to a typed corev1.Service.

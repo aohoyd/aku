@@ -68,3 +68,79 @@ Manifest provenance rides as the `manifest.SourceAnnotation`
 (`aku.dev/manifest-source`) metadata annotation: the `# Source:` path for parsed
 objects, the literal `"synthesized"` for fabricated ones. It surfaces in the YAML
 view for every kind for free — do not add per-plugin describe plumbing for it.
+
+### Nav-stack direction invariant
+
+The per-pane nav stack grows in **multiple** directions, encoded on each frame as
+`NavSnapshot.Direction NavDirection` (an enum, not a bool): `NavChild` (the zero
+value — Enter/`enter-detail`, via the `DrillDowner.DrillDown` method, child-ward),
+`NavParent` (Backspace/`nav-parent`, via `DrillUp`, parent-ward), and `NavNode`
+(`gN`/`oN`, via `GoToNode`, the pod→hosting-node jump). Escape is the single linear
+unwind that pops any kind. `refreshDrillDownSplit` MUST switch on `snap.Direction`
+BEFORE the `snap.Plugin.(plugin.DrillDowner)` type-assert: **any non-`NavChild`
+direction branches before the `DrillDowner` assert**, because a `NavParent`/`NavNode`
+frame's `snap.Plugin` is itself a `DrillDowner` (e.g. pods → containers), so falling
+through would re-run that drill-down and clobber the view. On the `NavParent` branch
+it delegates to `refreshParentWardSplit` (`internal/app/app.go`), which re-fetches the
+source child (via `resolveSnapSourceObject`) and re-runs `DrillUp` to rebuild the
+parent. Parent resolution goes through the per-plugin `DrillUp` interface. For
+ownerRef-based parents this delegates to the single `workload.FindParentByOwnerRef`
+(ownerReferences-based, `controller: true` preferred, else first) — never re-read
+`metadata.ownerReferences` inline elsewhere; add a `DrillUp` method instead. Not
+every parent is ownerRef-based, though: non-owned parents (e.g. endpointslices → service,
+which carry no ownerReference) instead resolve through a label-match resolver
+(`workload.FindServiceForEndpointSlice`) per the Service↔EndpointSlice drilldown invariant
+below — still behind a `DrillUp` method, just not via `FindParentByOwnerRef`.
+
+On the `NavNode` branch it delegates to `refreshNodeWardSplit` (`internal/app/app.go`),
+which re-fetches the source pod (via `resolveSnapSourceObject`) and re-runs the source
+plugin's `GoToNode` to rebuild the single-node view. Crucially — and symmetrically with
+`refreshParentWardSplit`'s `DrillUp` route — it asserts `snap.Plugin.(plugin.NodeLinker)`
+and calls that, NOT `workload.FindNodeForPod` directly: a `NavNode` frame's `snap.Plugin`
+is the SOURCE plugin (pods), which IS a `NodeLinker`, so this is the inverse-symmetric of
+the parent-ward `DrillUp` route. Pod→node resolution thus goes through the per-plugin
+`plugin.NodeLinker` interface (`GoToNode`, implemented by pods), which delegates to the
+single `workload.FindNodeForPod` (reads `spec.nodeName`, resolves the `nodes` plugin,
+reads the cluster-scoped `""` bucket) — the inverse of `workload.FindPodsByNodeName`, and
+the single source for pod→node resolution; never re-read `spec.nodeName` inline elsewhere.
+
+`refreshParentWardSplit` and `refreshNodeWardSplit` both deliberately return WITHOUT
+calling `SetObjects` when the source object can't be found, or when `DrillUp` yields a
+nil parent / `GoToNode` yields a nil (or not-yet-cached) node (e.g. the target
+store bucket isn't synced yet) — they leave the view unchanged so the next
+`ResourceUpdatedMsg` can retry. This is the opposite of the child-ward path, which
+`SetObjects` even on an empty child set.
+
+`ResourceList.navFloor` is Escape's pop floor. The clear-overlay pop guard in
+`commands.go` is `Depth() > NavFloor()`, NOT `InDrillDown()`. Split-opened drills
+(`split-children`/`split-parent`/`split-nav-node`) `SetNavFloor(1)` so they live-refresh
+(`InDrillDown()`, which stays `Depth() > 0`, still triggers `refreshDrillDownSplits`)
+yet Escape can't unwind past their home drill into a root the split never showed.
+In-pane drills keep `navFloor = 0`.
+
+### Service↔EndpointSlice drilldown invariant
+
+The `svc → endpointslice → pods` chain and its `endpointslice → svc` parent-ward
+`DrillUp` are **label-matched** via `kubernetes.io/service-name`, NOT name-matched
+and NOT ownerRef-based: an EndpointSlice carries the `kubernetes.io/service-name`
+label pointing at its Service, and a Service may have N sharded slices — so these
+drilldowns do NOT go through `workload.FindParentByOwnerRef`.
+`workload.FindEndpointSlicesForService` (svc→slices, label match in the svc
+namespace, returns N), `workload.FindPodsByEndpointSlice` (slice→pods, scanning the
+FLAT `endpoints[]` for `targetRef` with `kind == "Pod"`, INCLUDING all regardless
+of `conditions.ready`, deduped by `targetRef.uid` when present else the resolved
+pod's namespace/name composite — NOT the pod's `GetUID()`, which would collapse
+distinct blank-uid pods), and `workload.FindServiceForEndpointSlice` (slice→svc
+`DrillUp`, label match in the slice namespace) are the ONLY resolvers — never
+re-scan `endpoints[].targetRef` or re-match by the `kubernetes.io/service-name`
+label inline elsewhere; add a method/delegate instead. The
+`services`/`endpointslices` plugins reference `workload.ServicesGVR` /
+`workload.EndpointSlicesGVR` as the single-source GVRs (mirroring `nodes` →
+`workload.NodesGVR`) — never redefine the literals. The manifest fabricator
+(`internal/manifest/synth.go` `fabricateEndpointSlice`) stamps the
+`kubernetes.io/service-name` label, a flat `endpoints[]` with `targetRef`
+(`kind:Pod` and `name` always present; `namespace` and `uid` included when
+non-empty and omitted otherwise), `conditions.ready: true`, and top-level
+`ports[]` — so manifest-mode `endpointslice → pods` resolves through the same
+`FindPodsByEndpointSlice` path as a live cluster. The `endpoints` plugin is now a
+plain listable/describable resource with no drilldown.
