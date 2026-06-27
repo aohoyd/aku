@@ -115,6 +115,12 @@ func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (p
 	return pp, pods
 }
 
+// DrillUp implements plugin.DrillUp. A ReplicaSet's owner is its Deployment; the
+// shared ownerReference helper resolves it.
+func (p *Plugin) DrillUp(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return workload.FindParentByOwnerRef(cl, obj)
+}
+
 // toReplicaSet converts an unstructured object to a typed appsv1.ReplicaSet.
 func toReplicaSet(obj *unstructured.Unstructured) (*appsv1.ReplicaSet, error) {
 	var rs appsv1.ReplicaSet

@@ -110,6 +110,13 @@ func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (p
 	return jp, children
 }
 
+// DrillUp implements plugin.DrillUp. A CronJob is a top-level controller; the
+// shared ownerReference helper resolves any owner (e.g. an operator CR) and
+// returns (nil, nil) when there is none — so an ownerless CronJob stays a no-op.
+func (p *Plugin) DrillUp(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return workload.FindParentByOwnerRef(cl, obj)
+}
+
 // formatLastSchedule returns a human-readable duration since status.lastScheduleTime.
 func formatLastSchedule(obj *unstructured.Unstructured) string {
 	ts, found, _ := unstructured.NestedString(obj.Object, "status", "lastScheduleTime")

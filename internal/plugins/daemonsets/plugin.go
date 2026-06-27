@@ -156,6 +156,13 @@ func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (p
 	return pp, pods
 }
 
+// DrillUp implements plugin.DrillUp. A DaemonSet is usually a top-level
+// controller, but it may be owned by an operator CR; the shared ownerReference
+// helper resolves any owner and returns (nil, nil) when there is none.
+func (p *Plugin) DrillUp(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return workload.FindParentByOwnerRef(cl, obj)
+}
+
 // toDaemonSet converts an unstructured object to a typed appsv1.DaemonSet.
 func toDaemonSet(obj *unstructured.Unstructured) (*appsv1.DaemonSet, error) {
 	var ds appsv1.DaemonSet

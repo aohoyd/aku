@@ -31,6 +31,58 @@ func TestKeyTrieSequenceGP(t *testing.T) {
 	}
 }
 
+func TestKeyTrieSequenceGNNavNode(t *testing.T) {
+	trie := DefaultKeyTrie()
+
+	cmd, _, resolved := trie.Press("g")
+	if resolved {
+		t.Fatal("'g' should not resolve immediately")
+	}
+
+	// Capital 'N' is distinct from lowercase 'n' and must resolve to nav-node.
+	cmd, _, resolved = trie.Press("N")
+	if !resolved || cmd != "nav-node" {
+		t.Fatalf("expected resolved 'nav-node', got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
+func TestKeyTrieSequenceGNNamespacesUnchanged(t *testing.T) {
+	trie := DefaultKeyTrie()
+	trie.Press("g")
+
+	// Lowercase 'n' must still resolve to goto-namespaces (no collision with gN).
+	cmd, _, resolved := trie.Press("n")
+	if !resolved || cmd != "goto-namespaces" {
+		t.Fatalf("expected resolved 'goto-namespaces', got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
+func TestKeyTrieSequenceONSplitNavNode(t *testing.T) {
+	trie := DefaultKeyTrie()
+
+	cmd, _, resolved := trie.Press("o")
+	if resolved {
+		t.Fatal("'o' should not resolve immediately")
+	}
+
+	// Capital 'N' is distinct from lowercase 'n' and must resolve to split-nav-node.
+	cmd, _, resolved = trie.Press("N")
+	if !resolved || cmd != "split-nav-node" {
+		t.Fatalf("expected resolved 'split-nav-node', got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
+func TestKeyTrieSequenceONNamespacesUnchanged(t *testing.T) {
+	trie := DefaultKeyTrie()
+	trie.Press("o")
+
+	// Lowercase 'n' must still resolve to split-namespaces (no collision with oN).
+	cmd, _, resolved := trie.Press("n")
+	if !resolved || cmd != "split-namespaces" {
+		t.Fatalf("expected resolved 'split-namespaces', got resolved=%v cmd='%s'", resolved, cmd)
+	}
+}
+
 func TestKeyTrieSequenceGM(t *testing.T) {
 	trie := DefaultKeyTrie()
 
@@ -275,6 +327,28 @@ func TestEscResolvesClearOverlay(t *testing.T) {
 	cmd, _, resolved := trie.Press("esc")
 	if !resolved || cmd != "clear-overlay" {
 		t.Fatalf("esc should resolve to clear-overlay, got resolved=%v cmd=%q", resolved, cmd)
+	}
+}
+
+func TestBackspaceResolvesNavParent(t *testing.T) {
+	trie := DefaultKeyTrie() // resources scope + pods
+	cmd, _, resolved := trie.Press("backspace")
+	if !resolved || cmd != "nav-parent" {
+		t.Fatalf("backspace should resolve to nav-parent in resources scope, got resolved=%v cmd=%q", resolved, cmd)
+	}
+
+	// nav-parent is scoped to "resources": backspace must NOT resolve to it in
+	// other scopes (e.g. details/logs), guarding against an accidental all-scope
+	// binding.
+	bs := NewBindingSet(DefaultBindings())
+	for _, scope := range []string{"details", "logs"} {
+		t.Run(scope, func(t *testing.T) {
+			trie := bs.TrieFor(scope, "pods")
+			cmd, _, _ := trie.Press("backspace")
+			if cmd == "nav-parent" {
+				t.Fatalf("backspace must not resolve to nav-parent in %q scope", scope)
+			}
+		})
 	}
 }
 

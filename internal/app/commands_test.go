@@ -26,6 +26,7 @@ import (
 	"github.com/aohoyd/aku/internal/plugins/portforwards"
 	"github.com/aohoyd/aku/internal/portforward"
 	"github.com/aohoyd/aku/internal/render"
+	"github.com/aohoyd/aku/internal/ui"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -2276,7 +2277,7 @@ func TestReloadAllWithDrillDown(t *testing.T) {
 	children := []*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "container-1"}}},
 	}
-	focused.PushNav(containersPlugin, children, "pod-1", "uid-1", "", "")
+	focused.PushNav(containersPlugin, children, "pod-1", "uid-1", "", "", ui.NavChild)
 
 	if !focused.InDrillDown() {
 		t.Fatal("expected to be in drill-down")
@@ -2360,7 +2361,7 @@ func TestRefreshDrillDownSplitsParentGVRMatch(t *testing.T) {
 	focused := app.layout.FocusedSplit()
 	focused.SetObjects([]*unstructured.Unstructured{notReadyPod})
 	children := containers.ExtractContainers(notReadyPod)
-	focused.PushNav(containersPlugin, children, "pod-1", "pod-uid-1", "v1", "Pod")
+	focused.PushNav(containersPlugin, children, "pod-1", "pod-uid-1", "v1", "Pod", ui.NavChild)
 
 	if !focused.InDrillDown() {
 		t.Fatal("expected to be in drill-down")
@@ -2443,7 +2444,7 @@ func TestRefreshDrillDownSplitsChildGVRMatch(t *testing.T) {
 	focused := app.layout.FocusedSplit()
 	focused.SetObjects([]*unstructured.Unstructured{dep})
 	// Drill down: child plugin is the real pods plugin (GVR v1/pods).
-	focused.PushNav(childPlugin, []*unstructured.Unstructured{}, "dep-1", "dep-uid-1", "apps/v1", "Deployment")
+	focused.PushNav(childPlugin, []*unstructured.Unstructured{}, "dep-1", "dep-uid-1", "apps/v1", "Deployment", ui.NavChild)
 
 	if !focused.InDrillDown() {
 		t.Fatal("expected to be in drill-down")
@@ -2498,7 +2499,7 @@ func TestRefreshDrillDownSplitsUnrelatedGVRNoMatch(t *testing.T) {
 	focused := app.layout.FocusedSplit()
 	focused.SetObjects([]*unstructured.Unstructured{notReadyPod})
 	children := containers.ExtractContainers(notReadyPod)
-	focused.PushNav(containersPlugin, children, "pod-1", "pod-uid-1", "v1", "Pod")
+	focused.PushNav(containersPlugin, children, "pod-1", "pod-uid-1", "v1", "Pod", ui.NavChild)
 
 	if !focused.InDrillDown() {
 		t.Fatal("expected to be in drill-down")
@@ -2530,6 +2531,1006 @@ func TestRefreshDrillDownSplitsUnrelatedGVRNoMatch(t *testing.T) {
 	}
 	if r {
 		t.Fatal("unrelated GVR update must NOT refresh the split; expected stale ready=false")
+	}
+}
+
+// mockDrillUpPlugin is a child plugin (e.g. pods) that also implements
+// plugin.DrillUp. DrillUp resolves the source child's owner live from a store
+// keyed by the parent GVR, so a refresh re-running DrillUp observes whatever is
+// currently cached — exercising the lazy/async parent-ward refresh path.
+type mockDrillUpPlugin struct {
+	mockPlugin
+	parentPlugin plugin.ResourcePlugin
+	store        *k8s.Store
+	parentGVR    schema.GroupVersionResource
+}
+
+// DrillDown makes mockDrillUpPlugin a DrillDowner too — mirroring real child
+// plugins (pods IS a DrillDowner) — so the test guards that the parent-ward
+// branch intercepts BEFORE the DrillDowner assertion in refreshDrillDownSplit.
+// drillDownSentinel is the clearly-distinct object mockDrillUpPlugin.DrillDown
+// returns. If a parent-ward refresh ever fell through to the child-ward
+// DrillDown path, this name would appear in the refreshed view — letting tests
+// assert against it directly rather than relying on it merely differing from the
+// expected DrillUp result.
+const drillDownSentinel = "CHILD-WARD-DRILLDOWN-SENTINEL"
+
+func (m *mockDrillUpPlugin) DrillDown(_ plugin.Cluster, _ *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	return nil, []*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": drillDownSentinel}}},
+	}
+}
+
+func (m *mockDrillUpPlugin) DrillUp(_ plugin.Cluster, child *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	refs := child.GetOwnerReferences()
+	if len(refs) == 0 {
+		return m.parentPlugin, nil
+	}
+	ownerUID := string(refs[0].UID)
+	for _, obj := range m.store.List(m.parentGVR, "default") {
+		if string(obj.GetUID()) == ownerUID {
+			return m.parentPlugin, obj
+		}
+	}
+	return m.parentPlugin, nil
+}
+
+// mockNodeLinkerPlugin is a pods-like plugin that also implements
+// plugin.NodeLinker. GoToNode resolves the source pod's hosting Node live from a
+// store keyed by the nodes GVR (matching spec.nodeName against cached Node
+// names), so a refresh re-running GoToNode observes whatever is currently
+// cached — exercising the lazy/async node-ward refresh path. It mirrors
+// mockDrillUpPlugin (which is the source plugin for parent-ward frames): the
+// source plugin for a node-ward frame is the pods plugin, which IS a NodeLinker.
+type mockNodeLinkerPlugin struct {
+	mockDrillUpPlugin
+	nodePlugin plugin.ResourcePlugin
+	nodesGVR   schema.GroupVersionResource
+}
+
+// GoToNode mirrors the real pods plugin's NodeLinker: it follows the pod's
+// spec.nodeName to the matching cached Node. Returns (nodePlugin, nil) when the
+// node bucket isn't synced yet (lazy/async path), exactly like FindNodeForPod.
+func (m *mockNodeLinkerPlugin) GoToNode(_ plugin.Cluster, pod *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	if pod == nil {
+		return nil, nil
+	}
+	nodeName, _, _ := unstructured.NestedString(pod.Object, "spec", "nodeName")
+	if nodeName == "" {
+		return nil, nil
+	}
+	for _, n := range m.store.List(m.nodesGVR, "") {
+		if n.GetName() == nodeName {
+			return m.nodePlugin, n
+		}
+	}
+	return m.nodePlugin, nil
+}
+
+// podOwnedBy builds a pod carrying a single controller ownerReference to the
+// given parent UID. The pod itself lives in the child (pods) bucket.
+func podOwnedBy(name, uid, ownerUID string) *unstructured.Unstructured {
+	pod := &unstructured.Unstructured{}
+	pod.SetAPIVersion("v1")
+	pod.SetKind("Pod")
+	pod.SetName(name)
+	pod.SetNamespace("default")
+	pod.SetUID(types.UID(uid))
+	pod.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "rs-1",
+		UID:        types.UID(ownerUID),
+		Controller: new(true),
+	}})
+	return pod
+}
+
+// TestRefreshDrillDownSplitParentWard verifies the parent-ward branch of
+// refreshDrillDownSplit: a pane currently showing a parent (RS) that was pushed
+// via Direction=NavParent (snap.Plugin = the pods child, snap.ParentUID = the pod's
+// UID) reconstructs the parent from the pod's ownerRef on refresh and calls
+// SetObjects([parent]). Critically, snap.Plugin is ALSO a DrillDowner, so this
+// also guards that the parent-ward branch intercepts before the child-ward path.
+func TestRefreshDrillDownSplitParentWard(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+
+	// The source pod (the child Backspace was pressed on) lives in the pods
+	// bucket; the parent RS lives in the replicasets bucket.
+	pod := podOwnedBy("pod-1", "pod-uid-1", "rs-uid-1")
+	store.CacheUpsert(podsGVR, "default", pod)
+
+	rs := &unstructured.Unstructured{}
+	rs.SetAPIVersion("apps/v1")
+	rs.SetKind("ReplicaSet")
+	rs.SetName("rs-1")
+	rs.SetNamespace("default")
+	rs.SetUID("rs-uid-1")
+	store.CacheUpsert(rsGVR, "default", rs)
+
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: rsGVR}
+	childPlugin := &mockDrillUpPlugin{
+		mockPlugin:   mockPlugin{name: "pods", gvr: podsGVR},
+		parentPlugin: rsPlugin,
+		store:        store,
+		parentGVR:    rsGVR,
+	}
+
+	// Build the pane viewing pods, then Backspace: PushNav snapshots the pods
+	// plugin as snap.Plugin (the child) and switches the view to the RS parent.
+	app.layout.AddSplit(childPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{pod})
+	focused.PushNav(rsPlugin, []*unstructured.Unstructured{}, "pod-1", "pod-uid-1", "v1", "Pod", ui.NavParent)
+
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after parent-ward push")
+	}
+	if focused.Plugin().Name() != "replicasets" {
+		t.Fatalf("expected view to show replicasets, got %q", focused.Plugin().Name())
+	}
+	depthBefore := focused.Depth()
+
+	app.refreshDrillDownSplit(focused)
+
+	if focused.Len() != 1 {
+		t.Fatalf("expected parent-ward refresh to set 1 parent object, got %d", focused.Len())
+	}
+	got := focused.Selected()
+	if got == nil {
+		t.Fatal("expected a reconstructed parent object, got nil")
+	}
+	// Direct guard: the parent-ward branch must NOT fall through to the
+	// child-ward DrillDown path, which would surface the DrillDown sentinel.
+	if got.GetName() == drillDownSentinel {
+		t.Fatal("parent-ward frame fell through to the child-ward DrillDown path")
+	}
+	if got.GetName() != "rs-1" {
+		t.Fatalf("expected reconstructed parent 'rs-1' (DrillUp result), got %q", got.GetName())
+	}
+	// The refresh must not unwind the nav stack.
+	if !focused.InDrillDown() {
+		t.Fatal("refresh must leave the pane in drill-down (no accidental PopNav)")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("refresh must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+}
+
+// TestRefreshDrillDownSplitParentWardLazyStore exercises the async case: the
+// parent (RS) bucket starts empty, so refreshDrillDownSplit must NOT clobber the
+// view (it returns, leaving the empty set). Once the RS is added to the store and
+// a ResourceUpdatedMsg for the parent GVR is delivered, refreshDrillDownSplits
+// selects the parent-ward split (its split.Plugin().GVR() is the parent GVR) and
+// fills the view with the parent.
+func TestRefreshDrillDownSplitParentWardLazyStore(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+
+	pod := podOwnedBy("pod-1", "pod-uid-1", "rs-uid-1")
+	store.CacheUpsert(podsGVR, "default", pod)
+	// NOTE: the RS parent is intentionally NOT in the store yet.
+
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: rsGVR}
+	childPlugin := &mockDrillUpPlugin{
+		mockPlugin:   mockPlugin{name: "pods", gvr: podsGVR},
+		parentPlugin: rsPlugin,
+		store:        store,
+		parentGVR:    rsGVR,
+	}
+	plugin.Register(rsPlugin)
+	plugin.Register(childPlugin)
+	t.Cleanup(plugin.Reset)
+
+	app.layout.AddSplit(childPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{pod})
+	// Push an EMPTY parent view (parent not synced yet), Direction=NavParent.
+	focused.PushNav(rsPlugin, []*unstructured.Unstructured{}, "pod-1", "pod-uid-1", "v1", "Pod", ui.NavParent)
+
+	if focused.Len() != 0 {
+		t.Fatalf("precondition: expected empty parent view, got %d", focused.Len())
+	}
+	depthBefore := focused.Depth()
+
+	// First refresh with the parent still missing: must NOT clobber (stays empty).
+	app.refreshDrillDownSplit(focused)
+	if focused.Len() != 0 {
+		t.Fatalf("lazy-store: expected refresh to leave view empty (no clobber), got %d", focused.Len())
+	}
+	if !focused.InDrillDown() {
+		t.Fatal("lazy-store: must remain in drill-down after no-op refresh")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("lazy-store: no-op refresh must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+
+	// The RS informer syncs: add the parent, then deliver the parent-GVR update.
+	rs := &unstructured.Unstructured{}
+	rs.SetAPIVersion("apps/v1")
+	rs.SetKind("ReplicaSet")
+	rs.SetName("rs-1")
+	rs.SetNamespace("default")
+	rs.SetUID("rs-uid-1")
+	store.CacheUpsert(rsGVR, "default", rs)
+
+	model, _ := app.update(k8s.ResourceUpdatedMsg{GVR: rsGVR, Namespace: "default"})
+	app = model.(App)
+
+	focused = app.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to remain in drill-down after parent-GVR update")
+	}
+	if focused.Len() != 1 {
+		t.Fatalf("expected parent-GVR update to fill parent view to 1, got %d", focused.Len())
+	}
+	if got := focused.Selected(); got == nil || got.GetName() != "rs-1" {
+		t.Fatalf("expected filled parent 'rs-1', got %v", got)
+	}
+}
+
+// TestRefreshParentWardSplitNilChildNoOp guards the `if child == nil { return }`
+// line in refreshParentWardSplit: when snap.ParentUID matches no object in the
+// child's store bucket (resolveSnapSourceObject returns nil), the refresh is a
+// pure no-op — the view objects are left untouched, DrillUp is never invoked,
+// and the pane stays in drill-down at the same depth (no panic, no PopNav).
+func TestRefreshParentWardSplitNilChildNoOp(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+
+	// The store has a pod, but its UID does NOT match snap.ParentUID below, so
+	// resolveSnapSourceObject cannot find the source child.
+	pod := podOwnedBy("pod-1", "pod-uid-1", "rs-uid-1")
+	store.CacheUpsert(podsGVR, "default", pod)
+
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: rsGVR}
+	childPlugin := &mockDrillUpPlugin{
+		mockPlugin:   mockPlugin{name: "pods", gvr: podsGVR},
+		parentPlugin: rsPlugin,
+		store:        store,
+		parentGVR:    rsGVR,
+	}
+
+	app.layout.AddSplit(childPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{pod})
+	// Seed a sentinel parent object, then Backspace with a ParentUID that matches
+	// NO pod in the store, so resolveSnapSourceObject returns nil.
+	sentinel := &unstructured.Unstructured{}
+	sentinel.SetAPIVersion("apps/v1")
+	sentinel.SetKind("ReplicaSet")
+	sentinel.SetName("seeded-parent")
+	sentinel.SetUID("seeded-uid")
+	focused.PushNav(rsPlugin, []*unstructured.Unstructured{sentinel}, "ghost-pod", "MISSING-pod-uid", "v1", "Pod", ui.NavParent)
+
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after parent-ward push")
+	}
+	lenBefore := focused.Len()
+	depthBefore := focused.Depth()
+
+	app.refreshDrillDownSplit(focused) // must be a no-op (nil child)
+
+	if focused.Len() != lenBefore {
+		t.Fatalf("nil-child refresh must not change view objects: before=%d after=%d", lenBefore, focused.Len())
+	}
+	if got := focused.Selected(); got == nil || got.GetName() != "seeded-parent" {
+		t.Fatalf("nil-child refresh must leave the seeded view intact, got %v", got)
+	}
+	if !focused.InDrillDown() {
+		t.Fatal("nil-child refresh must leave the pane in drill-down (no PopNav)")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("nil-child refresh must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+}
+
+// podOnNodeUID builds a pod scheduled onto the given node (spec.nodeName),
+// carrying the given UID. The "UID" suffix is deliberate: the second parameter is
+// a UID (matching this package's podOwnedBy(name, uid, ownerUID) convention), NOT
+// a namespace — unlike the same-named podOnNode/podWithNodeName helpers in the
+// pods and workload packages, whose second parameter is a namespace. The pod
+// itself lives in the child (pods) bucket; the resolver re-fetches it by UID, then
+// FindNodeForPod maps spec.nodeName → the Node object.
+func podOnNodeUID(name, uid, nodeName string) *unstructured.Unstructured {
+	pod := &unstructured.Unstructured{}
+	pod.SetAPIVersion("v1")
+	pod.SetKind("Pod")
+	pod.SetName(name)
+	pod.SetNamespace("default")
+	pod.SetUID(types.UID(uid))
+	_ = unstructured.SetNestedField(pod.Object, nodeName, "spec", "nodeName")
+	return pod
+}
+
+// nodeObj builds a cluster-scoped Node object with the given name.
+func nodeObj(name string) *unstructured.Unstructured {
+	node := &unstructured.Unstructured{}
+	node.SetAPIVersion("v1")
+	node.SetKind("Node")
+	node.SetName(name)
+	return node
+}
+
+// TestRefreshDrillDownSplitNodeWard verifies the node-ward branch of
+// refreshDrillDownSplit: a pane currently showing a Node that was pushed via
+// Direction=NavNode (snap.Plugin = the pods source, snap.ParentUID = the pod's
+// UID) reconstructs the Node from the pod's spec.nodeName on refresh and calls
+// SetObjects([node]). snap.Plugin is ALSO a DrillDowner, so this also guards
+// that the node-ward branch intercepts BEFORE the child-ward DrillDown path.
+func TestRefreshDrillDownSplitNodeWard(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	nodesGVR := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+
+	// The source pod (the one nav-node was triggered on) lives in the pods
+	// bucket; the Node lives in the nodes "" bucket (cluster-scoped).
+	pod := podOnNodeUID("pod-1", "pod-uid-1", "node-a")
+	store.CacheUpsert(podsGVR, "default", pod)
+	store.CacheUpsert(nodesGVR, "", nodeObj("node-a"))
+
+	nodesPlugin := &mockClusterPlugin{mockPlugin: mockPlugin{name: "nodes", gvr: nodesGVR}}
+	podsPlugin := &mockNodeLinkerPlugin{
+		mockDrillUpPlugin: mockDrillUpPlugin{
+			mockPlugin: mockPlugin{name: "pods", gvr: podsGVR},
+			store:      store,
+		},
+		nodePlugin: nodesPlugin,
+		nodesGVR:   nodesGVR,
+	}
+	plugin.Register(nodesPlugin)
+	plugin.Register(podsPlugin)
+	t.Cleanup(plugin.Reset)
+
+	// Build the pane viewing pods, then nav-node: PushNav snapshots the pods
+	// plugin as snap.Plugin (the source) and switches the view to the Node.
+	app.layout.AddSplit(podsPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{pod})
+	focused.PushNav(nodesPlugin, []*unstructured.Unstructured{}, "pod-1", "pod-uid-1", "v1", "Pod", ui.NavNode)
+
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after node-ward push")
+	}
+	if focused.Plugin().Name() != "nodes" {
+		t.Fatalf("expected view to show nodes, got %q", focused.Plugin().Name())
+	}
+	depthBefore := focused.Depth()
+
+	app.refreshDrillDownSplit(focused)
+
+	if focused.Len() != 1 {
+		t.Fatalf("expected node-ward refresh to set 1 node object, got %d", focused.Len())
+	}
+	got := focused.Selected()
+	if got == nil {
+		t.Fatal("expected a reconstructed node object, got nil")
+	}
+	// Direct guard: the node-ward branch must NOT fall through to the child-ward
+	// DrillDown path, which would surface the DrillDown sentinel.
+	if got.GetName() == drillDownSentinel {
+		t.Fatal("node-ward frame fell through to the child-ward DrillDown path")
+	}
+	if got.GetName() != "node-a" {
+		t.Fatalf("expected reconstructed node 'node-a' (GoToNode result), got %q", got.GetName())
+	}
+	if !focused.InDrillDown() {
+		t.Fatal("refresh must leave the pane in drill-down (no accidental PopNav)")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("refresh must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+}
+
+// TestRefreshNodeWardSplitMissingPodNoOp guards the `if pod == nil { return }`
+// line in refreshNodeWardSplit: when snap.ParentUID matches no pod in the pods
+// store bucket (resolveSnapSourceObject returns nil), the refresh is a pure
+// no-op — the view objects are left untouched and the pane stays in drill-down.
+func TestRefreshNodeWardSplitMissingPodNoOp(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	nodesGVR := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+
+	// The store has a pod, but its UID does NOT match snap.ParentUID below, so
+	// resolveSnapSourceObject cannot find the source pod.
+	pod := podOnNodeUID("pod-1", "pod-uid-1", "node-a")
+	store.CacheUpsert(podsGVR, "default", pod)
+	store.CacheUpsert(nodesGVR, "", nodeObj("node-a"))
+
+	nodesPlugin := &mockClusterPlugin{mockPlugin: mockPlugin{name: "nodes", gvr: nodesGVR}}
+	podsPlugin := &mockNodeLinkerPlugin{
+		mockDrillUpPlugin: mockDrillUpPlugin{
+			mockPlugin: mockPlugin{name: "pods", gvr: podsGVR},
+			store:      store,
+		},
+		nodePlugin: nodesPlugin,
+		nodesGVR:   nodesGVR,
+	}
+	plugin.Register(nodesPlugin)
+	plugin.Register(podsPlugin)
+	t.Cleanup(plugin.Reset)
+
+	app.layout.AddSplit(podsPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{pod})
+	// Seed a sentinel node, then nav-node with a ParentUID that matches NO pod in
+	// the store, so resolveSnapSourceObject returns nil.
+	sentinel := nodeObj("seeded-node")
+	focused.PushNav(nodesPlugin, []*unstructured.Unstructured{sentinel}, "ghost-pod", "MISSING-pod-uid", "v1", "Pod", ui.NavNode)
+
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after node-ward push")
+	}
+	lenBefore := focused.Len()
+	depthBefore := focused.Depth()
+
+	app.refreshDrillDownSplit(focused) // must be a no-op (nil pod)
+
+	if focused.Len() != lenBefore {
+		t.Fatalf("missing-pod refresh must not change view objects: before=%d after=%d", lenBefore, focused.Len())
+	}
+	if got := focused.Selected(); got == nil || got.GetName() != "seeded-node" {
+		t.Fatalf("missing-pod refresh must leave the seeded view intact, got %v", got)
+	}
+	if !focused.InDrillDown() {
+		t.Fatal("missing-pod refresh must leave the pane in drill-down (no PopNav)")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("missing-pod refresh must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+}
+
+// TestRefreshNodeWardSplitUncachedNodeNoOp guards the `if node == nil { return }`
+// line: the source pod resolves, but its Node is not yet in the store (the nodes
+// informer hasn't synced), so FindNodeForPod returns (plugin, nil). The refresh
+// must NOT clobber the view — it leaves the existing objects so a later
+// ResourceUpdatedMsg(nodesGVR) can retry.
+func TestRefreshNodeWardSplitUncachedNodeNoOp(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	nodesGVR := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+
+	pod := podOnNodeUID("pod-1", "pod-uid-1", "node-a")
+	store.CacheUpsert(podsGVR, "default", pod)
+	// NOTE: the Node is intentionally NOT in the store yet — GoToNode
+	// returns (nodesPlugin, nil).
+
+	nodesPlugin := &mockClusterPlugin{mockPlugin: mockPlugin{name: "nodes", gvr: nodesGVR}}
+	podsPlugin := &mockNodeLinkerPlugin{
+		mockDrillUpPlugin: mockDrillUpPlugin{
+			mockPlugin: mockPlugin{name: "pods", gvr: podsGVR},
+			store:      store,
+		},
+		nodePlugin: nodesPlugin,
+		nodesGVR:   nodesGVR,
+	}
+	plugin.Register(nodesPlugin)
+	plugin.Register(podsPlugin)
+	t.Cleanup(plugin.Reset)
+
+	app.layout.AddSplit(podsPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{pod})
+	// Push an EMPTY node view (node not synced yet), Direction=NavNode.
+	focused.PushNav(nodesPlugin, []*unstructured.Unstructured{}, "pod-1", "pod-uid-1", "v1", "Pod", ui.NavNode)
+
+	if focused.Len() != 0 {
+		t.Fatalf("precondition: expected empty node view, got %d", focused.Len())
+	}
+	depthBefore := focused.Depth()
+
+	app.refreshDrillDownSplit(focused) // must be a no-op (nil node)
+
+	if focused.Len() != 0 {
+		t.Fatalf("uncached-node: expected refresh to leave view empty (no clobber), got %d", focused.Len())
+	}
+	if !focused.InDrillDown() {
+		t.Fatal("uncached-node: must remain in drill-down after no-op refresh")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("uncached-node: no-op refresh must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+}
+
+// TestNavParentPushesLazyParentWardFrame: nav-parent when DrillUp resolves a
+// parent plugin but the parent object is not yet synced (obj == nil) pushes a
+// parent-ward frame with ZERO objects. Depth grows, the parent plugin becomes
+// current, and ParentSnap().Direction == NavParent — the view fills
+// asynchronously on the next parent-GVR ResourceUpdatedMsg.
+func TestNavParentPushesLazyParentWardFrame(t *testing.T) {
+	a := newTestApp()
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: rsGVR}
+	child := &navParentStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		parent:     rsPlugin,
+		obj:        nil, // parent not synced yet — lazy path
+	}
+	a.layout.AddSplit(child, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+	depthBefore := a.layout.FocusedSplit().Depth()
+
+	result, _ := a.executeCommand("nav-parent")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after lazy nav-parent push")
+	}
+	if focused.Depth() != depthBefore+1 {
+		t.Fatalf("expected Depth to grow by 1: before=%d after=%d", depthBefore, focused.Depth())
+	}
+	if focused.Plugin().Name() != "replicasets" {
+		t.Fatalf("expected current plugin 'replicasets', got %q", focused.Plugin().Name())
+	}
+	if focused.Len() != 0 {
+		t.Fatalf("expected zero objects in the lazy parent view, got %d", focused.Len())
+	}
+	snap, ok := focused.ParentSnap()
+	if !ok {
+		t.Fatal("expected a parent snapshot after lazy nav-parent push")
+	}
+	if snap.Direction != ui.NavParent {
+		t.Fatal("expected the pushed frame to have Direction=NavParent")
+	}
+}
+
+// TestSplitParentLazyOpensFloorPinnedSplit: split-parent when DrillUp resolves a
+// parent plugin but no parent object yet (obj == nil) opens a floor-pinned split
+// with zero objects, the parent plugin current, and a parent-ward (Direction ==
+// NavParent) frame.
+func TestSplitParentLazyOpensFloorPinnedSplit(t *testing.T) {
+	a := newTestApp()
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: rsGVR}
+	child := &navParentStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		parent:     rsPlugin,
+		obj:        nil, // lazy: parent not synced yet
+	}
+	a.layout.AddSplit(child, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-parent")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before+1 {
+		t.Fatalf("expected SplitCount %d after split-parent, got %d", before+1, a.layout.SplitCount())
+	}
+	newSplit := a.layout.FocusedSplit()
+	if !newSplit.InDrillDown() {
+		t.Fatal("new split should be in drill-down")
+	}
+	if newSplit.NavFloor() != 1 {
+		t.Fatalf("expected NavFloor 1, got %d", newSplit.NavFloor())
+	}
+	if newSplit.Plugin().Name() != "replicasets" {
+		t.Fatalf("expected parent plugin 'replicasets' current, got %q", newSplit.Plugin().Name())
+	}
+	if newSplit.Len() != 0 {
+		t.Fatalf("expected zero objects in the lazy parent split, got %d", newSplit.Len())
+	}
+	snap, ok := newSplit.ParentSnap()
+	if !ok {
+		t.Fatal("expected a parent snapshot")
+	}
+	if snap.Direction != ui.NavParent {
+		t.Fatal("expected pushed frame Direction=NavParent")
+	}
+}
+
+// TestRefreshDrillDownSplitsParentWardNamespaceGuard verifies refreshDrillDownSplits'
+// namespace filter for a parent-ward split: a ResourceUpdatedMsg for a DIFFERENT
+// namespace than the split's effective namespace does NOT refresh it, while a
+// matching-namespace update DOES fill the parent view.
+func TestRefreshDrillDownSplitsParentWardNamespaceGuard(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+
+	pod := podOwnedBy("pod-1", "pod-uid-1", "rs-uid-1")
+	store.CacheUpsert(podsGVR, "default", pod)
+
+	rs := &unstructured.Unstructured{}
+	rs.SetAPIVersion("apps/v1")
+	rs.SetKind("ReplicaSet")
+	rs.SetName("rs-1")
+	rs.SetNamespace("default")
+	rs.SetUID("rs-uid-1")
+	store.CacheUpsert(rsGVR, "default", rs)
+
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: rsGVR}
+	childPlugin := &mockDrillUpPlugin{
+		mockPlugin:   mockPlugin{name: "pods", gvr: podsGVR},
+		parentPlugin: rsPlugin,
+		store:        store,
+		parentGVR:    rsGVR,
+	}
+
+	app.layout.AddSplit(childPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{pod})
+	// Empty parent view, Direction=NavParent: only a refresh fills it.
+	focused.PushNav(rsPlugin, []*unstructured.Unstructured{}, "pod-1", "pod-uid-1", "v1", "Pod", ui.NavParent)
+
+	if focused.EffectiveNamespace() != "default" {
+		t.Fatalf("precondition: expected effective namespace 'default', got %q", focused.EffectiveNamespace())
+	}
+
+	// Update for a DIFFERENT namespace must be filtered out (no refresh).
+	app.refreshDrillDownSplits(rsGVR, "other-ns")
+	if focused.Len() != 0 {
+		t.Fatalf("mismatched-namespace update must not refresh the parent-ward split, got len=%d", focused.Len())
+	}
+
+	// Update for the MATCHING namespace must refresh and fill the parent.
+	app.refreshDrillDownSplits(rsGVR, "default")
+	if focused.Len() != 1 {
+		t.Fatalf("matching-namespace update must fill the parent view to 1, got %d", focused.Len())
+	}
+	if got := focused.Selected(); got == nil || got.GetName() != "rs-1" {
+		t.Fatalf("expected filled parent 'rs-1', got %v", got)
+	}
+}
+
+// navParentStub is a child plugin (e.g. pods) implementing plugin.DrillUp with
+// fixed return values, used to drive the nav-parent command's branches: a
+// resolvable parent (parent != nil), an unresolvable/ownerless owner
+// (parent == nil), and an absent object (obj == nil, async refresh fills it).
+type navParentStub struct {
+	mockPlugin
+	parent plugin.ResourcePlugin
+	obj    *unstructured.Unstructured
+}
+
+func (m *navParentStub) DrillUp(_ plugin.Cluster, _ *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return m.parent, m.obj
+}
+
+// TestNavParentPushesParentWardFrame: nav-parent on a resource whose plugin
+// implements DrillUp and resolves an owner pushes a parent-ward (Direction ==
+// NavParent) frame and makes the parent plugin current.
+func TestNavParentPushesParentWardFrame(t *testing.T) {
+	a := newTestApp()
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: rsGVR}
+	rsObj := &unstructured.Unstructured{
+		Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}},
+	}
+	child := &navParentStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		parent:     rsPlugin,
+		obj:        rsObj,
+	}
+	a.layout.AddSplit(child, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+
+	result, _ := a.executeCommand("nav-parent")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after nav-parent push")
+	}
+	if focused.Plugin().Name() != "replicasets" {
+		t.Fatalf("expected current plugin 'replicasets', got %q", focused.Plugin().Name())
+	}
+	snap, ok := focused.ParentSnap()
+	if !ok {
+		t.Fatal("expected a parent snapshot after nav-parent push")
+	}
+	if snap.Direction != ui.NavParent {
+		t.Fatal("expected the pushed frame to have Direction=NavParent")
+	}
+	if focused.Len() != 1 || focused.Selected().GetName() != "rs-1" {
+		t.Fatalf("expected the parent object 'rs-1' in the view, got len=%d", focused.Len())
+	}
+}
+
+// TestNavParentOwnerlessNoop: nav-parent when DrillUp returns a nil plugin (no
+// owner / unresolvable) is a no-op (no new frame, Depth unchanged).
+func TestNavParentOwnerlessNoop(t *testing.T) {
+	a := newTestApp()
+	child := &navParentStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		parent:     nil, // ownerless: no navigable parent
+		obj:        nil,
+	}
+	a.layout.AddSplit(child, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+	depthBefore := a.layout.FocusedSplit().Depth()
+
+	result, _ := a.executeCommand("nav-parent")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if focused.InDrillDown() {
+		t.Fatal("ownerless nav-parent must be a no-op (not in drill-down)")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("ownerless nav-parent must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+	if focused.Plugin().Name() != "pods" {
+		t.Fatalf("expected plugin unchanged 'pods', got %q", focused.Plugin().Name())
+	}
+}
+
+// TestNavParentNoDrillUpNoop: nav-parent on a plugin that does NOT implement
+// DrillUp is a no-op.
+func TestNavParentNoDrillUpNoop(t *testing.T) {
+	a := newTestApp()
+	// mockPlugin does not implement plugin.DrillUp.
+	p := &mockPlugin{name: "configmaps", gvr: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}}
+	a.layout.AddSplit(p, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "cm-1"}}},
+	})
+
+	result, _ := a.executeCommand("nav-parent")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if focused.InDrillDown() {
+		t.Fatal("nav-parent on a non-DrillUp plugin must be a no-op")
+	}
+	if focused.Plugin().Name() != "configmaps" {
+		t.Fatalf("expected plugin unchanged 'configmaps', got %q", focused.Plugin().Name())
+	}
+}
+
+// TestNavParentNilSelectionNoop: nav-parent with no selection is a plain no-op.
+func TestNavParentNilSelectionNoop(t *testing.T) {
+	a := newTestApp()
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}}
+	child := &navParentStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		parent:     rsPlugin,
+		obj:        &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}}},
+	}
+	a.layout.AddSplit(child, "default", "")
+	// No SetObjects → empty list → Selected() == nil.
+
+	if a.layout.FocusedSplit().Selected() != nil {
+		t.Fatal("precondition: expected nil selection")
+	}
+
+	result, _ := a.executeCommand("nav-parent")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if focused.InDrillDown() {
+		t.Fatal("nav-parent with nil selection must be a no-op")
+	}
+}
+
+// TestNavParentThenEscapePopsBack: after a successful nav-parent push, Escape
+// (clear-overlay) pops back to the child view (Depth decremented).
+func TestNavParentThenEscapePopsBack(t *testing.T) {
+	a := newTestApp()
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: rsGVR}
+	child := &navParentStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		parent:     rsPlugin,
+		obj:        &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}}},
+	}
+	a.layout.AddSplit(child, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+
+	result, _ := a.executeCommand("nav-parent")
+	a = result.(App)
+	focused := a.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after nav-parent")
+	}
+	depthAfterPush := focused.Depth()
+
+	result, _ = a.executeCommand("clear-overlay")
+	a = result.(App)
+
+	focused = a.layout.FocusedSplit()
+	if focused.Depth() != depthAfterPush-1 {
+		t.Fatalf("expected Escape to decrement Depth: push=%d after-esc=%d", depthAfterPush, focused.Depth())
+	}
+	if focused.InDrillDown() {
+		t.Fatal("expected to be back at the child view (not in drill-down) after Escape")
+	}
+	if focused.Plugin().Name() != "pods" {
+		t.Fatalf("expected child plugin 'pods' after Escape, got %q", focused.Plugin().Name())
+	}
+}
+
+// bidiPlugin is a child/parent-capable plugin used by the worked-example e2e
+// test below. It implements BOTH plugin.DrillDowner (Enter / child-ward) and
+// plugin.DrillUp (Backspace / parent-ward) with per-instance, fully controllable
+// return values, so a deploy→rs→pods→rs→deploy sequence can be driven
+// deterministically without a live store. A nil childPlugin / parentPlugin makes
+// the respective direction a no-op (mirroring a root or a leaf).
+type bidiPlugin struct {
+	mockPlugin
+	childPlugin  plugin.ResourcePlugin
+	children     []*unstructured.Unstructured
+	parentPlugin plugin.ResourcePlugin
+	parentObj    *unstructured.Unstructured
+}
+
+func (m *bidiPlugin) DrillDown(_ plugin.Cluster, _ *unstructured.Unstructured) (plugin.ResourcePlugin, []*unstructured.Unstructured) {
+	return m.childPlugin, m.children
+}
+
+func (m *bidiPlugin) DrillUp(_ plugin.Cluster, _ *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return m.parentPlugin, m.parentObj
+}
+
+func namedObj(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": name}}}
+}
+
+// TestDrillUpDownWorkedExampleStack is the acceptance e2e for the feature: it
+// drives the worked example from the plan end-to-end through executeCommand:
+//
+//	deploy1 ─enter→ rs1 ─enter→ pods1 ─bspc→ rs2 ─bspc→ deploy2   (stack grows to 4)
+//	deploy2 ─esc→ rs2 ─esc→ pods1 ─esc→ rs1 ─esc→ deploy1         (LIFO unwind)
+//
+// It asserts (a) child-ward (Enter) and parent-ward (Backspace) frames coexist on
+// a single nav stack — the bottom two frames are Direction==NavChild (Enter), the
+// top two Direction==NavParent (Backspace) — and (b) Escape pops them in strict LIFO
+// order, one frame per Escape, regardless of the direction that pushed them, all
+// the way back to the root.
+func TestDrillUpDownWorkedExampleStack(t *testing.T) {
+	a := newTestApp()
+
+	deployGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+
+	// pods view: enter would go to containers (unused here); bspc → owning RS (rs2).
+	podPlugin := &bidiPlugin{
+		mockPlugin: mockPlugin{name: "pods", gvr: podsGVR},
+	}
+	// rs view: enter → pods (pods1); bspc → owning Deployment (deploy2).
+	rsPlugin := &bidiPlugin{
+		mockPlugin:  mockPlugin{name: "replicasets", gvr: rsGVR},
+		childPlugin: podPlugin,
+		children:    []*unstructured.Unstructured{namedObj("pods1")},
+	}
+	// deploy view (root): enter → rs (rs1); bspc → nil (deployments are roots).
+	deployPlugin := &bidiPlugin{
+		mockPlugin:  mockPlugin{name: "deployments", gvr: deployGVR},
+		childPlugin: rsPlugin,
+		children:    []*unstructured.Unstructured{namedObj("rs1")},
+	}
+	// Wire the parent-ward returns: pods → rs2, rs → deploy2.
+	podPlugin.parentPlugin = rsPlugin
+	podPlugin.parentObj = namedObj("rs2")
+	rsPlugin.parentPlugin = deployPlugin
+	rsPlugin.parentObj = namedObj("deploy2")
+
+	a.layout.AddSplit(deployPlugin, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{namedObj("deploy1")})
+
+	// ── Drill child-ward twice (Enter): deploy1 → rs1 → pods1 ──────────────
+	result, _ := a.executeCommand("enter-detail")
+	a = result.(App)
+	if got := a.layout.FocusedSplit().Plugin().Name(); got != "replicasets" {
+		t.Fatalf("after enter ×1 expected 'replicasets', got %q", got)
+	}
+	result, _ = a.executeCommand("enter-detail")
+	a = result.(App)
+	if got := a.layout.FocusedSplit().Plugin().Name(); got != "pods" {
+		t.Fatalf("after enter ×2 expected 'pods', got %q", got)
+	}
+
+	// ── Navigate parent-ward twice (Backspace): pods → rs2 → deploy2 ───────
+	result, _ = a.executeCommand("nav-parent")
+	a = result.(App)
+	if got := a.layout.FocusedSplit().Plugin().Name(); got != "replicasets" {
+		t.Fatalf("after bspc ×1 expected 'replicasets', got %q", got)
+	}
+	if got := a.layout.FocusedSplit().Selected().GetName(); got != "rs2" {
+		t.Fatalf("after bspc ×1 expected parent object 'rs2', got %q", got)
+	}
+	result, _ = a.executeCommand("nav-parent")
+	a = result.(App)
+	if got := a.layout.FocusedSplit().Plugin().Name(); got != "deployments" {
+		t.Fatalf("after bspc ×2 expected 'deployments', got %q", got)
+	}
+	if got := a.layout.FocusedSplit().Selected().GetName(); got != "deploy2" {
+		t.Fatalf("after bspc ×2 expected parent object 'deploy2', got %q", got)
+	}
+
+	// ── Stack must be 4 deep: bottom two Enter (child-ward), top two
+	//    Backspace (parent-ward). Both directions coexist on one stack. ─────
+	focused := a.layout.FocusedSplit()
+	if focused.Depth() != 4 {
+		t.Fatalf("expected nav-stack Depth 4 (2 enter + 2 bspc), got %d", focused.Depth())
+	}
+
+	// ── Escape ×4 unwinds in strict LIFO, one frame per Escape, back to root.
+	//    The top frame's Direction (read via ParentSnap before each pop) must
+	//    follow the push order top→bottom: bspc, bspc, enter, enter — proving the
+	//    two child-ward and two parent-ward frames coexist on one stack and pop in
+	//    strict LIFO regardless of direction.
+	type step struct {
+		topDir ui.NavDirection // Direction of the frame popped by THIS escape (current top)
+		plugin string          // restored plugin name after the pop
+		sel    string          // restored selection after the pop
+		depth  int             // stack depth after the pop
+	}
+	steps := []step{
+		{ui.NavParent, "replicasets", "rs2", 3},    // pop parent-ward pods frame → rs2 view
+		{ui.NavParent, "pods", "pods1", 2},         // pop parent-ward rs frame → pods1 view
+		{ui.NavChild, "replicasets", "rs1", 1},     // pop child-ward rs frame → rs1 view
+		{ui.NavChild, "deployments", "deploy1", 0}, // pop child-ward deploy frame → root
+	}
+	for i, s := range steps {
+		snap, ok := a.layout.FocusedSplit().ParentSnap()
+		if !ok {
+			t.Fatalf("escape #%d: expected a top frame before pop", i+1)
+		}
+		if snap.Direction != s.topDir {
+			t.Fatalf("escape #%d: top frame Direction = %v, want %v", i+1, snap.Direction, s.topDir)
+		}
+
+		result, _ = a.executeCommand("clear-overlay")
+		a = result.(App)
+		f := a.layout.FocusedSplit()
+		if f.Depth() != s.depth {
+			t.Fatalf("escape #%d: expected Depth %d, got %d", i+1, s.depth, f.Depth())
+		}
+		if got := f.Plugin().Name(); got != s.plugin {
+			t.Fatalf("escape #%d: expected plugin %q, got %q", i+1, s.plugin, got)
+		}
+		if got := f.Selected().GetName(); got != s.sel {
+			t.Fatalf("escape #%d: expected selection %q, got %q", i+1, s.sel, got)
+		}
+	}
+
+	if a.layout.FocusedSplit().InDrillDown() {
+		t.Fatal("after 4 escapes the stack must be fully unwound (not in drill-down)")
 	}
 }
 
@@ -8147,5 +9148,697 @@ func TestNamespacePicker_NonPinnedOffline_DoesNotUseStore(t *testing.T) {
 		if item == "prod" || item == "staging" {
 			t.Fatalf("non-pinned offline cluster leaked store namespace %q into picker: %v", item, got.nsPicker.Filtered())
 		}
+	}
+}
+
+// ── split-children / split-parent (o enter / o backspace) ──────────────────
+//
+// These chords open the selected resource's children/parent in a NEW split
+// that drills exactly one level (like in-pane enter/bspc) but whose Escape
+// cannot unwind past its home drill (NavFloor==1).
+
+// TestSplitChildrenOpensFloorPinnedSplit verifies split-children creates a new
+// split rooted at the current plugin, drilled one level child-ward, with
+// NavFloor==1 protecting the home drill against clear-overlay.
+func TestSplitChildrenOpensFloorPinnedSplit(t *testing.T) {
+	a := newTestApp()
+	childPlugin := &mockPlugin{
+		name: "containers",
+		gvr:  schema.GroupVersionResource{Group: "_ktui", Version: "v1", Resource: "containers"},
+	}
+	childObj := &unstructured.Unstructured{
+		Object: map[string]any{"metadata": map[string]any{"name": "nginx"}},
+	}
+	drillable := &mockDrillablePlugin{
+		mockPlugin:  mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		childPlugin: childPlugin,
+		children:    []*unstructured.Unstructured{childObj},
+	}
+	a.layout.AddSplit(drillable, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-children")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before+1 {
+		t.Fatalf("expected SplitCount %d after split-children, got %d", before+1, a.layout.SplitCount())
+	}
+
+	newSplit := a.layout.FocusedSplit()
+	if !newSplit.InDrillDown() {
+		t.Fatal("new split should be in drill-down")
+	}
+	if newSplit.NavFloor() != 1 {
+		t.Fatalf("expected NavFloor 1, got %d", newSplit.NavFloor())
+	}
+	if newSplit.Plugin().Name() != "containers" {
+		t.Fatalf("expected child plugin 'containers' current, got %q", newSplit.Plugin().Name())
+	}
+	if newSplit.Depth() != 1 {
+		t.Fatalf("expected Depth 1 after drill, got %d", newSplit.Depth())
+	}
+
+	// Escape (clear-overlay) must NOT unwind past the home drill: Depth stays 1.
+	result, _ = a.executeCommand("clear-overlay")
+	a = result.(App)
+	floored := a.layout.FocusedSplit()
+	if floored.Depth() != 1 {
+		t.Fatalf("clear-overlay must not pop below NavFloor: expected Depth 1, got %d", floored.Depth())
+	}
+	if !floored.InDrillDown() {
+		t.Fatal("floored split must remain in drill-down after clear-overlay")
+	}
+}
+
+// TestSplitParentOpensFloorPinnedSplit verifies split-parent creates a new
+// split drilled one level parent-ward, with NavFloor==1 and a parent-ward
+// (Direction == NavParent) frame.
+func TestSplitParentOpensFloorPinnedSplit(t *testing.T) {
+	a := newTestApp()
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: rsGVR}
+	rsObj := &unstructured.Unstructured{
+		Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}},
+	}
+	child := &navParentStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		parent:     rsPlugin,
+		obj:        rsObj,
+	}
+	a.layout.AddSplit(child, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-parent")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before+1 {
+		t.Fatalf("expected SplitCount %d after split-parent, got %d", before+1, a.layout.SplitCount())
+	}
+
+	newSplit := a.layout.FocusedSplit()
+	if !newSplit.InDrillDown() {
+		t.Fatal("new split should be in drill-down")
+	}
+	if newSplit.NavFloor() != 1 {
+		t.Fatalf("expected NavFloor 1, got %d", newSplit.NavFloor())
+	}
+	if newSplit.Plugin().Name() != "replicasets" {
+		t.Fatalf("expected parent plugin 'replicasets' current, got %q", newSplit.Plugin().Name())
+	}
+	snap, ok := newSplit.ParentSnap()
+	if !ok {
+		t.Fatal("expected a parent snapshot")
+	}
+	if snap.Direction != ui.NavParent {
+		t.Fatal("expected pushed frame Direction=NavParent")
+	}
+
+	// Escape (clear-overlay) must not pop below the floor.
+	result, _ = a.executeCommand("clear-overlay")
+	a = result.(App)
+	if a.layout.FocusedSplit().Depth() != 1 {
+		t.Fatalf("clear-overlay must not pop below NavFloor: expected Depth 1, got %d", a.layout.FocusedSplit().Depth())
+	}
+}
+
+// TestSplitChildrenNoSelectionNoop: split-children with no selection makes no
+// new split.
+func TestSplitChildrenNoSelectionNoop(t *testing.T) {
+	a := newTestApp()
+	childPlugin := &mockPlugin{name: "containers", gvr: schema.GroupVersionResource{Group: "_ktui", Version: "v1", Resource: "containers"}}
+	drillable := &mockDrillablePlugin{
+		mockPlugin:  mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		childPlugin: childPlugin,
+		children:    []*unstructured.Unstructured{{Object: map[string]any{"metadata": map[string]any{"name": "nginx"}}}},
+	}
+	a.layout.AddSplit(drillable, "default", "")
+	// No SetObjects → nil selection.
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-children")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before {
+		t.Fatalf("split-children with no selection must not create a split: before=%d after=%d", before, a.layout.SplitCount())
+	}
+}
+
+// TestSplitChildrenNoDrillDownerNoop: split-children on a plugin that is not a
+// DrillDowner makes no new split.
+func TestSplitChildrenNoDrillDownerNoop(t *testing.T) {
+	a := newTestApp()
+	// mockPlugin does not implement DrillDowner.
+	p := &mockPlugin{name: "configmaps", gvr: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}}
+	a.layout.AddSplit(p, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "cm-1"}}},
+	})
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-children")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before {
+		t.Fatalf("split-children on a non-DrillDowner must not create a split: before=%d after=%d", before, a.layout.SplitCount())
+	}
+}
+
+// TestSplitParentNoSelectionNoop: split-parent with no selection makes no new
+// split.
+func TestSplitParentNoSelectionNoop(t *testing.T) {
+	a := newTestApp()
+	rsPlugin := &mockPlugin{name: "replicasets", gvr: schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}}
+	child := &navParentStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		parent:     rsPlugin,
+		obj:        &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}}},
+	}
+	a.layout.AddSplit(child, "default", "")
+	// No SetObjects → nil selection.
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-parent")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before {
+		t.Fatalf("split-parent with no selection must not create a split: before=%d after=%d", before, a.layout.SplitCount())
+	}
+}
+
+// TestSplitParentNoDrillUpNoop: split-parent on a plugin that is not a DrillUp
+// makes no new split.
+func TestSplitParentNoDrillUpNoop(t *testing.T) {
+	a := newTestApp()
+	// mockPlugin does not implement DrillUp.
+	p := &mockPlugin{name: "configmaps", gvr: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}}
+	a.layout.AddSplit(p, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "cm-1"}}},
+	})
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-parent")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before {
+		t.Fatalf("split-parent on a non-DrillUp must not create a split: before=%d after=%d", before, a.layout.SplitCount())
+	}
+}
+
+// ── nav-node / split-nav-node (gN / oN) ────────────────────────────────────
+//
+// nav-node mirrors nav-parent but follows spec.nodeName via the NodeLinker
+// interface (GoToNode) rather than ownerReferences. split-nav-node opens the
+// hosting Node in a NEW floor-pinned split.
+
+// navNodeStub is a pods-like plugin implementing plugin.NodeLinker with fixed
+// return values, used to drive nav-node's branches: a scheduled pod (node !=
+// nil → returns the nodes plugin + node) and an unscheduled pod (node == nil &&
+// nodePlugin == nil → GoToNode returns nothing navigable).
+type navNodeStub struct {
+	mockPlugin
+	nodePlugin plugin.ResourcePlugin
+	node       *unstructured.Unstructured
+}
+
+func (m *navNodeStub) GoToNode(_ plugin.Cluster, _ *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return m.nodePlugin, m.node
+}
+
+// TestNavNodePushesNodeWardFrame: nav-node on a scheduled pod (NodeLinker
+// resolves a hosting Node) pushes a NavNode frame and makes the nodes plugin
+// current.
+func TestNavNodePushesNodeWardFrame(t *testing.T) {
+	a := newTestApp()
+	nodesGVR := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+	nodesPlugin := &mockPlugin{name: "nodes", gvr: nodesGVR}
+	nodeObj := &unstructured.Unstructured{
+		Object: map[string]any{"metadata": map[string]any{"name": "node-a"}},
+	}
+	pods := &navNodeStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		nodePlugin: nodesPlugin,
+		node:       nodeObj,
+	}
+	a.layout.AddSplit(pods, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+
+	result, _ := a.executeCommand("nav-node")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after nav-node push")
+	}
+	if focused.Plugin().Name() != "nodes" {
+		t.Fatalf("expected current plugin 'nodes', got %q", focused.Plugin().Name())
+	}
+	snap, ok := focused.ParentSnap()
+	if !ok {
+		t.Fatal("expected a snapshot after nav-node push")
+	}
+	if snap.Direction != ui.NavNode {
+		t.Fatal("expected the pushed frame to have Direction=NavNode")
+	}
+	if focused.Len() != 1 || focused.Selected().GetName() != "node-a" {
+		t.Fatalf("expected the node object 'node-a' in the view, got len=%d", focused.Len())
+	}
+}
+
+// TestNavNodeUnscheduledNoop: nav-node on an unscheduled pod (GoToNode returns a
+// nil plugin, e.g. empty spec.nodeName) is a no-op (no new frame, Depth
+// unchanged).
+func TestNavNodeUnscheduledNoop(t *testing.T) {
+	a := newTestApp()
+	pods := &navNodeStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		nodePlugin: nil, // unscheduled: no navigable node
+		node:       nil,
+	}
+	a.layout.AddSplit(pods, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+	depthBefore := a.layout.FocusedSplit().Depth()
+
+	result, _ := a.executeCommand("nav-node")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if focused.InDrillDown() {
+		t.Fatal("unscheduled nav-node must be a no-op (not in drill-down)")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("unscheduled nav-node must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+	if focused.Plugin().Name() != "pods" {
+		t.Fatalf("expected plugin unchanged 'pods', got %q", focused.Plugin().Name())
+	}
+}
+
+// TestNavNodeNoNodeLinkerNoop: nav-node on a plugin that does NOT implement
+// NodeLinker (e.g. a non-pods plugin) is a no-op.
+func TestNavNodeNoNodeLinkerNoop(t *testing.T) {
+	a := newTestApp()
+	// mockPlugin does not implement plugin.NodeLinker.
+	p := &mockPlugin{name: "configmaps", gvr: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}}
+	a.layout.AddSplit(p, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "cm-1"}}},
+	})
+
+	result, _ := a.executeCommand("nav-node")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if focused.InDrillDown() {
+		t.Fatal("nav-node on a non-NodeLinker plugin must be a no-op")
+	}
+	if focused.Plugin().Name() != "configmaps" {
+		t.Fatalf("expected plugin unchanged 'configmaps', got %q", focused.Plugin().Name())
+	}
+}
+
+// TestSplitNavNodeOpensFloorPinnedSplit verifies split-nav-node creates a new
+// split drilled one level node-ward, with NavFloor==1 and a NavNode frame — and
+// (by routing to openDrilledSplit) is NOT swallowed by the generic split-
+// prefix handler (which would trim it to "nav-node" and pass it to handleSplit).
+func TestSplitNavNodeOpensFloorPinnedSplit(t *testing.T) {
+	a := newTestApp()
+	nodesGVR := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+	nodesPlugin := &mockPlugin{name: "nodes", gvr: nodesGVR}
+	nodeObj := &unstructured.Unstructured{
+		Object: map[string]any{"metadata": map[string]any{"name": "node-a"}},
+	}
+	pods := &navNodeStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		nodePlugin: nodesPlugin,
+		node:       nodeObj,
+	}
+	a.layout.AddSplit(pods, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-nav-node")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before+1 {
+		t.Fatalf("expected SplitCount %d after split-nav-node, got %d", before+1, a.layout.SplitCount())
+	}
+
+	newSplit := a.layout.FocusedSplit()
+	if !newSplit.InDrillDown() {
+		t.Fatal("new split should be in drill-down")
+	}
+	if newSplit.NavFloor() != 1 {
+		t.Fatalf("expected NavFloor 1, got %d", newSplit.NavFloor())
+	}
+	// Routed to the node-ward split (nodes plugin current), NOT handleSplit("nav-node").
+	if newSplit.Plugin().Name() != "nodes" {
+		t.Fatalf("expected node plugin 'nodes' current, got %q", newSplit.Plugin().Name())
+	}
+	snap, ok := newSplit.ParentSnap()
+	if !ok {
+		t.Fatal("expected a snapshot")
+	}
+	if snap.Direction != ui.NavNode {
+		t.Fatal("expected pushed frame Direction=NavNode")
+	}
+}
+
+// TestSplitNavNodeUnscheduledNoop: split-nav-node on an unscheduled pod (GoToNode
+// returns a nil plugin, e.g. empty spec.nodeName) hits the `if nodePlugin == nil`
+// guard in the split-nav-node handler and is a no-op — NO new split is opened and
+// no panic. This is the split analog of TestNavNodeUnscheduledNoop.
+func TestSplitNavNodeUnscheduledNoop(t *testing.T) {
+	a := newTestApp()
+	pods := &navNodeStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		nodePlugin: nil, // unscheduled: no navigable node
+		node:       nil,
+	}
+	a.layout.AddSplit(pods, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-nav-node")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before {
+		t.Fatalf("unscheduled split-nav-node must not open a split: before=%d after=%d", before, a.layout.SplitCount())
+	}
+	focused := a.layout.FocusedSplit()
+	if focused.InDrillDown() {
+		t.Fatal("unscheduled split-nav-node must be a no-op (not in drill-down)")
+	}
+	if focused.Plugin().Name() != "pods" {
+		t.Fatalf("expected plugin unchanged 'pods', got %q", focused.Plugin().Name())
+	}
+}
+
+// TestNavNodeNilSelectionNoop: nav-node with no selection is a plain no-op
+// (no new frame, Depth unchanged, no panic). Mirrors TestNavParentNilSelectionNoop.
+func TestNavNodeNilSelectionNoop(t *testing.T) {
+	a := newTestApp()
+	nodesPlugin := &mockPlugin{name: "nodes", gvr: schema.GroupVersionResource{Version: "v1", Resource: "nodes"}}
+	pods := &navNodeStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		nodePlugin: nodesPlugin,
+		node:       &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "node-a"}}},
+	}
+	a.layout.AddSplit(pods, "default", "")
+	// No SetObjects → empty list → Selected() == nil.
+
+	if a.layout.FocusedSplit().Selected() != nil {
+		t.Fatal("precondition: expected nil selection")
+	}
+	depthBefore := a.layout.FocusedSplit().Depth()
+
+	result, _ := a.executeCommand("nav-node")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if focused.InDrillDown() {
+		t.Fatal("nav-node with nil selection must be a no-op")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("nil-selection nav-node must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+}
+
+// TestNavNodeThenEscapePopsBack: after a successful nav-node push, Escape
+// (clear-overlay) pops back to the pods view (Depth decremented, pods plugin
+// restored). Mirrors TestNavParentThenEscapePopsBack.
+func TestNavNodeThenEscapePopsBack(t *testing.T) {
+	a := newTestApp()
+	nodesGVR := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+	nodesPlugin := &mockPlugin{name: "nodes", gvr: nodesGVR}
+	pods := &navNodeStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		nodePlugin: nodesPlugin,
+		node:       &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "node-a"}}},
+	}
+	a.layout.AddSplit(pods, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+
+	result, _ := a.executeCommand("nav-node")
+	a = result.(App)
+	focused := a.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after nav-node")
+	}
+	depthAfterPush := focused.Depth()
+
+	result, _ = a.executeCommand("clear-overlay")
+	a = result.(App)
+
+	focused = a.layout.FocusedSplit()
+	if focused.Depth() != depthAfterPush-1 {
+		t.Fatalf("expected Escape to decrement Depth: push=%d after-esc=%d", depthAfterPush, focused.Depth())
+	}
+	if focused.InDrillDown() {
+		t.Fatal("expected to be back at the pods view (not in drill-down) after Escape")
+	}
+	if focused.Plugin().Name() != "pods" {
+		t.Fatalf("expected pods plugin after Escape, got %q", focused.Plugin().Name())
+	}
+}
+
+// TestNavNodePushesLazyNodeWardFrame: nav-node when GoToNode resolves a nodes
+// plugin but the Node object is not yet synced (node == nil) pushes a NavNode
+// frame with ZERO objects. Depth grows, the nodes plugin becomes current, and
+// the frame's Direction is NavNode — the view fills asynchronously on the next
+// nodes-GVR ResourceUpdatedMsg. Mirrors TestNavParentPushesLazyParentWardFrame.
+func TestNavNodePushesLazyNodeWardFrame(t *testing.T) {
+	a := newTestApp()
+	nodesGVR := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+	nodesPlugin := &mockPlugin{name: "nodes", gvr: nodesGVR}
+	pods := &navNodeStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		nodePlugin: nodesPlugin,
+		node:       nil, // node not synced yet — lazy path
+	}
+	a.layout.AddSplit(pods, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+	})
+	depthBefore := a.layout.FocusedSplit().Depth()
+
+	result, _ := a.executeCommand("nav-node")
+	a = result.(App)
+
+	focused := a.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to be in drill-down after lazy nav-node push")
+	}
+	if focused.Depth() != depthBefore+1 {
+		t.Fatalf("expected Depth to grow by 1: before=%d after=%d", depthBefore, focused.Depth())
+	}
+	if focused.Plugin().Name() != "nodes" {
+		t.Fatalf("expected current plugin 'nodes', got %q", focused.Plugin().Name())
+	}
+	if focused.Len() != 0 {
+		t.Fatalf("expected zero objects in the lazy node view, got %d", focused.Len())
+	}
+	snap, ok := focused.ParentSnap()
+	if !ok {
+		t.Fatal("expected a snapshot after lazy nav-node push")
+	}
+	if snap.Direction != ui.NavNode {
+		t.Fatal("expected the pushed frame to have Direction=NavNode")
+	}
+}
+
+// TestSplitNavNodeNoSelectionNoop: split-nav-node with no selection makes no new
+// split. Mirrors TestSplitParentNoSelectionNoop.
+func TestSplitNavNodeNoSelectionNoop(t *testing.T) {
+	a := newTestApp()
+	nodesPlugin := &mockPlugin{name: "nodes", gvr: schema.GroupVersionResource{Version: "v1", Resource: "nodes"}}
+	pods := &navNodeStub{
+		mockPlugin: mockPlugin{name: "pods", gvr: schema.GroupVersionResource{Version: "v1", Resource: "pods"}},
+		nodePlugin: nodesPlugin,
+		node:       &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{"name": "node-a"}}},
+	}
+	a.layout.AddSplit(pods, "default", "")
+	// No SetObjects → nil selection.
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-nav-node")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before {
+		t.Fatalf("split-nav-node with no selection must not create a split: before=%d after=%d", before, a.layout.SplitCount())
+	}
+}
+
+// TestSplitNavNodeNoNodeLinkerNoop: split-nav-node on a plugin that does NOT
+// implement NodeLinker makes no new split. Mirrors TestSplitParentNoDrillUpNoop.
+func TestSplitNavNodeNoNodeLinkerNoop(t *testing.T) {
+	a := newTestApp()
+	// mockPlugin does not implement plugin.NodeLinker.
+	p := &mockPlugin{name: "configmaps", gvr: schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}}
+	a.layout.AddSplit(p, "default", "")
+	a.layout.FocusedSplit().SetObjects([]*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "cm-1"}}},
+	})
+	before := a.layout.SplitCount()
+
+	result, _ := a.executeCommand("split-nav-node")
+	a = result.(App)
+
+	if a.layout.SplitCount() != before {
+		t.Fatalf("split-nav-node on a non-NodeLinker must not create a split: before=%d after=%d", before, a.layout.SplitCount())
+	}
+}
+
+// TestRefreshDrillDownSplitNodeWardLazyStore exercises the async case: the nodes
+// bucket starts empty, so refreshDrillDownSplit must NOT clobber the view (it
+// returns, leaving the empty set). Once the Node is added to the store and a
+// ResourceUpdatedMsg for the nodes GVR is delivered, refreshDrillDownSplits
+// selects the node-ward split and fills the view with the Node. Mirrors
+// TestRefreshDrillDownSplitParentWardLazyStore.
+func TestRefreshDrillDownSplitNodeWardLazyStore(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	nodesGVR := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+
+	pod := podOnNodeUID("pod-1", "pod-uid-1", "node-a")
+	store.CacheUpsert(podsGVR, "default", pod)
+	// NOTE: the Node is intentionally NOT in the store yet.
+
+	// Nodes are cluster-scoped: the node-ward split's EffectiveNamespace() is ""
+	// (so the refresh isn't filtered out by the namespace guard) and the
+	// nodes-GVR ResourceUpdatedMsg carries the "" (all-namespaces) namespace.
+	nodesPlugin := &mockClusterPlugin{mockPlugin: mockPlugin{name: "nodes", gvr: nodesGVR}}
+	podsPlugin := &mockNodeLinkerPlugin{
+		mockDrillUpPlugin: mockDrillUpPlugin{
+			mockPlugin: mockPlugin{name: "pods", gvr: podsGVR},
+			store:      store,
+		},
+		nodePlugin: nodesPlugin,
+		nodesGVR:   nodesGVR,
+	}
+	plugin.Register(nodesPlugin)
+	plugin.Register(podsPlugin)
+	t.Cleanup(plugin.Reset)
+
+	app.layout.AddSplit(podsPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{pod})
+	// Push an EMPTY node view (node not synced yet), Direction=NavNode.
+	focused.PushNav(nodesPlugin, []*unstructured.Unstructured{}, "pod-1", "pod-uid-1", "v1", "Pod", ui.NavNode)
+
+	if focused.Len() != 0 {
+		t.Fatalf("precondition: expected empty node view, got %d", focused.Len())
+	}
+	depthBefore := focused.Depth()
+
+	// First refresh with the node still missing: must NOT clobber (stays empty).
+	app.refreshDrillDownSplit(focused)
+	if focused.Len() != 0 {
+		t.Fatalf("lazy-store: expected refresh to leave view empty (no clobber), got %d", focused.Len())
+	}
+	if !focused.InDrillDown() {
+		t.Fatal("lazy-store: must remain in drill-down after no-op refresh")
+	}
+	if focused.Depth() != depthBefore {
+		t.Fatalf("lazy-store: no-op refresh must not change Depth: before=%d after=%d", depthBefore, focused.Depth())
+	}
+
+	// The nodes informer syncs: add the Node, then deliver the nodes-GVR update.
+	store.CacheUpsert(nodesGVR, "", nodeObj("node-a"))
+
+	model, _ := app.update(k8s.ResourceUpdatedMsg{GVR: nodesGVR, Namespace: ""})
+	app = model.(App)
+
+	focused = app.layout.FocusedSplit()
+	if !focused.InDrillDown() {
+		t.Fatal("expected to remain in drill-down after nodes-GVR update")
+	}
+	if focused.Len() != 1 {
+		t.Fatalf("expected nodes-GVR update to fill node view to 1, got %d", focused.Len())
+	}
+	if got := focused.Selected(); got == nil || got.GetName() != "node-a" {
+		t.Fatalf("expected filled node 'node-a', got %v", got)
+	}
+}
+
+// TestRefreshDrillDownSplitsNodeWardNamespaceGuard verifies that because nodes
+// are cluster-scoped, a node-ward split has EffectiveNamespace() == "" and so a
+// refreshDrillDownSplits update carrying ANY namespace still refreshes it (the
+// namespace guard refreshes all-namespace drill-downs unconditionally). Mirrors
+// TestRefreshDrillDownSplitsParentWardNamespaceGuard but exercises the
+// cluster-scoped (empty effective namespace) branch.
+func TestRefreshDrillDownSplitsNodeWardNamespaceGuard(t *testing.T) {
+	app := newTestApp()
+
+	podsGVR := schema.GroupVersionResource{Version: "v1", Resource: "pods"}
+	nodesGVR := schema.GroupVersionResource{Version: "v1", Resource: "nodes"}
+
+	store := k8s.NewStore(nil, "", nil)
+	app = withGlobalStore(app, store)
+
+	pod := podOnNodeUID("pod-1", "pod-uid-1", "node-a")
+	store.CacheUpsert(podsGVR, "default", pod)
+	store.CacheUpsert(nodesGVR, "", nodeObj("node-a"))
+
+	// Cluster-scoped nodes plugin → the node-ward split's EffectiveNamespace() is
+	// "" regardless of the pane's namespace, so the namespace guard refreshes it
+	// unconditionally.
+	nodesPlugin := &mockClusterPlugin{mockPlugin: mockPlugin{name: "nodes", gvr: nodesGVR}}
+	podsPlugin := &mockNodeLinkerPlugin{
+		mockDrillUpPlugin: mockDrillUpPlugin{
+			mockPlugin: mockPlugin{name: "pods", gvr: podsGVR},
+			store:      store,
+		},
+		nodePlugin: nodesPlugin,
+		nodesGVR:   nodesGVR,
+	}
+	plugin.Register(nodesPlugin)
+	plugin.Register(podsPlugin)
+	t.Cleanup(plugin.Reset)
+
+	// Pane in the "default" namespace, but the node-ward frame's current plugin is
+	// cluster-scoped, so EffectiveNamespace() == "".
+	app.layout.AddSplit(podsPlugin, "default", "")
+	focused := app.layout.FocusedSplit()
+	focused.SetObjects([]*unstructured.Unstructured{pod})
+	// Empty node view, Direction=NavNode: only a refresh fills it.
+	focused.PushNav(nodesPlugin, []*unstructured.Unstructured{}, "pod-1", "pod-uid-1", "v1", "Pod", ui.NavNode)
+
+	if focused.EffectiveNamespace() != "" {
+		t.Fatalf("precondition: expected empty (cluster-scoped) effective namespace, got %q", focused.EffectiveNamespace())
+	}
+
+	// A nodes-GVR update carrying SOME namespace must still refresh the node-ward
+	// split (its EffectiveNamespace() == "" refreshes all-namespace drill-downs).
+	app.refreshDrillDownSplits(nodesGVR, "some-ns")
+	if focused.Len() != 1 {
+		t.Fatalf("cluster-scoped node-ward split must refresh on any-namespace update, got len=%d", focused.Len())
+	}
+	if got := focused.Selected(); got == nil || got.GetName() != "node-a" {
+		t.Fatalf("expected filled node 'node-a', got %v", got)
 	}
 }

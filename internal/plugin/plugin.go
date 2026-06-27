@@ -107,6 +107,42 @@ type DrillDowner interface {
 	DrillDown(cl Cluster, obj *unstructured.Unstructured) (ResourcePlugin, []*unstructured.Unstructured)
 }
 
+// DrillUp is an optional interface for plugins that navigate to a resource's
+// logical parent on Backspace. It is the inverse of DrillDowner: where DrillDown
+// returns child resources, DrillUp returns the single parent.
+//
+// The resolution strategy is implementation-specific: ownerReference-based for
+// workload controllers (e.g. delegating to workload.FindParentByOwnerRef), or
+// another relationship such as a label-based lookup for non-owned parents
+// (e.g. endpointslices → service via workload.FindServiceForEndpointSlice, a
+// kubernetes.io/service-name label match, not an ownerReference).
+//
+// The Cluster argument supplies the store/discovery for the cluster the request
+// targets (the focused pane's cluster). Returns (nil, nil) when there is no
+// navigable parent (no resolvable relationship, an unresolvable parent kind, or
+// no registered plugin for the parent). The returned object may be nil even when
+// the plugin is non-nil — the parent's store bucket may not be synced yet — in
+// which case the caller pushes an empty view that fills asynchronously.
+type DrillUp interface {
+	DrillUp(cl Cluster, obj *unstructured.Unstructured) (ResourcePlugin, *unstructured.Unstructured)
+}
+
+// NodeLinker is an optional interface for plugins whose objects are scheduled
+// onto a Node and can navigate to that hosting Node. It mirrors DrillUp but
+// follows spec.nodeName rather than metadata.ownerReferences: where DrillUp
+// returns the owning parent, GoToNode returns the Node the object runs on.
+//
+// The Cluster argument supplies the store/discovery for the cluster the request
+// targets (the focused pane's cluster). Implementations typically delegate to
+// workload.FindNodeForPod. Returns (nil, nil) when there is no navigable node
+// (empty spec.nodeName, or no registered nodes plugin). The returned object may
+// be nil even when the plugin is non-nil — the nodes store bucket may not be
+// synced yet — in which case the caller pushes an empty view that fills
+// asynchronously.
+type NodeLinker interface {
+	GoToNode(cl Cluster, obj *unstructured.Unstructured) (ResourcePlugin, *unstructured.Unstructured)
+}
+
 // GoToer is an optional interface for plugins that navigate to a different resource view on Enter.
 type GoToer interface {
 	GoTo(obj *unstructured.Unstructured) (resourceName string, namespace string, ok bool)

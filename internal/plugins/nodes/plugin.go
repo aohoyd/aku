@@ -15,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-var gvr = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "nodes"}
+var gvr = workload.NodesGVR
 
 // Plugin implements plugin.ResourcePlugin and plugin.DrillDowner for Kubernetes Nodes.
 type Plugin struct{}

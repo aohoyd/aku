@@ -119,6 +119,12 @@ func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (p
 	return pp, pods
 }
 
+// DrillUp implements plugin.DrillUp. A Job's owner is its CronJob; the shared
+// ownerReference helper resolves it.
+func (p *Plugin) DrillUp(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return workload.FindParentByOwnerRef(cl, obj)
+}
+
 // toJob converts an unstructured object to a typed batchv1.Job.
 func toJob(obj *unstructured.Unstructured) (*batchv1.Job, error) {
 	var j batchv1.Job

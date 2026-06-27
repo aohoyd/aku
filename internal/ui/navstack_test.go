@@ -103,7 +103,7 @@ func TestResourceListPushPopParentContext(t *testing.T) {
 	rsChildren := []*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}}},
 	}
-	rl.PushNav(rsPlugin, rsChildren, "nginx", "d-uid", "", "")
+	rl.PushNav(rsPlugin, rsChildren, "nginx", "d-uid", "", "", NavChild)
 
 	if rl.ParentContext() != "de/nginx" {
 		t.Fatalf("expected parentContext 'de/nginx', got %q", rl.ParentContext())
@@ -120,7 +120,7 @@ func TestResourceListPushPopParentContext(t *testing.T) {
 	podChildren := []*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
 	}
-	rl.PushNav(podPlugin, podChildren, "rs-1", "rs-uid", "", "")
+	rl.PushNav(podPlugin, podChildren, "rs-1", "rs-uid", "", "", NavChild)
 
 	if rl.ParentContext() != "re/rs-1" {
 		t.Fatalf("expected parentContext 're/rs-1', got %q", rl.ParentContext())
@@ -134,7 +134,9 @@ func TestResourceListPushPopParentContext(t *testing.T) {
 	}
 
 	// Pop back to RS — should restore deploy's parent context
-	rl.PopNav()
+	if !rl.PopNav() {
+		t.Fatal("PopNav back to RS should return true")
+	}
 	if rl.ParentContext() != "de/nginx" {
 		t.Fatalf("expected parentContext 'de/nginx' after pop, got %q", rl.ParentContext())
 	}
@@ -150,7 +152,9 @@ func TestResourceListPushPopParentContext(t *testing.T) {
 	}
 
 	// Pop back to deploys — should clear parent context
-	rl.PopNav()
+	if !rl.PopNav() {
+		t.Fatal("PopNav back to deploys should return true")
+	}
 	if rl.ParentContext() != "" {
 		t.Fatalf("expected empty parentContext at root, got %q", rl.ParentContext())
 	}
@@ -209,12 +213,12 @@ func TestResetForReload(t *testing.T) {
 	rsChildren := []*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}}},
 	}
-	rl.PushNav(rsPlugin, rsChildren, "nginx", "d-uid", "", "")
+	rl.PushNav(rsPlugin, rsChildren, "nginx", "d-uid", "", "", NavChild)
 
 	podChildren := []*unstructured.Unstructured{
 		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
 	}
-	rl.PushNav(podPlugin, podChildren, "rs-1", "rs-uid", "", "")
+	rl.PushNav(podPlugin, podChildren, "rs-1", "rs-uid", "", "", NavChild)
 
 	// Verify we're in drill-down
 	if !rl.InDrillDown() {
@@ -290,6 +294,173 @@ func TestNavSnapshotStoresParentKindAndAPIVersion(t *testing.T) {
 	}
 }
 
+// TestNavDirectionZeroValueIsChild guards that the NavChild enum value is the
+// zero value, preserving the prior default-false = child-ward behavior.
+func TestNavDirectionZeroValueIsChild(t *testing.T) {
+	var d NavDirection
+	if d != NavChild {
+		t.Fatalf("expected zero-value NavDirection to be NavChild, got %v", d)
+	}
+	// A snapshot with no explicit Direction must default to NavChild.
+	var s NavStack
+	s.Push(NavSnapshot{Plugin: &stubPlugin{name: "pods"}})
+	snap, ok := s.Pop()
+	if !ok {
+		t.Fatal("pop should return true")
+	}
+	if snap.Direction != NavChild {
+		t.Fatalf("expected default Direction NavChild, got %v", snap.Direction)
+	}
+}
+
+func TestNavStackDirectionPreserved(t *testing.T) {
+	cases := []struct {
+		name string
+		dir  NavDirection
+	}{
+		{name: "child-ward frame", dir: NavChild},
+		{name: "parent-ward frame", dir: NavParent},
+		{name: "node-ward frame", dir: NavNode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var s NavStack
+			s.Push(NavSnapshot{
+				Plugin:    &stubPlugin{name: "pods"},
+				Direction: tc.dir,
+			})
+			snap, ok := s.Pop()
+			if !ok {
+				t.Fatal("pop should return true")
+			}
+			if snap.Direction != tc.dir {
+				t.Fatalf("expected Direction %v, got %v", tc.dir, snap.Direction)
+			}
+		})
+	}
+}
+
+func TestResourceListPushNavDirectionPreserved(t *testing.T) {
+	cases := []struct {
+		name string
+		dir  NavDirection
+	}{
+		{name: "child-ward push", dir: NavChild},
+		{name: "parent-ward push", dir: NavParent},
+		{name: "node-ward push", dir: NavNode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rl := NewResourceList(&stubPlugin{name: "deployments"}, 80, 24)
+			rl.PushNav(&stubPlugin{name: "replicasets"}, nil, "nginx", "d-uid", "", "", tc.dir)
+			snap, ok := rl.ParentSnap()
+			if !ok {
+				t.Fatal("expected ParentSnap after PushNav")
+			}
+			// PushNav's dir param must thread into the stored snapshot's Direction.
+			if snap.Direction != tc.dir {
+				t.Fatalf("expected Direction %v, got %v", tc.dir, snap.Direction)
+			}
+		})
+	}
+}
+
+// TestNavStackMixedDirectionLIFO models the worked example:
+// deployments(root) → push rs (child-ward) → push pods (child-ward)
+// → push node (node-ward) → push rs2 (parent-ward) → push deploy2 (parent-ward),
+// then pops and asserts LIFO order with each frame's Direction intact.
+func TestNavStackMixedDirectionLIFO(t *testing.T) {
+	var s NavStack
+	pushes := []struct {
+		plugin string
+		dir    NavDirection
+	}{
+		{plugin: "replicasets", dir: NavChild},  // enter: deploy → rs
+		{plugin: "pods", dir: NavChild},         // enter: rs → pods
+		{plugin: "nodes", dir: NavNode},         // gN:    pods → node
+		{plugin: "replicasets", dir: NavParent}, // bspc: pods → rs2
+		{plugin: "deployments", dir: NavParent}, // bspc: rs2 → deploy2
+	}
+	for _, p := range pushes {
+		s.Push(NavSnapshot{Plugin: &stubPlugin{name: p.plugin}, Direction: p.dir})
+	}
+	if s.Depth() != len(pushes) {
+		t.Fatalf("expected depth %d, got %d", len(pushes), s.Depth())
+	}
+
+	// Pop in reverse (LIFO) order, asserting plugin + Direction each frame.
+	for i := len(pushes) - 1; i >= 0; i-- {
+		snap, ok := s.Pop()
+		if !ok {
+			t.Fatalf("pop %d should return true", i)
+		}
+		if snap.Plugin.Name() != pushes[i].plugin {
+			t.Fatalf("pop %d: expected plugin %q, got %q", i, pushes[i].plugin, snap.Plugin.Name())
+		}
+		if snap.Direction != pushes[i].dir {
+			t.Fatalf("pop %d: expected Direction %v, got %v", i, pushes[i].dir, snap.Direction)
+		}
+	}
+	if s.Depth() != 0 {
+		t.Fatalf("expected empty stack after popping all, got depth %d", s.Depth())
+	}
+}
+
+// TestResourceListParentWardPushNavPopNavRoundTrip exercises a full ResourceList
+// round trip across a parent-ward frame: PushNav installs the parent view (and
+// InDrillDown becomes true), PopNav restores the original plugin/objects/state
+// and InDrillDown returns to false. The Direction lives only on the saved
+// frame, so PopNav (which discards the frame) leaves no residue.
+func TestResourceListParentWardPushNavPopNavRoundTrip(t *testing.T) {
+	rootPlugin := &stubPlugin{name: "pods"}
+	rl := NewResourceList(rootPlugin, 80, 24)
+	rootObjs := []*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-1"}}},
+		{Object: map[string]any{"metadata": map[string]any{"name": "pod-2"}}},
+	}
+	rl.SetObjects(rootObjs)
+
+	if rl.InDrillDown() {
+		t.Fatal("precondition: root view must not report InDrillDown")
+	}
+
+	// Parent-ward push: the child (pods) is saved, the parent (replicasets) view
+	// becomes current.
+	parentPlugin := &stubPlugin{name: "replicasets"}
+	parentObjs := []*unstructured.Unstructured{
+		{Object: map[string]any{"metadata": map[string]any{"name": "rs-1"}}},
+	}
+	rl.PushNav(parentPlugin, parentObjs, "pod-1", "pod-uid-1", "v1", "Pod", NavParent)
+
+	if !rl.InDrillDown() {
+		t.Fatal("expected InDrillDown after parent-ward PushNav")
+	}
+	if rl.Plugin().Name() != "replicasets" {
+		t.Fatalf("expected parent plugin 'replicasets' current, got %q", rl.Plugin().Name())
+	}
+	if rl.Len() != 1 {
+		t.Fatalf("expected 1 parent object after push, got %d", rl.Len())
+	}
+	snap, ok := rl.ParentSnap()
+	if !ok || snap.Direction != NavParent {
+		t.Fatalf("expected a NavParent parent snapshot, ok=%v dir=%v", ok, snap.Direction)
+	}
+
+	// PopNav restores the child view.
+	if !rl.PopNav() {
+		t.Fatal("expected PopNav to return true")
+	}
+	if rl.InDrillDown() {
+		t.Fatal("expected InDrillDown to be false after PopNav back to root")
+	}
+	if rl.Plugin().Name() != "pods" {
+		t.Fatalf("expected restored plugin 'pods', got %q", rl.Plugin().Name())
+	}
+	if rl.Len() != len(rootObjs) {
+		t.Fatalf("expected restored object count %d, got %d", len(rootObjs), rl.Len())
+	}
+}
+
 func TestNavStackMultiplePushPop(t *testing.T) {
 	var s NavStack
 	s.Push(NavSnapshot{Plugin: &stubPlugin{name: "pods"}, Cursor: 1})
@@ -298,11 +469,17 @@ func TestNavStackMultiplePushPop(t *testing.T) {
 		t.Fatalf("expected depth 2, got %d", s.Depth())
 	}
 
-	snap, _ := s.Pop()
+	snap, ok := s.Pop()
+	if !ok {
+		t.Fatal("first pop should return true")
+	}
 	if snap.Plugin.Name() != "containers" {
 		t.Fatal("should pop in LIFO order")
 	}
-	snap, _ = s.Pop()
+	snap, ok = s.Pop()
+	if !ok {
+		t.Fatal("second pop should return true")
+	}
 	if snap.Plugin.Name() != "pods" {
 		t.Fatal("second pop should return first pushed")
 	}

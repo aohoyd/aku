@@ -6,6 +6,20 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+// NavDirection identifies which way a nav-stack frame was produced.
+type NavDirection int
+
+const (
+	// NavChild is the default child-ward / Enter push (drill down). It is the
+	// zero value, preserving the prior default-false = child-ward behavior.
+	NavChild NavDirection = iota
+	// NavParent is a parent-ward / Backspace push (go to parent).
+	NavParent
+	// NavNode is a node-ward push (gN / oN): the object jumps to the Node it is
+	// scheduled onto (spec.nodeName), via plugin.NodeLinker.GoToNode.
+	NavNode
+)
+
 // NavSnapshot captures the full restorable state of a ResourceList pane.
 type NavSnapshot struct {
 	Plugin           plugin.ResourcePlugin
@@ -20,6 +34,9 @@ type NavSnapshot struct {
 	ParentName       string // Name of the parent resource for breadcrumb display
 	ParentAPIVersion string // API version of the parent resource for kind disambiguation
 	ParentKind       string // Kind of the parent resource for kind disambiguation
+	// Direction marks which way this frame was produced: NavChild (Enter /
+	// drill down, the default), NavParent (Backspace / go to parent), or NavNode.
+	Direction NavDirection
 }
 
 // NavStack is a simple LIFO stack for drill-down navigation.

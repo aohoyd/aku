@@ -101,6 +101,19 @@ func (p *Plugin) DrillDown(_ plugin.Cluster, obj *unstructured.Unstructured) (pl
 	return cp, children
 }
 
+// DrillUp implements plugin.DrillUp. A pod's owner may be a ReplicaSet,
+// StatefulSet, DaemonSet, or Job; the shared ownerReference helper resolves all
+// of them.
+func (p *Plugin) DrillUp(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return workload.FindParentByOwnerRef(cl, obj)
+}
+
+// GoToNode implements plugin.NodeLinker. It resolves the Node a pod is scheduled
+// onto via the shared spec.nodeName helper.
+func (p *Plugin) GoToNode(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return workload.FindNodeForPod(cl, obj)
+}
+
 // renderDescribe produces the full describe output using the typed pod and optional lookup.
 func (p *Plugin) renderDescribe(pod *corev1.Pod, configMaps, secrets []*unstructured.Unstructured) (render.Content, error) {
 	phase := computePodStatus(pod.Status, len(pod.Spec.InitContainers), pod.DeletionTimestamp != nil)

@@ -1000,7 +1000,7 @@ func TestParentSnap(t *testing.T) {
 	}
 	// Push a nav entry
 	child := &testPlugin{}
-	rl.PushNav(child, nil, "my-deployment", "uid-123", "", "")
+	rl.PushNav(child, nil, "my-deployment", "uid-123", "", "", NavChild)
 	snap, ok := rl.ParentSnap()
 	if !ok {
 		t.Fatal("expected ParentSnap after drilldown")
@@ -1019,7 +1019,7 @@ func TestParentSnapKindAndAPIVersion(t *testing.T) {
 		t.Fatalf("expected no ParentSnap before drilldown, got %+v", snap)
 	}
 	child := &testPlugin{}
-	rl.PushNav(child, nil, "my-app", "", "v1", "Secret")
+	rl.PushNav(child, nil, "my-app", "", "v1", "Secret", NavChild)
 	snap, ok := rl.ParentSnap()
 	if !ok {
 		t.Fatal("expected ParentSnap after drilldown")
@@ -1030,6 +1030,86 @@ func TestParentSnapKindAndAPIVersion(t *testing.T) {
 	if snap.ParentAPIVersion != "v1" {
 		t.Fatalf("expected ParentAPIVersion 'v1', got %q", snap.ParentAPIVersion)
 	}
+}
+
+// TestResourceListNavFloor exercises the navFloor accessor round-trip and the
+// Depth()/NavFloor() relationship that the clear-overlay (Escape) pop guard reads:
+// Escape may pop only while Depth() > NavFloor().
+func TestResourceListNavFloor(t *testing.T) {
+	tests := []struct {
+		name      string
+		floor     int
+		pushes    int
+		dir       NavDirection // direction of the pushed frame(s); floor is direction-agnostic
+		wantDepth int
+		wantPop   bool // Depth() > NavFloor() → Escape would pop
+	}{
+		{name: "default floor zero, no pushes, no pop", floor: 0, pushes: 0, dir: NavChild, wantDepth: 0, wantPop: false},
+		{name: "floor zero, one push pops", floor: 0, pushes: 1, dir: NavChild, wantDepth: 1, wantPop: true},
+		{name: "floor one, one push does not pop home frame", floor: 1, pushes: 1, dir: NavChild, wantDepth: 1, wantPop: false},
+		{name: "floor one, two pushes pops down to floor", floor: 1, pushes: 2, dir: NavChild, wantDepth: 2, wantPop: true},
+		// Parent-ward (Backspace) and node-ward (gN/oN) frames at the floor must be
+		// just as un-poppable as child-ward ones: the floor guard reads
+		// Depth()/NavFloor() only, never the frame direction.
+		{name: "floor one, one parent-ward push does not pop home frame", floor: 1, pushes: 1, dir: NavParent, wantDepth: 1, wantPop: false},
+		{name: "floor one, one node-ward push does not pop home frame", floor: 1, pushes: 1, dir: NavNode, wantDepth: 1, wantPop: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rl := NewResourceList(&testPlugin{}, 80, 20)
+			// Default navFloor must be 0 before any SetNavFloor.
+			if rl.NavFloor() != 0 {
+				t.Fatalf("expected default NavFloor 0, got %d", rl.NavFloor())
+			}
+			rl.SetNavFloor(tt.floor)
+			if rl.NavFloor() != tt.floor {
+				t.Fatalf("SetNavFloor/NavFloor round-trip: set %d, got %d", tt.floor, rl.NavFloor())
+			}
+			dir := tt.dir
+			for range tt.pushes {
+				rl.PushNav(&testPlugin{}, nil, "parent", "uid", "", "", dir)
+			}
+			if rl.Depth() != tt.wantDepth {
+				t.Fatalf("expected Depth %d after %d push(es), got %d", tt.wantDepth, tt.pushes, rl.Depth())
+			}
+			gotPop := rl.Depth() > rl.NavFloor()
+			if gotPop != tt.wantPop {
+				t.Fatalf("Depth()>NavFloor() = %v, want %v (depth=%d floor=%d)",
+					gotPop, tt.wantPop, rl.Depth(), rl.NavFloor())
+			}
+		})
+	}
+}
+
+// TestResetNavResetsNavFloor guards the split-opened-drill regression: ResetNav
+// and ResetForReload must clear navFloor back to 0, otherwise a pane left at
+// navFloor=1 (split's home drill) keeps Escape's pop guard (Depth>NavFloor)
+// permanently false after the stack is reset to depth 0.
+func TestResetNavResetsNavFloor(t *testing.T) {
+	t.Run("ResetNav", func(t *testing.T) {
+		rl := NewResourceList(&testPlugin{}, 80, 20)
+		rl.SetNavFloor(1)
+		rl.PushNav(&testPlugin{}, nil, "parent", "uid", "", "", NavChild)
+		rl.ResetNav()
+		if rl.NavFloor() != 0 {
+			t.Fatalf("ResetNav: expected NavFloor 0, got %d", rl.NavFloor())
+		}
+		if rl.Depth() != 0 {
+			t.Fatalf("ResetNav: expected Depth 0, got %d", rl.Depth())
+		}
+	})
+	t.Run("ResetForReload", func(t *testing.T) {
+		rl := NewResourceList(&testPlugin{}, 80, 20)
+		rl.SetNavFloor(1)
+		rl.PushNav(&testPlugin{}, nil, "parent", "uid", "", "", NavChild)
+		rl.ResetForReload()
+		if rl.NavFloor() != 0 {
+			t.Fatalf("ResetForReload: expected NavFloor 0, got %d", rl.NavFloor())
+		}
+		if rl.Depth() != 0 {
+			t.Fatalf("ResetForReload: expected Depth 0, got %d", rl.Depth())
+		}
+	})
 }
 
 func TestFocusAfterBlurBorderKeepsCursorVisible(t *testing.T) {
@@ -1185,7 +1265,7 @@ func TestSelectionClearedOnPushNav(t *testing.T) {
 	objs := []*unstructured.Unstructured{makeUIDObj("pod-a", "uid-a")}
 	rl.SetObjects(objs)
 	rl.ToggleSelect()
-	rl.PushNav(&testPlugin{}, nil, "parent", "uid", "", "")
+	rl.PushNav(&testPlugin{}, nil, "parent", "uid", "", "", NavChild)
 	if rl.HasSelection() {
 		t.Fatal("PushNav should clear selection")
 	}
@@ -1195,7 +1275,7 @@ func TestSelectionClearedOnPopNav(t *testing.T) {
 	rl := NewResourceList(&testPlugin{}, 80, 15)
 	objs := []*unstructured.Unstructured{makeUIDObj("pod-a", "uid-a")}
 	rl.SetObjects(objs)
-	rl.PushNav(&testPlugin{}, []*unstructured.Unstructured{makeUIDObj("child", "uid-c")}, "parent", "uid", "", "")
+	rl.PushNav(&testPlugin{}, []*unstructured.Unstructured{makeUIDObj("child", "uid-c")}, "parent", "uid", "", "", NavChild)
 	rl.ToggleSelect() // select child
 	rl.PopNav()
 	if rl.HasSelection() {

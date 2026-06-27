@@ -22,6 +22,7 @@ func DefaultBindings() []Binding {
 			{Key: "n", Help: "namespaces", Command: "goto-namespaces"},
 			{Key: "S", Help: "statefulsets", Command: "goto-statefulsets"},
 			{Key: "D", Help: "daemonsets", Command: "goto-daemonsets"},
+			{Key: "N", Help: "node", Command: "nav-node", For: []string{"pods"}},
 			{Key: "f", Help: "port-forwards", Command: "goto-portforwards"},
 			{Key: "H", Help: "helm", Command: "goto-helmreleases"},
 			{Key: "i", Help: "ingresses", Command: "goto-ingresses"},
@@ -40,11 +41,14 @@ func DefaultBindings() []Binding {
 			{Key: "n", Help: "namespaces", Command: "split-namespaces"},
 			{Key: "S", Help: "statefulsets", Command: "split-statefulsets"},
 			{Key: "D", Help: "daemonsets", Command: "split-daemonsets"},
+			{Key: "N", Help: "split node", Command: "split-nav-node", For: []string{"pods"}},
 			{Key: "f", Help: "port-forwards", Command: "split-portforwards"},
 			{Key: "H", Help: "helm", Command: "split-helmreleases"},
 			{Key: "i", Help: "ingresses", Command: "split-ingresses"},
 			{Key: "P", Help: "pvc", Command: "split-pvc"},
 			{Key: "x", Help: "contexts", Command: "split-contexts"},
+			{Key: "enter", Help: "split children", Command: "split-children"},
+			{Key: "backspace", Help: "split parent", Command: "split-parent"},
 		}},
 		{Key: "c", Help: "copy", Visible: true, Keys: []Binding{
 			{Key: "c", Help: "copy", Command: "copy-current"},
@@ -91,6 +95,7 @@ func DefaultBindings() []Binding {
 
 		// ── Resources scope ──
 		{Key: "enter", Help: "detail", Command: "enter-detail", Scope: "resources"},
+		{Key: "backspace", Help: "parent", Command: "nav-parent", Scope: "resources"},
 		{Key: "space", Help: "select", Command: "toggle-select", Scope: "resources"},
 		{Key: "ctrl+a", Help: "select all", Command: "select-all", Scope: "resources"},
 		{Key: "pgdown", Help: "page down", Command: "page-down", Scope: "resources"},

@@ -218,6 +218,13 @@ func (p *Plugin) DrillDown(cl plugin.Cluster, obj *unstructured.Unstructured) (p
 	return rsPlugin, children
 }
 
+// DrillUp implements plugin.DrillUp. A Deployment is usually a top-level
+// controller, but it may be owned by an operator CR; the shared ownerReference
+// helper resolves any owner and returns (nil, nil) when there is none.
+func (p *Plugin) DrillUp(cl plugin.Cluster, obj *unstructured.Unstructured) (plugin.ResourcePlugin, *unstructured.Unstructured) {
+	return workload.FindParentByOwnerRef(cl, obj)
+}
+
 // toDeployment converts an unstructured object to a typed appsv1.Deployment.
 func toDeployment(obj *unstructured.Unstructured) (*appsv1.Deployment, error) {
 	var d appsv1.Deployment

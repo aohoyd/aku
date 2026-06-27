@@ -2428,15 +2428,33 @@ func (a App) OverlayRect() ui.OverlayRect {
 	return *a.overlayRect
 }
 
-// refreshDrillDownSplit re-runs the parent's DrillDown to get fresh filtered
-// children for a single split that is currently in a drill-down view. The
-// DrillDown reads from the split's own cluster (its store/discovery), keeping
-// drill-downs scoped to the pane's context.
+// refreshDrillDownSplit rebuilds a single split that is currently in a
+// drill-down view, dispatching on the frame's Direction. NavParent frames go to
+// refreshParentWardSplit and NavNode frames to refreshNodeWardSplit (both BEFORE
+// the DrillDowner assertion, since their snap.Plugin is the source plugin which
+// is itself a DrillDowner). The default NavChild branch re-runs the parent's
+// DrillDown to get fresh filtered children. All paths read from the split's own
+// cluster (its store/discovery), keeping drill-downs scoped to the pane's context.
 func (a App) refreshDrillDownSplit(split *ui.ResourceList) {
 	snap, ok := split.ParentSnap()
 	if !ok {
 		return
 	}
+
+	// Non-child-ward frames are reconstructed via DrillUp / GoToNode, not
+	// DrillDown. This switch MUST run before the DrillDowner assertion below:
+	// for a parent-ward or node-ward frame snap.Plugin is the SOURCE plugin
+	// (e.g. pods), which itself IS a DrillDowner — falling through would wrongly
+	// re-run its drill-down (e.g. a pod's containers) and clobber the view.
+	switch snap.Direction {
+	case ui.NavParent:
+		a.refreshParentWardSplit(split, snap)
+		return
+	case ui.NavNode:
+		a.refreshNodeWardSplit(split, snap)
+		return
+	}
+
 	drillable, ok := snap.Plugin.(plugin.DrillDowner)
 	if !ok {
 		return
@@ -2444,39 +2462,122 @@ func (a App) refreshDrillDownSplit(split *ui.ResourceList) {
 
 	cl := a.clusterFor(split)
 
-	var parentObj *unstructured.Unstructured
-
-	if sp, ok := snap.Plugin.(plugin.SelfPopulating); ok {
-		for _, obj := range sp.Objects() {
-			if obj.GetName() == snap.ParentName &&
-				(snap.ParentKind == "" || obj.GetKind() == snap.ParentKind) &&
-				(snap.ParentAPIVersion == "" || obj.GetAPIVersion() == snap.ParentAPIVersion) {
-				parentObj = obj
-				break
-			}
-		}
-	} else if snap.ParentUID != "" {
-		store := plugin.StoreOf(cl)
-		if store == nil {
-			return
-		}
-		parentNs := split.Namespace()
-		if snap.Plugin.IsClusterScoped() {
-			parentNs = ""
-		}
-		for _, obj := range store.List(snap.Plugin.GVR(), parentNs) {
-			if string(obj.GetUID()) == snap.ParentUID {
-				parentObj = obj
-				break
-			}
-		}
-	}
-
+	parentObj := a.resolveSnapSourceObject(cl, snap)
 	if parentObj == nil {
 		return
 	}
 	_, children := drillable.DrillDown(cl, parentObj)
 	split.SetObjects(children)
+}
+
+// resolveSnapSourceObject re-resolves the SOURCE object a drill frame was
+// produced from — the parent for a child-ward (Enter) frame, the child for a
+// parent-ward (Backspace) frame, or the source pod for a node-ward (gN/oN)
+// frame. All are identified the same way: by name+kind+apiVersion among
+// snap.Plugin's SelfPopulating objects, or by UID within snap.Plugin's store
+// bucket. snap.Plugin is the frame's source plugin (the parent plugin for
+// child-ward, the child plugin for parent-ward, the pods plugin for node-ward).
+//
+// The store bucket is keyed by snap.Namespace — the SAVED namespace of the
+// source view — not split.Namespace(). On a live cluster the source object only
+// lives in its own-namespace bucket; in all-namespaces mode (snap.Namespace=="")
+// the informer watches every namespace into the "" bucket, so List(gvr,"") finds
+// it. Cluster-scoped sources always read the "" bucket. UID is globally unique,
+// so the bucket scan cannot return a wrong object. Returns nil when the source
+// cannot currently be resolved (e.g. the bucket isn't synced yet).
+func (a App) resolveSnapSourceObject(cl plugin.Cluster, snap ui.NavSnapshot) *unstructured.Unstructured {
+	if sp, ok := snap.Plugin.(plugin.SelfPopulating); ok {
+		for _, obj := range sp.Objects() {
+			if obj.GetName() == snap.ParentName &&
+				(snap.ParentKind == "" || obj.GetKind() == snap.ParentKind) &&
+				(snap.ParentAPIVersion == "" || obj.GetAPIVersion() == snap.ParentAPIVersion) {
+				return obj
+			}
+		}
+		return nil
+	}
+	if snap.ParentUID == "" {
+		return nil
+	}
+	store := plugin.StoreOf(cl)
+	if store == nil {
+		return nil
+	}
+	ns := snap.Namespace
+	if snap.Plugin.IsClusterScoped() {
+		ns = ""
+	}
+	for _, obj := range store.List(snap.Plugin.GVR(), ns) {
+		if string(obj.GetUID()) == snap.ParentUID {
+			return obj
+		}
+	}
+	return nil
+}
+
+// refreshParentWardSplit reconstructs a parent-ward (Backspace) frame: it
+// re-fetches the SOURCE CHILD object the Backspace was pressed on (identified by
+// snap.ParentUID within snap.Plugin.GVR(), the child's plugin/GVR) and re-runs
+// DrillUp to recompute the single parent object, then SetObjects([parent]).
+//
+// Unlike the child-ward path — which calls SetObjects even with empty children —
+// this path returns WITHOUT clobbering the view when the child or parent cannot
+// currently be resolved (e.g. the parent store bucket isn't synced yet). The
+// next ResourceUpdatedMsg for the parent GVR retries via refreshDrillDownSplits.
+func (a App) refreshParentWardSplit(split *ui.ResourceList, snap ui.NavSnapshot) {
+	du, ok := snap.Plugin.(plugin.DrillUp)
+	if !ok {
+		return
+	}
+
+	cl := a.clusterFor(split)
+
+	child := a.resolveSnapSourceObject(cl, snap)
+	if child == nil {
+		return
+	}
+
+	_, parentObj := du.DrillUp(cl, child)
+	if parentObj == nil {
+		// Parent informer not synced yet — leave the view as-is rather than
+		// blanking it; a later ResourceUpdatedMsg(parentGVR) will retry.
+		return
+	}
+	split.SetObjects([]*unstructured.Unstructured{parentObj})
+}
+
+// refreshNodeWardSplit reconstructs a node-ward (GoToNode) frame: it re-fetches
+// the SOURCE POD the navigation was triggered from (identified by snap.ParentUID
+// within snap.Plugin.GVR(), the pod's plugin/GVR) and re-runs the source plugin's
+// NodeLinker.GoToNode to recompute the single Node it is scheduled onto, then
+// SetObjects([node]). snap.Plugin is the SOURCE plugin (pods), which implements
+// NodeLinker — mirroring how refreshParentWardSplit routes through DrillUp.
+//
+// Like the parent-ward path — and unlike the child-ward path which calls
+// SetObjects even with empty children — this returns WITHOUT clobbering the view
+// when the source pod or its node cannot currently be resolved (e.g. the nodes
+// store bucket isn't synced yet). The next ResourceUpdatedMsg for the nodes GVR
+// retries via refreshDrillDownSplits.
+func (a App) refreshNodeWardSplit(split *ui.ResourceList, snap ui.NavSnapshot) {
+	nl, ok := snap.Plugin.(plugin.NodeLinker)
+	if !ok {
+		return
+	}
+
+	cl := a.clusterFor(split)
+
+	pod := a.resolveSnapSourceObject(cl, snap)
+	if pod == nil {
+		return
+	}
+
+	_, node := nl.GoToNode(cl, pod)
+	if node == nil {
+		// Nodes informer not synced yet — leave the view as-is rather than
+		// blanking it; a later ResourceUpdatedMsg(nodesGVR) will retry.
+		return
+	}
+	split.SetObjects([]*unstructured.Unstructured{node})
 }
 
 // refreshDrillDownSplits re-extracts child data for any split that is

@@ -63,6 +63,85 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		resourceName := strings.TrimPrefix(command, "goto-")
 		return a.handleGoto(resourceName, "")
 
+	// Split a child/parent drill into a NEW floor-pinned split. These exact-match
+	// cases must precede the generic split-<resource> prefix below: otherwise
+	// handleSplit would be handed "children"/"parent" as a resource name and emit
+	// an "unknown resource" error rather than performing the drill.
+	case command == "split-children":
+		focused := a.layout.FocusedSplit()
+		if focused == nil {
+			return a, nil
+		}
+		sel := focused.Selected()
+		if sel == nil {
+			return a, nil
+		}
+		dd, ok := focused.Plugin().(plugin.DrillDowner)
+		if !ok {
+			return a, nil
+		}
+		childPlugin, children := dd.DrillDown(a.clusterFor(focused), sel)
+		if childPlugin == nil {
+			return a, nil
+		}
+		// DrillDown already subscribed the child GVR internally; openDrilledSplit
+		// subscribes/populates the ROOT plugin then PushNav-installs this child subset.
+		return a.openDrilledSplit(focused, childPlugin, children, sel, ui.NavChild)
+
+	case command == "split-parent":
+		focused := a.layout.FocusedSplit()
+		if focused == nil {
+			return a, nil
+		}
+		sel := focused.Selected()
+		if sel == nil {
+			return a, nil
+		}
+		du, ok := focused.Plugin().(plugin.DrillUp)
+		if !ok {
+			return a, nil
+		}
+		parentPlugin, parentObj := du.DrillUp(a.clusterFor(focused), sel)
+		if parentPlugin == nil {
+			return a, nil
+		}
+		var objs []*unstructured.Unstructured
+		if parentObj != nil {
+			objs = []*unstructured.Unstructured{parentObj}
+		}
+		// DrillUp already subscribed the parent GVR internally; openDrilledSplit
+		// subscribes/populates the ROOT plugin then PushNav-installs this parent subset.
+		return a.openDrilledSplit(focused, parentPlugin, objs, sel, ui.NavParent)
+
+	// Split a node-ward drill (oN) into a NEW floor-pinned split. Mirrors
+	// split-parent but uses NodeLinker/GoToNode. MUST precede the generic
+	// split-<resource> prefix below: otherwise it is trimmed to "nav-node" and
+	// handed to handleSplit as a resource name.
+	case command == "split-nav-node":
+		focused := a.layout.FocusedSplit()
+		if focused == nil {
+			return a, nil
+		}
+		sel := focused.Selected()
+		if sel == nil {
+			return a, nil
+		}
+		nl, ok := focused.Plugin().(plugin.NodeLinker)
+		if !ok {
+			return a, nil
+		}
+		nodePlugin, node := nl.GoToNode(a.clusterFor(focused), sel)
+		if nodePlugin == nil {
+			return a, nil
+		}
+		var objs []*unstructured.Unstructured
+		if node != nil {
+			objs = []*unstructured.Unstructured{node}
+		}
+		// GoToNode already subscribed the nodes GVR internally; openDrilledSplit
+		// subscribes/populates the ROOT plugin then PushNav-installs this node subset.
+		return a.openDrilledSplit(focused, nodePlugin, objs, sel, ui.NavNode)
+
 	// Split: split-<resource>
 	case strings.HasPrefix(command, "split-"):
 		resourceName := strings.TrimPrefix(command, "split-")
@@ -158,7 +237,84 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 		if childPlugin == nil {
 			return a, nil
 		}
-		focused.PushNav(childPlugin, children, sel.GetName(), string(sel.GetUID()), sel.GetAPIVersion(), sel.GetKind())
+		focused.PushNav(childPlugin, children, sel.GetName(), string(sel.GetUID()), sel.GetAPIVersion(), sel.GetKind(), ui.NavChild)
+		if a.layout.RightPanelVisible() {
+			a.layout.FocusResources()
+		}
+		var cmd tea.Cmd
+		a, cmd = a.refreshDetailPanelOrLog()
+		a.keyTrie.Reset()
+		a.envResolved = false
+		a.statusBar.SetHints(a.currentHints())
+
+		return a, cmd
+
+	// Go to parent (Backspace): inverse of enter-detail's drill-down. Resolves
+	// the selected resource's real K8s parent (via ownerReferences) and pushes it
+	// onto the nav stack as a parent-ward frame. A nil selection, a plugin without
+	// DrillUp, or an unresolvable/absent owner are all plain no-ops (unlike
+	// enter-detail's nil-sel branch, a nil selection here does NOT focus the
+	// detail panel).
+	case command == "nav-parent":
+		focused := a.layout.FocusedSplit()
+		if focused == nil {
+			return a, nil
+		}
+		sel := focused.Selected()
+		if sel == nil {
+			return a, nil
+		}
+		du, ok := focused.Plugin().(plugin.DrillUp)
+		if !ok {
+			return a, nil
+		}
+		parentPlugin, parentObj := du.DrillUp(a.clusterFor(focused), sel)
+		if parentPlugin == nil {
+			return a, nil
+		}
+		var objs []*unstructured.Unstructured
+		if parentObj != nil {
+			objs = []*unstructured.Unstructured{parentObj}
+		}
+		focused.PushNav(parentPlugin, objs, sel.GetName(), string(sel.GetUID()), sel.GetAPIVersion(), sel.GetKind(), ui.NavParent)
+		if a.layout.RightPanelVisible() {
+			a.layout.FocusResources()
+		}
+		var cmd tea.Cmd
+		a, cmd = a.refreshDetailPanelOrLog()
+		a.keyTrie.Reset()
+		a.envResolved = false
+		a.statusBar.SetHints(a.currentHints())
+
+		return a, cmd
+
+	// Go to hosting Node (gN): mirrors nav-parent but follows spec.nodeName via
+	// the NodeLinker interface rather than ownerReferences. Pushes the hosting
+	// Node onto the nav stack as a node-ward frame. A nil selection, a plugin
+	// without NodeLinker (e.g. non-pods), or an empty spec.nodeName (GoToNode
+	// returns a nil plugin) are all plain no-ops. In-pane drill — navFloor stays 0.
+	case command == "nav-node":
+		focused := a.layout.FocusedSplit()
+		if focused == nil {
+			return a, nil
+		}
+		sel := focused.Selected()
+		if sel == nil {
+			return a, nil
+		}
+		nl, ok := focused.Plugin().(plugin.NodeLinker)
+		if !ok {
+			return a, nil
+		}
+		nodePlugin, node := nl.GoToNode(a.clusterFor(focused), sel)
+		if nodePlugin == nil {
+			return a, nil
+		}
+		var objs []*unstructured.Unstructured
+		if node != nil {
+			objs = []*unstructured.Unstructured{node}
+		}
+		focused.PushNav(nodePlugin, objs, sel.GetName(), string(sel.GetUID()), sel.GetAPIVersion(), sel.GetKind(), ui.NavNode)
 		if a.layout.RightPanelVisible() {
 			a.layout.FocusResources()
 		}
@@ -394,8 +550,11 @@ func (a App) executeCommand(command string) (tea.Model, tea.Cmd) {
 			a.statusBar.SetHints(a.currentHints())
 			return a, nil
 		}
-		// Pop drill-down before closing panel
-		if focused := a.layout.FocusedSplit(); focused != nil && focused.InDrillDown() {
+		// Pop drill-down before closing panel. Guard on Depth>NavFloor (not
+		// InDrillDown) so a split-opened drill cannot unwind past its home frame:
+		// the nested InDrillDown re-checks below still distinguish "still drilled
+		// after pop" from "back at root".
+		if focused := a.layout.FocusedSplit(); focused != nil && focused.Depth() > focused.NavFloor() {
 			focused.PopNav()
 			// Refresh with latest data from the pane's cluster store
 			if store := a.storeFor(focused); store != nil {
@@ -1631,6 +1790,71 @@ func (a App) handleSplit(resourceName string) (tea.Model, tea.Cmd) {
 	return a, tea.Batch(populateCmd, descCmd, cmd)
 }
 
+// openDrilledSplit creates a NEW split rooted at the focused pane's CURRENT
+// plugin, then drills it exactly one level via PushNav with a nav floor so
+// Escape cannot unwind past the home drill. It is the shared tail of
+// split-children (child-ward), split-parent (parent-ward), and split-nav-node
+// (node-ward).
+//
+// The new split inherits the focused pane's context + namespace the same way
+// handleSplit does, and AddSplit self-reconciles focus to it (no hand-rolled
+// Blur/Focus). It subscribes + populates the ROOT plugin (so the home frame is
+// backed and the root GVR's informer is armed), then PushNav installs the drilled
+// subset — the drilled child/parent/node GVR was already subscribed by
+// DrillDown/DrillUp/GoToNode. Footers/context counts are synced before,
+// detail/log/hints after.
+func (a App) openDrilledSplit(
+	focused *ui.ResourceList,
+	drillPlugin plugin.ResourcePlugin,
+	objs []*unstructured.Unstructured,
+	sel *unstructured.Unstructured,
+	dir ui.NavDirection,
+) (tea.Model, tea.Cmd) {
+	if a.layout.AnyZoomed() {
+		a.layout.UnzoomAll()
+		a = a.syncIndicators()
+	}
+
+	// The new split is rooted at the CURRENT plugin, then drilled.
+	currentPlugin := focused.Plugin()
+
+	// Inherit the focused pane's context + namespace (mirrors handleSplit).
+	inheritCtx := a.contextFor(focused)
+	ns := "default"
+	if cl := a.clusterFor(focused); cl != nil && cl.Client() != nil {
+		ns = cl.Client().Namespace
+	}
+	if focused.Namespace() != "" {
+		ns = focused.Namespace()
+	}
+
+	a.keyTrie.Reset()
+	a.layout.AddSplit(currentPlugin, ns, inheritCtx)
+	a.syncPaneFooters()
+	newSplit := a.layout.FocusedSplit()
+	a.syncContextPaneCounts()
+
+	// Subscribe + populate the ROOT plugin BEFORE drilling, exactly like
+	// handleSplit does: this arms the root GVR's informer and fills the new
+	// split's live objects from the store. PushNav (below) then saves those root
+	// objects into the home frame and installs the drilled subset as the live
+	// view — so the root frame is backed even though the nav floor keeps the user
+	// from unwinding to it. (subscribeAndPopulate's SetObjects is harmless here
+	// because PushNav immediately replaces the live objects.)
+	populateCmd := a.subscribeAndPopulate(newSplit, currentPlugin, newSplit.EffectiveNamespace())
+
+	newSplit.PushNav(drillPlugin, objs, sel.GetName(), string(sel.GetUID()), sel.GetAPIVersion(), sel.GetKind(), dir)
+	newSplit.SetNavFloor(1)
+
+	a.envResolved = false
+	var descCmd tea.Cmd
+	a, descCmd = a.refreshDetailPanel()
+	var cmd tea.Cmd
+	a, cmd = a.syncLogPanel()
+	a.statusBar.SetHints(a.currentHints())
+	return a, tea.Batch(populateCmd, descCmd, cmd)
+}
+
 // contextsPlugin returns the registered synthetic contexts plugin, if present.
 func (a App) contextsPlugin() (plugin.ResourcePlugin, bool) {
 	return plugin.ByName("contexts")
@@ -1682,7 +1906,7 @@ func (a App) handleGotoContexts() (tea.Model, tea.Cmd) {
 	// parentName carries the focused pane's context purely as a label.
 	a.keyTrie.Reset()
 	a.envResolved = false
-	focused.PushNav(p, children, focused.Context(), "", "", "")
+	focused.PushNav(p, children, focused.Context(), "", "", "", ui.NavChild)
 	if a.layout.RightPanelVisible() {
 		a.layout.FocusResources()
 	}

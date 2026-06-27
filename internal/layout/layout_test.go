@@ -1480,7 +1480,7 @@ func TestUpdateSplitObjectsSkipsDrillDown(t *testing.T) {
 	l.SplitAt(0).SetObjects(initial)
 
 	// Push into drilldown state
-	l.SplitAt(0).PushNav(podsPlugin(), initial, "my-deploy", "uid-1", "", "")
+	l.SplitAt(0).PushNav(podsPlugin(), initial, "my-deploy", "uid-1", "", "", ui.NavChild)
 
 	// Try to overwrite via UpdateSplitObjects
 	allPods := []*unstructured.Unstructured{

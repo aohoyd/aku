@@ -35,12 +35,17 @@ type ResourceList struct {
 	// selectionActive (true under Focus and under BlurBorder — the detail-focused
 	// state) lives solely on table.Model; applyFocus mirrors it there and
 	// SelectionActive() reads it back, so there is no second copy to drift.
-	borderless         bool
-	width              int
-	height             int
-	contentWidth       int
-	xOffset            int
-	navStack           NavStack
+	borderless   bool
+	width        int
+	height       int
+	contentWidth int
+	xOffset      int
+	navStack     NavStack
+	// navFloor is the minimum nav-stack depth Escape's pop guard may unwind to.
+	// Default 0 (no floor). Used by split-opened drills so a split can't unwind
+	// to a root it never showed: the split's home drill sets navFloor=1 so
+	// Escape can pop frames pushed inside the split, but not the home frame.
+	navFloor           int
 	inlineSearch       string
 	contextLabel       string                 // when non-empty, rendered as a right-aligned top-border badge; "" hides it
 	offline            bool                   // when true, the context badge is colored red (offline) instead of green
@@ -357,6 +362,7 @@ func (r *ResourceList) SetPlugin(p plugin.ResourcePlugin) {
 // ResetNav clears the drill-down nav stack.
 func (r *ResourceList) ResetNav() {
 	r.navStack = NavStack{}
+	r.navFloor = 0
 	r.selected = nil
 }
 
@@ -391,6 +397,8 @@ func (r *ResourceList) ResetForReload() {
 	r.filterState.Clear()
 	r.searchState.Clear()
 	r.selected = nil
+	// Reset the Escape pop guard: a fresh root has no split-imposed floor.
+	r.navFloor = 0
 	// Clear objects — caller will repopulate via SetObjects
 	r.allObjects = nil
 	r.displayObjects = nil
@@ -497,7 +505,7 @@ func (r *ResourceList) Focused() bool {
 func (r *ResourceList) SelectionActive() bool { return r.table.SelectionActive() }
 
 // PushNav saves current state and switches to a drill-down child view.
-func (r *ResourceList) PushNav(childPlugin plugin.ResourcePlugin, children []*unstructured.Unstructured, parentName string, parentUID string, parentAPIVersion string, parentKind string) {
+func (r *ResourceList) PushNav(childPlugin plugin.ResourcePlugin, children []*unstructured.Unstructured, parentName string, parentUID string, parentAPIVersion string, parentKind string, dir NavDirection) {
 	r.selected = nil
 	r.navStack.Push(NavSnapshot{
 		Plugin:           r.plugin,
@@ -512,6 +520,7 @@ func (r *ResourceList) PushNav(childPlugin plugin.ResourcePlugin, children []*un
 		ParentName:       parentName,
 		ParentAPIVersion: parentAPIVersion,
 		ParentKind:       parentKind,
+		Direction:        dir,
 	})
 	r.SetPlugin(childPlugin)
 	r.SetObjects(children)
@@ -553,6 +562,26 @@ func (r *ResourceList) PopNav() bool {
 // InDrillDown reports whether this pane is in a drill-down child view.
 func (r *ResourceList) InDrillDown() bool {
 	return r.navStack.Depth() > 0
+}
+
+// Depth returns the number of frames on this pane's nav stack. Exposed so the
+// clear-overlay (Escape) handler can compare against NavFloor to decide whether
+// a pop is permitted (Depth > NavFloor) — distinct from InDrillDown, which keeps
+// its Depth>0 semantics for the live-refresh path.
+func (r *ResourceList) Depth() int {
+	return r.navStack.Depth()
+}
+
+// NavFloor returns the minimum nav-stack depth Escape may unwind to.
+func (r *ResourceList) NavFloor() int {
+	return r.navFloor
+}
+
+// SetNavFloor sets the minimum nav-stack depth Escape may unwind to. Split-opened
+// drills set this to 1 so Escape can pop frames pushed inside the split but not
+// the split's home drill.
+func (r *ResourceList) SetNavFloor(n int) {
+	r.navFloor = n
 }
 
 // ParentContext returns the parent resource name shown in the title during drill-down.
