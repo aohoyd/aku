@@ -1045,16 +1045,13 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgs.PortForwardStatusMsg:
 		a.pfRegistry.UpdateStatus(msg.ID, msg.Status)
+		var cmd tea.Cmd
 		switch msg.Status {
 		case portforward.StatusReady:
 			a.notify.Add(notify.LevelInfo, fmt.Sprintf("port-forward ready: localhost:%d", a.localPortForPF(msg.ID)), a.contextFor(nil), "port-forward")
-			var cmd tea.Cmd
 			if apf, ok := a.pfHandles[msg.ID]; ok {
 				cmd = watchPortForwardDone(msg.ID, apf)
 			}
-			a = a.syncIndicators()
-			a = a.refreshSelfPopulatingSplits("portforwards")
-			return a, cmd
 		case portforward.StatusError:
 			errMsg := "port-forward error"
 			if msg.Err != nil {
@@ -1063,16 +1060,13 @@ func (a App) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.notify.Add(notify.LevelError, errMsg, a.contextFor(nil), "port-forward")
 			a.pfRegistry.Remove(msg.ID)
 			delete(a.pfHandles, msg.ID)
-			a = a.syncIndicators()
-			a = a.refreshSelfPopulatingSplits("portforwards")
-			return a, nil
 		case portforward.StatusStopped:
 			a.pfRegistry.Remove(msg.ID)
 			delete(a.pfHandles, msg.ID)
 		}
 		a = a.syncIndicators()
 		a = a.refreshSelfPopulatingSplits("portforwards")
-		return a, nil
+		return a, cmd
 
 	case msgs.MessageAddedMsg:
 		// A new message landed in the notify store. The toast appears
