@@ -20,7 +20,7 @@ var (
 )
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes Deployments.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new Deployment plugin.
 func New() plugin.ResourcePlugin {
@@ -95,10 +95,6 @@ func deploymentFailing(obj *unstructured.Unstructured) bool {
 		}
 	}
 	return false
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {

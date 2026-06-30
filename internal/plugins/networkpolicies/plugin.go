@@ -17,7 +17,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "networking.k8s.io", Version: "v1", Resource: "networkpolicies"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes NetworkPolicies.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new NetworkPolicy plugin.
 func New() plugin.ResourcePlugin {
@@ -42,10 +42,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	podSelector := formatPodSelector(obj)
 	age := render.FormatAge(obj)
 	return []string{name, podSelector, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 // formatPodSelector extracts spec.podSelector.matchLabels and formats them

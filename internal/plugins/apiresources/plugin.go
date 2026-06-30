@@ -19,6 +19,7 @@ var syntheticGVR = schema.GroupVersionResource{
 
 // Plugin displays all discovered API resources in a table view.
 type Plugin struct {
+	plugin.Base
 	objects []*unstructured.Unstructured
 }
 
@@ -31,10 +32,6 @@ func (p *Plugin) Name() string                     { return "api-resources" }
 func (p *Plugin) ShortName() string                { return "api" }
 func (p *Plugin) GVR() schema.GroupVersionResource { return syntheticGVR }
 func (p *Plugin) IsClusterScoped() bool            { return true }
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
-}
 
 // SetResources stores discovery data and builds synthetic objects.
 func (p *Plugin) SetResources(resources []k8s.APIResource) {

@@ -19,6 +19,7 @@ var syntheticGVR = schema.GroupVersionResource{
 
 // Plugin displays active port-forwards in a table view.
 type Plugin struct {
+	plugin.Base
 	registry *portforward.Registry
 }
 
@@ -31,10 +32,6 @@ func (p *Plugin) Name() string                     { return "portforwards" }
 func (p *Plugin) ShortName() string                { return "pf" }
 func (p *Plugin) GVR() schema.GroupVersionResource { return syntheticGVR }
 func (p *Plugin) IsClusterScoped() bool            { return true }
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
-}
 
 func (p *Plugin) Columns() []plugin.Column {
 	return []plugin.Column{

@@ -15,7 +15,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "rolebindings"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes RoleBindings.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new RoleBindings plugin.
 func New() plugin.ResourcePlugin {
@@ -41,10 +41,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	age := render.FormatAge(obj)
 
 	return []string{name, role, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {

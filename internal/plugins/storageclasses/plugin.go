@@ -17,7 +17,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "storageclasses"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes StorageClasses.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new StorageClasses plugin.
 func New() plugin.ResourcePlugin {
@@ -57,10 +57,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	age := render.FormatAge(obj)
 
 	return []string{name, provisioner, reclaimPolicy, volumeBindingMode, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {

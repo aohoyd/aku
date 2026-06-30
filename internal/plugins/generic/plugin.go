@@ -12,6 +12,7 @@ import (
 // Plugin implements plugin.ResourcePlugin for any Kubernetes resource
 // that does not have a dedicated plugin.
 type Plugin struct {
+	plugin.Base
 	gvr           schema.GroupVersionResource
 	name          string
 	shortName     string
@@ -59,10 +60,6 @@ func (p *Plugin) Columns() []plugin.Column {
 
 func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	return []string{obj.GetName(), render.FormatAge(obj)}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (render.Content, error) {

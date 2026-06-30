@@ -52,6 +52,17 @@ func MarshalYAML(obj *unstructured.Unstructured) (render.Content, error) {
 	return render.YAML(clean.Object)
 }
 
+// Base is an embeddable struct supplying the trivial YAML method shared by
+// nearly every resource plugin. Embed it to satisfy the ResourcePlugin YAML
+// requirement without restating the one-line body; override the method for
+// custom serialisation (e.g. containers, helmreleases).
+type Base struct{}
+
+// YAML serialises obj via MarshalYAML (the default for most plugins).
+func (Base) YAML(obj *unstructured.Unstructured) (render.Content, error) {
+	return MarshalYAML(obj)
+}
+
 // ResourcePlugin is the contract every resource type must satisfy.
 type ResourcePlugin interface {
 	Name() string

@@ -59,6 +59,7 @@ const (
 // not). Keeping the count as a plain settable field avoids giving the plugin a
 // back-reference to the App and keeps Objects() free of any network traversal.
 type Plugin struct {
+	plugin.Base
 	mgr        *cluster.Manager
 	paneCounts map[string]int
 }
@@ -196,10 +197,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	server, _, _ := unstructured.NestedString(obj.Object, "server")
 	status, _, _ := unstructured.NestedString(obj.Object, "status")
 	return []string{name, clusterName, server, status}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (render.Content, error) {

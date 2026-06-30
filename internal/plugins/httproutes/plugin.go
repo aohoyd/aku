@@ -14,7 +14,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "httproutes"}
 
 // Plugin implements plugin.ResourcePlugin for Gateway API HTTPRoutes.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new HTTPRoute plugin.
 func New() plugin.ResourcePlugin {
@@ -41,10 +41,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	parentRefs := extractParentRefs(obj)
 	age := render.FormatAge(obj)
 	return []string{name, hostnames, parentRefs, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {

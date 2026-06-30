@@ -16,7 +16,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "autoscaling", Version: "v2", Resource: "horizontalpodautoscalers"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes HorizontalPodAutoscalers.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new HorizontalPodAutoscaler plugin.
 func New() plugin.ResourcePlugin {
@@ -74,10 +74,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 		fmt.Sprintf("%d", currentReplicas),
 		age,
 	}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 // formatTargets formats the metrics targets column.

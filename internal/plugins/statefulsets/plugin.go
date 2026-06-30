@@ -24,7 +24,7 @@ var (
 // It is stateless: describe/drill-down resolve their store at call time from the
 // plugin.Cluster passed in (plugin.StoreOf), so the same instance serves any
 // cluster.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new StatefulSet plugin. The client/store args are ignored — they
 // are resolved per call via plugin.Cluster — and are retained only to match the
@@ -65,10 +65,6 @@ func (p *Plugin) RowHealth(obj *unstructured.Unstructured) plugin.Health {
 	ready := int32(workload.GetInt64(obj, "status", "readyReplicas"))
 	desired := int32(workload.GetInt64(obj, "spec", "replicas"))
 	return plugin.WorkloadHealth(ready, desired)
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {

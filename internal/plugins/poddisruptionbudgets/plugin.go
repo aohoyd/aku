@@ -15,7 +15,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "policy", Version: "v1", Resource: "poddisruptionbudgets"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes PodDisruptionBudgets.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new PodDisruptionBudget plugin.
 func New() plugin.ResourcePlugin {
@@ -51,10 +51,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	age := render.FormatAge(obj)
 
 	return []string{name, minAvail, maxUnavail, disruptionsAllowed, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 // extractIntOrString tries NestedInt64 first, then NestedString, returning "N/A" if neither.

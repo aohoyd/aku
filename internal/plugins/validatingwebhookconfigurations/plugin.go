@@ -18,7 +18,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "admissionregistration.k8s.io", Version: "v1", Resource: "validatingwebhookconfigurations"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes ValidatingWebhookConfigurations.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new ValidatingWebhookConfigurations plugin.
 func New() plugin.ResourcePlugin {
@@ -53,10 +53,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	}
 	age := render.FormatAge(obj)
 	return []string{name, count, failurePolicy, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {

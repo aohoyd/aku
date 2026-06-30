@@ -14,7 +14,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version: "v1", Resource: "customresourcedefinitions"}
 
 // Plugin implements plugin.ResourcePlugin for CustomResourceDefinitions.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new CustomResourceDefinitions plugin.
 func New() plugin.ResourcePlugin {
@@ -37,10 +37,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	name := obj.GetName()
 	age := render.FormatAge(obj)
 	return []string{name, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (render.Content, error) {

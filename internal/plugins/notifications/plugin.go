@@ -29,6 +29,7 @@ var syntheticGVR = schema.GroupVersionResource{
 
 // Plugin displays aku's own messages in a table view.
 type Plugin struct {
+	plugin.Base
 	store *notify.Store
 }
 
@@ -85,10 +86,6 @@ func (p *Plugin) Objects() []*unstructured.Unstructured {
 		}
 	}
 	return objs
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (render.Content, error) {

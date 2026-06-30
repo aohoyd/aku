@@ -17,7 +17,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes ConfigMaps.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new ConfigMap plugin.
 func New() plugin.ResourcePlugin {
@@ -49,10 +49,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	age := render.FormatAge(obj)
 
 	return []string{name, fmt.Sprintf("%d", dataCount), age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {

@@ -15,7 +15,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "scheduling.k8s.io", Version: "v1", Resource: "priorityclasses"}
 
 // Plugin implements plugin.ResourcePlugin for Kubernetes PriorityClasses.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new PriorityClasses plugin.
 func New() plugin.ResourcePlugin {
@@ -51,10 +51,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	age := render.FormatAge(obj)
 
 	return []string{name, valueStr, globalDefaultStr, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {

@@ -23,7 +23,7 @@ var vapbGVR = schema.GroupVersionResource{Group: "admissionregistration.k8s.io",
 // ValidatingAdmissionPolicies. It is stateless: drill-down resolves its store at
 // call time from the plugin.Cluster passed in (plugin.StoreOf), so the same
 // instance serves any cluster.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new ValidatingAdmissionPolicies plugin. The client/store args are
 // ignored — they are resolved per call via plugin.Cluster — and are retained only
@@ -60,10 +60,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	age := render.FormatAge(obj)
 
 	return []string{name, validationCount, failurePolicy, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(ctx context.Context, obj *unstructured.Unstructured) (render.Content, error) {

@@ -13,7 +13,7 @@ import (
 var gvr = schema.GroupVersionResource{Group: "gateway.networking.k8s.io", Version: "v1", Resource: "gatewayclasses"}
 
 // Plugin implements plugin.ResourcePlugin and plugin.DrillDowner for Kubernetes GatewayClasses.
-type Plugin struct{}
+type Plugin struct{ plugin.Base }
 
 // New creates a new GatewayClasses plugin.
 func New() plugin.ResourcePlugin {
@@ -44,10 +44,6 @@ func (p *Plugin) Row(obj *unstructured.Unstructured) []string {
 	age := render.FormatAge(obj)
 
 	return []string{name, controllerName, accepted, age}
-}
-
-func (p *Plugin) YAML(obj *unstructured.Unstructured) (render.Content, error) {
-	return plugin.MarshalYAML(obj)
 }
 
 func (p *Plugin) Describe(_ context.Context, obj *unstructured.Unstructured) (render.Content, error) {
