@@ -279,16 +279,9 @@ func (m *Manager) RegisterConnected(ctx string, client *k8s.Client) (*Cluster, b
 // CURRENT pane contexts always converges to the correct counts. It replaces
 // the fragile in-flight Acquire/Release pairing for the per-pane connect flow
 // (which could imbalance under rapid re-targets). Must run on the Update
-// goroutine. Callers must pass explicit context names; empty entries are
-// ignored.
-func (m *Manager) SyncRefs(paneContexts []string) {
-	want := make(map[string]int, len(paneContexts))
-	for _, ctx := range paneContexts {
-		if ctx == "" {
-			continue
-		}
-		want[ctx]++
-	}
+// goroutine. The argument is the per-context pane count map
+// (App.distinctPaneContexts); the empty-context key, if present, is ignored.
+func (m *Manager) SyncRefs(paneContexts map[string]int) {
 	for ctx, c := range m.clusters {
 		// Pinned pseudo-contexts (e.g. "manifests") are preserved for the whole
 		// session: never torn down and never UnsubscribeAll'd, regardless of how
@@ -296,7 +289,7 @@ func (m *Manager) SyncRefs(paneContexts []string) {
 		if m.pinned[ctx] {
 			continue
 		}
-		n := want[ctx]
+		n := paneContexts[ctx]
 		c.refCount = n
 		if n <= 0 {
 			if c.store != nil {

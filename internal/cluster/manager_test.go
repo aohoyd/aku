@@ -97,7 +97,7 @@ func TestSyncRefsTearsDownAtZero(t *testing.T) {
 	if _, err := m.GetOrCreate("alpha"); err != nil {
 		t.Fatalf("GetOrCreate(alpha) err = %v", err)
 	}
-	m.SyncRefs([]string{"alpha", "alpha"})
+	m.SyncRefs(map[string]int{"alpha": 2})
 	c, ok := m.Get("alpha")
 	if !ok {
 		t.Fatal("alpha torn down with 2 referencing panes")
@@ -107,7 +107,7 @@ func TestSyncRefsTearsDownAtZero(t *testing.T) {
 	}
 
 	// Drop to one referencing pane: still present, count 1.
-	m.SyncRefs([]string{"alpha"})
+	m.SyncRefs(map[string]int{"alpha": 1})
 	c, ok = m.Get("alpha")
 	if !ok {
 		t.Fatal("alpha torn down with 1 referencing pane")
@@ -136,7 +136,7 @@ func TestSyncRefsTearsDownStartupClusterAtZero(t *testing.T) {
 	}
 
 	// Panes have all moved to another context; nothing references startup.
-	m.SyncRefs([]string{"other"})
+	m.SyncRefs(map[string]int{"other": 1})
 	if _, ok := m.Get("startup"); ok {
 		t.Error("startup cluster still present after no pane references it (no global exemption)")
 	}
@@ -152,7 +152,7 @@ func TestSyncRefsKeepsReferencedAndIgnoresEmpty(t *testing.T) {
 	}
 
 	// "home" referenced, plus a stray empty entry that must be ignored.
-	m.SyncRefs([]string{"home", ""})
+	m.SyncRefs(map[string]int{"home": 1, "": 1})
 	c, ok := m.Get("home")
 	if !ok {
 		t.Fatalf("home torn down despite a referencing pane")
@@ -162,7 +162,7 @@ func TestSyncRefsKeepsReferencedAndIgnoresEmpty(t *testing.T) {
 	}
 
 	// Only empty entries: home is no longer referenced and is torn down.
-	m.SyncRefs([]string{""})
+	m.SyncRefs(map[string]int{"": 1})
 	if _, ok := m.Get("home"); ok {
 		t.Error("home still present when only empty entries reference it")
 	}
@@ -453,7 +453,7 @@ func TestRegisterPinnedSurvivesSyncRefs(t *testing.T) {
 	}
 
 	// SyncRefs with a pane set that does NOT include "manifests" (zero refs).
-	m.SyncRefs([]string{"other"})
+	m.SyncRefs(map[string]int{"other": 1})
 
 	got, ok := m.Get("manifests")
 	if !ok {
@@ -504,7 +504,7 @@ func TestSyncRefsStillTearsDownNonPinned(t *testing.T) {
 	// A normal connected cluster with zero referencing panes must still go away.
 	if _, _ = m.RegisterConnected("normal", &k8s.Client{Context: "normal"}); false {
 	}
-	m.SyncRefs([]string{"other"})
+	m.SyncRefs(map[string]int{"other": 1})
 	if _, ok := m.Get("normal"); ok {
 		t.Error("non-pinned zero-ref cluster survived SyncRefs (pinning leaked exemption)")
 	}

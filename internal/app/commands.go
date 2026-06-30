@@ -1476,7 +1476,7 @@ func (a App) closeFocusedSplit() (App, tea.Cmd) {
 		// that cluster down. There is no informer/store tied to a terminal pane,
 		// so only the cluster-refcount reconcile applies (no unsubscribe). Done
 		// AFTER CloseCurrentSplit so the just-closed pane is no longer counted.
-		a.mgr.SyncRefs(a.paneContexts())
+		a.mgr.SyncRefs(a.distinctPaneContexts())
 		a.syncTerminalSizes()
 		// Re-derive context badges against the remaining panes: closing a pane can
 		// drop the pane set back to a single context, in which case the badge must
@@ -1509,7 +1509,7 @@ func (a App) closeFocusedSplit() (App, tea.Cmd) {
 
 	// Reconcile manager refcounts against the remaining panes; a cluster no
 	// remaining pane references is torn down here (no global exemption).
-	a.mgr.SyncRefs(a.paneContexts())
+	a.mgr.SyncRefs(a.distinctPaneContexts())
 
 	// Re-derive context badges against the remaining panes: closing a pane can
 	// drop the pane set back to a single context, in which case the badge must
@@ -2407,7 +2407,7 @@ func (a App) handleGroupContextSwitch(ctx string) (tea.Model, tea.Cmd) {
 	// cluster may not be in the Manager yet (still dialing); SyncRefs counts what
 	// it can now and is called again in handleClusterReady once the dial returns.
 	// If the old context group is now empty, its cluster is torn down here.
-	a.mgr.SyncRefs(a.paneContexts())
+	a.mgr.SyncRefs(a.distinctPaneContexts())
 
 	// Clean up informers on the OLD store that no retargeted pane needs anymore.
 	// If the old cluster still has panes it remains live; SyncRefs above tore it
@@ -2499,7 +2499,7 @@ func asyncConnectCmd(mgr *cluster.Manager, ctxName string) tea.Cmd {
 // bar.
 //
 // Refcount bookkeeping is reconciliation-based (idempotent, order-independent):
-// after every switch/close we call Manager.SyncRefs(paneContexts()), which makes
+// after every switch/close we call Manager.SyncRefs(distinctPaneContexts()), which makes
 // each cluster's refCount equal the number of panes currently on it and tears
 // down any cluster with zero referencing panes. This is robust under rapid
 // re-switches and focus changes: a stale ClusterReadyMsg for a context no pane
@@ -2557,7 +2557,7 @@ func (a App) handlePaneContextSwitch(ctxName string) (tea.Model, tea.Cmd) {
 	// and is called again in handleClusterReady once the dial returns. The cluster
 	// the pane just left (its old context) that no other pane references is torn
 	// down here.
-	a.mgr.SyncRefs(a.paneContexts())
+	a.mgr.SyncRefs(a.distinctPaneContexts())
 
 	// The focused pane now carries ctxName, so reflect it in the status bar
 	// (offline until the dial resolves in handleClusterReady).
@@ -2586,7 +2586,7 @@ func (a App) switchPaneToPinned(focused *ui.ResourceList, ctxName string) (tea.M
 
 	// Reconcile refcounts against the panes' new contexts; tears down the cluster
 	// the pane just left if no other pane references it.
-	a.mgr.SyncRefs(a.paneContexts())
+	a.mgr.SyncRefs(a.distinctPaneContexts())
 
 	// Populate from the static store (returns nil cmd for a client-less store).
 	cmd := a.subscribeAndPopulate(focused, focused.Plugin(), focused.EffectiveNamespace())
@@ -2630,7 +2630,7 @@ func (a App) switchGroupToPinned(target, ctxName string) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	a.mgr.SyncRefs(a.paneContexts())
+	a.mgr.SyncRefs(a.distinctPaneContexts())
 
 	// Clean up informers on the OLD store that no retargeted pane needs anymore.
 	if oldStore != nil {
@@ -2644,21 +2644,6 @@ func (a App) switchGroupToPinned(target, ctxName string) (tea.Model, tea.Cmd) {
 	a.statusBar.SetHints(a.currentHints())
 	a = a.syncIndicators()
 	return a, tea.Batch(cmds...)
-}
-
-// paneContexts returns the multiset of contexts currently referenced by some
-// pane — the authoritative input to Manager.SyncRefs. A pane contributes its
-// context iff that context is non-empty. It is the keys-with-repetition view of
-// distinctPaneContexts (which carries per-context counts).
-func (a App) paneContexts() []string {
-	counts := a.distinctPaneContexts()
-	ctxs := make([]string, 0, len(counts))
-	for ctx, n := range counts {
-		for i := 0; i < n; i++ {
-			ctxs = append(ctxs, ctx)
-		}
-	}
-	return ctxs
 }
 
 // handleClusterReady completes a per-pane connect once the async connect cmd
@@ -2677,7 +2662,7 @@ func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 		// dial registers no cluster, syncPaneFooters leaves this marker in place
 		// (only a connected cluster clears it), and it recovers automatically when
 		// a later successful connect/heartbeat marks the cluster connected.
-		a.mgr.SyncRefs(a.paneContexts())
+		a.mgr.SyncRefs(a.distinctPaneContexts())
 		for i := range a.layout.SplitCount() {
 			split := a.layout.SplitAt(i)
 			if split != nil && split.Context() == msg.Context {
@@ -2705,7 +2690,7 @@ func (a App) handleClusterReady(msg msgs.ClusterReadyMsg) (tea.Model, tea.Cmd) {
 	// that no remaining pane references (no global exemption). If no pane
 	// references msg.Context anymore (the requester retargeted elsewhere), this
 	// tears the just-registered cluster back down — no leak.
-	a.mgr.SyncRefs(a.paneContexts())
+	a.mgr.SyncRefs(a.distinctPaneContexts())
 
 	if cl == nil || !cl.Connected() {
 		// The just-registered cluster is gone or not connected (e.g. SyncRefs tore

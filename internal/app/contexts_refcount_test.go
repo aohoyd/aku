@@ -63,7 +63,7 @@ func TestDistinctPaneContexts_CountsByContext(t *testing.T) {
 
 // TestSyncRefsTearsDownContextWithZeroPanes verifies the app-level lifecycle:
 // after a pane stops referencing a context (and no other pane references it),
-// SyncRefs(paneContexts()) tears that cluster down, while a still-referenced
+// SyncRefs(distinctPaneContexts()) tears that cluster down, while a still-referenced
 // context survives.
 func TestSyncRefsTearsDownContextWithZeroPanes(t *testing.T) {
 	a := appWithManager(t, "ctx-a", "ctx-b")
@@ -76,14 +76,14 @@ func TestSyncRefsTearsDownContextWithZeroPanes(t *testing.T) {
 		t.Fatalf("GetOrCreate(ctx-b) err = %v", err)
 	}
 
-	a.mgr.SyncRefs(a.paneContexts())
+	a.mgr.SyncRefs(a.distinctPaneContexts())
 	if _, ok := a.mgr.Get("ctx-b"); !ok {
 		t.Fatalf("ctx-b torn down while a pane still references it")
 	}
 
 	// Move the second pane back to ctx-a: ctx-b now has zero panes and is removed.
 	a.layout.SplitAt(1).SetContext("ctx-a")
-	a.mgr.SyncRefs(a.paneContexts())
+	a.mgr.SyncRefs(a.distinctPaneContexts())
 	if _, ok := a.mgr.Get("ctx-b"); ok {
 		t.Errorf("ctx-b still present after zero panes reference it")
 	}

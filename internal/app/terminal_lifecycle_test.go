@@ -213,7 +213,7 @@ func TestCloseTerminalPane_ReleasesLastReferencedCluster(t *testing.T) {
 	a.syncTerminalSizes()
 
 	// Reconcile so staging's refcount reflects the new terminal pane.
-	a.mgr.SyncRefs(a.paneContexts())
+	a.mgr.SyncRefs(a.distinctPaneContexts())
 	if _, ok := mgr.Get("staging"); !ok {
 		t.Fatalf("precondition: expected staging cluster present with a terminal pane referencing it")
 	}
