@@ -1962,45 +1962,18 @@ func (a App) handlePaneSwitchContext(ctxName string) (tea.Model, tea.Cmd) {
 }
 
 func (a App) handleView(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
-	_, _, ok := a.focusedSelection()
-	if !ok {
-		return a, nil
-	}
-
-	a.lastDetailKey = ""
-
-	// Guard: only pods/containers support logs
-	if mode == msgs.DetailLogs {
-		focused := a.layout.FocusedSplit()
-		if focused == nil || !isLoggablePlugin(focused.Plugin().Name()) {
-			return a, nil
-		}
-	}
-
-	if mode != msgs.DetailDescribe {
-		a.envResolved = false
-	}
-
-	// Switching away from log mode
-	if mode != msgs.DetailLogs {
-		a = a.stopLogStream()
-		a.layout.SetLogMode(false)
-	}
-
-	if mode == msgs.DetailLogs {
-		a.layout.SetLogMode(true)
-		a.layout.ShowRightPanel()
-		return a.startLogViewForSelected()
-	}
-
-	a.layout.ShowRightPanel()
-	panel := a.layout.RightPanel()
-	panel.SetMode(mode)
-	a, cmd := a.refreshDetailPanel()
-	return a, cmd
+	return a.handleViewMode(mode, false)
 }
 
 func (a App) handleViewFocused(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
+	return a.handleViewMode(mode, true)
+}
+
+// handleViewMode switches the detail panel into mode. When focus is true it
+// additionally moves keyboard focus into the detail panel and refreshes the
+// status-bar hints (the only difference between handleView and
+// handleViewFocused).
+func (a App) handleViewMode(mode msgs.DetailMode, focus bool) (tea.Model, tea.Cmd) {
 	_, _, ok := a.focusedSelection()
 	if !ok {
 		return a, nil
@@ -2030,6 +2003,9 @@ func (a App) handleViewFocused(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
 		a.layout.SetLogMode(true)
 		a.layout.ShowRightPanel()
 		model, cmd := a.startLogViewForSelected()
+		if !focus {
+			return model, cmd
+		}
 		app := model.(App)
 		app.layout.FocusDetails()
 		app.statusBar.SetHints(app.currentHints())
@@ -2038,11 +2014,12 @@ func (a App) handleViewFocused(mode msgs.DetailMode) (tea.Model, tea.Cmd) {
 
 	a.layout.ShowRightPanel()
 	a.layout.RightPanel().SetMode(mode)
-	var descCmd tea.Cmd
-	a, descCmd = a.refreshDetailPanel()
-	a.layout.FocusDetails()
-	a.statusBar.SetHints(a.currentHints())
-	return a, descCmd
+	a, cmd := a.refreshDetailPanel()
+	if focus {
+		a.layout.FocusDetails()
+		a.statusBar.SetHints(a.currentHints())
+	}
+	return a, cmd
 }
 
 // handleViewHelmValues switches the detail panel into a Helm values mode
