@@ -7,6 +7,7 @@
 package notify
 
 import (
+	"slices"
 	"sync"
 	"time"
 
@@ -147,7 +148,10 @@ func (s *Store) Add(level Level, text, ctx, source string) Message {
 func (s *Store) List() []Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return reverseCopy(s.msgs)
+	out := make([]Message, len(s.msgs))
+	copy(out, s.msgs)
+	slices.Reverse(out)
+	return out
 }
 
 // Live returns newest-first messages still considered live at now. A message is
@@ -164,15 +168,6 @@ func (s *Store) Live(now time.Time, ttl func(Level) time.Duration) []Message {
 		if d == Sticky || now.Sub(m.Time) < d {
 			out = append(out, m)
 		}
-	}
-	return out
-}
-
-// reverseCopy returns a newest-first copy of src without aliasing it.
-func reverseCopy(src []Message) []Message {
-	out := make([]Message, len(src))
-	for i, m := range src {
-		out[len(src)-1-i] = m
 	}
 	return out
 }
